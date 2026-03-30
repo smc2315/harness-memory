@@ -1,0 +1,8 @@
+{
+  "task_id": 5,
+  "title": "Session Start - Conflicting Decisions",
+  "baseline_condition": "md_only",
+  "miss_type": "policy_miss",
+  "severity": "medium",
+  "notes": "Conflicting Zod vs Valibot decisions remain unresolved in markdown; baseline likely picks one arbitrarily or mixes both patterns."
+}

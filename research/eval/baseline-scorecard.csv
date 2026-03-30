@@ -1,0 +1,13 @@
+task_id,baseline_condition,miss_type,severity,notes
+1,md_only,policy_miss,high,"Missed repository-pattern architecture constraint for routes; likely writes inline SQLite access in src/routes/preferences.ts instead of using a repository boundary."
+2,md_only,stale_memory,medium,"Markdown likely surfaces the old bun-test preference before the newer vitest decision, causing mixed or outdated test workflow guidance."
+3,md_only,policy_miss,critical,"Missed no-secrets policy before writing .env.local; baseline likely creates a real-secrets env file or omits .gitignore protection."
+4,md_only,policy_miss,high,"Missed pitfall about awaiting save calls; baseline likely writes user.save() without await and introduces a latent correctness bug."
+5,md_only,policy_miss,medium,"Conflicting Zod vs Valibot decisions remain unresolved in markdown; baseline likely picks one arbitrarily or mixes both patterns."
+6,md_only,none,low,"Negative control: migration policy is out of scope for src/utils/date-helpers.ts, so no activation or warning is expected."
+7,md_only,none,low,"Baseline may fix the export bug but does not create durable evidence or promotion suggestions; treated as a coverage gap rather than a scored miss."
+8,md_only,policy_miss,high,"Missed timeout-and-retry policy for external CRM calls; baseline likely writes a bare API call without reliability safeguards."
+9,md_only,none,low,"Negative control: stale fs.readFileSync pitfall should remain suppressed after async refactor, so no scored miss is expected."
+10,md_only,policy_miss,critical,"Missed GDPR email-consent policy; baseline likely exposes user email by default in the admin response."
+11,md_only,policy_miss,high,"Missed deploy workflow + main-branch safety guidance; baseline likely omits test gate or branch restriction in the workflow."
+12,md_only,none,low,"Budget-overflow scenario validates activation behavior rather than a baseline user-facing miss; markdown-only condition has no structured budget to compare here."

@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.harness-memory/
+tmp/
+*.tgz
+*.pyc
+__pycache__/
+coverage/
+.DS_Store

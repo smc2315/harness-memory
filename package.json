@@ -1,0 +1,97 @@
+{
+  "name": "harness-memory",
+  "version": "0.2.1",
+  "description": "Project memory layer for coding harnesses",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./activation": {
+      "types": "./dist/activation/index.d.ts",
+      "import": "./dist/activation/index.js"
+    },
+    "./adapters": {
+      "types": "./dist/adapters/index.d.ts",
+      "import": "./dist/adapters/index.js"
+    },
+    "./db": {
+      "types": "./dist/db/index.d.ts",
+      "import": "./dist/db/index.js"
+    },
+    "./dream": {
+      "types": "./dist/dream/index.d.ts",
+      "import": "./dist/dream/index.js"
+    },
+    "./eval": {
+      "types": "./dist/eval/index.d.ts",
+      "import": "./dist/eval/index.js"
+    },
+    "./memory": {
+      "types": "./dist/memory/index.d.ts",
+      "import": "./dist/memory/index.js"
+    },
+    "./policy": {
+      "types": "./dist/policy/index.d.ts",
+      "import": "./dist/policy/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "harness-memory": "dist/bin/harness-memory.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "project-memory",
+    "coding-harness",
+    "sqlite",
+    "activation",
+    "policy"
+  ],
+  "scripts": {
+    "build": "tsup --config tsup.config.ts && node scripts/copy-assets.mjs",
+    "adapter:test": "node dist/cli/adapter-test.js",
+    "db:migrate": "node dist/cli/migrate.js",
+    "db:inspect": "node dist/cli/inspect.js",
+    "dream:run": "node dist/cli/dream-run.js",
+    "eval:baseline": "node dist/cli/eval-baseline.js",
+    "eval:memory": "node dist/cli/eval-memory.js",
+    "init": "node dist/cli/init.js",
+    "memory:add": "node dist/cli/memory-add.js",
+    "memory:export": "node dist/cli/memory-export.js",
+    "memory:history": "node dist/cli/memory-history.js",
+    "memory:list": "node dist/cli/memory-list.js",
+    "memory:promote": "node dist/cli/memory-promote.js",
+    "memory:reject": "node dist/cli/memory-reject.js",
+    "memory:review": "node dist/cli/memory-review.js",
+    "memory:stats": "node dist/cli/memory-stats.js",
+    "memory:why": "node dist/cli/memory-why.js",
+    "package:pack": "npm pack",
+    "package:verify": "node scripts/verify-packed-install.mjs",
+    "prepack": "npm run build",
+    "fixtures:add-conflict": "node dist/cli/fixtures-add-conflict.js",
+    "fixtures:add-duplicate-memory": "node dist/cli/fixtures-add-duplicate-memory.js",
+    "fixtures:add-policy-rules": "node dist/cli/fixtures-add-policy-rules.js",
+    "policy:check": "node dist/cli/policy-check.js",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "minimatch": "^10.0.1",
+    "sql.js": "^1.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

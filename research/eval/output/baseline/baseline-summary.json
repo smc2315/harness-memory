@@ -1,0 +1,32 @@
+{
+  "condition": "md-only",
+  "generatedAt": "2026-03-28T16:32:49.066Z",
+  "outputDir": "research/eval/output/baseline",
+  "scenarioCount": 12,
+  "importantPolicyMisses": 6,
+  "byMissType": {
+    "none": 4,
+    "policy_miss": 7,
+    "stale_memory": 1
+  },
+  "bySeverity": {
+    "critical": 2,
+    "high": 4,
+    "low": 4,
+    "medium": 2
+  },
+  "scenarioFiles": [
+    "research/eval/output/baseline/baseline-s01.json",
+    "research/eval/output/baseline/baseline-s02.json",
+    "research/eval/output/baseline/baseline-s03.json",
+    "research/eval/output/baseline/baseline-s04.json",
+    "research/eval/output/baseline/baseline-s05.json",
+    "research/eval/output/baseline/baseline-s06.json",
+    "research/eval/output/baseline/baseline-s07.json",
+    "research/eval/output/baseline/baseline-s08.json",
+    "research/eval/output/baseline/baseline-s09.json",
+    "research/eval/output/baseline/baseline-s10.json",
+    "research/eval/output/baseline/baseline-s11.json",
+    "research/eval/output/baseline/baseline-s12.json"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "task_id": 6,
+  "title": "Before Tool - Scope Mismatch (No Activation)",
+  "baseline_condition": "md_only",
+  "miss_type": "none",
+  "severity": "low",
+  "notes": "Negative control: migration policy is out of scope for src/utils/date-helpers.ts, so no activation or warning is expected."
+}
