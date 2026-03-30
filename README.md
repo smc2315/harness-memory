@@ -31,7 +31,13 @@ From a packed tarball:
 
 ```bash
 npm pack
-npm install ./harness-memory-0.1.0.tgz
+npm install ./harness-memory-0.2.1.tgz
+```
+
+GitHub repository:
+
+```text
+https://github.com/smc2315/harness-memory
 ```
 
 ## Import

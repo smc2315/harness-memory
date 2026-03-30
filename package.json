@@ -57,6 +57,14 @@
     "activation",
     "policy"
   ],
+  "homepage": "https://github.com/smc2315/harness-memory#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/smc2315/harness-memory.git"
+  },
+  "bugs": {
+    "url": "https://github.com/smc2315/harness-memory/issues"
+  },
   "scripts": {
     "build": "tsup --config tsup.config.ts && node scripts/copy-assets.mjs",
     "adapter:test": "node dist/cli/adapter-test.js",
