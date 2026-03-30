@@ -61,7 +61,38 @@ function buildDreamTopicGuess(
   typeGuess: "policy" | "workflow" | "pitfall" | "architecture_constraint" | "decision"
 ): string {
   const normalizedScope = scopeRef.replace(/\\/g, "/");
-  return `${typeGuess}:${input.tool}:${normalizedScope}`;
+  const text = `${input.tool} ${excerpt}`.toLowerCase();
+
+  if (typeGuess === "pitfall") {
+    const signature =
+      text.match(/(enoent|eaddr|refused|timeout|assertion|not found|permission|secret)/)?.[1] ??
+      input.tool;
+    return `${typeGuess}:${normalizedScope}:${signature}`;
+  }
+
+  if (typeGuess === "policy") {
+    const signature =
+      text.match(/(gdpr|consent|secret|permission|warning|forbid|compliance)/)?.[1] ??
+      "policy";
+    return `${typeGuess}:${normalizedScope}:${signature}`;
+  }
+
+  if (typeGuess === "decision") {
+    const signature =
+      text.match(/(switch to|migrate to|use .* instead|standardize)/)?.[1]?.replace(/\s+/g, "-") ??
+      input.tool;
+    return `${typeGuess}:${normalizedScope}:${signature}`;
+  }
+
+  if (typeGuess === "architecture_constraint") {
+    const signature =
+      text.match(/(repository|adapter|boundary|interface|layer|constraint)/)?.[1] ??
+      "structure";
+    return `${typeGuess}:${normalizedScope}:${signature}`;
+  }
+
+  const workflowSignature = /passed|resolved|fixed|migrated/.test(text) ? "verified-flow" : input.tool;
+  return `${typeGuess}:${normalizedScope}:${workflowSignature}`;
 }
 
 function inferDreamTypeGuess(

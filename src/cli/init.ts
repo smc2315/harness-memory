@@ -80,7 +80,7 @@ function createOpencodeCommands(dbRelativePath: string): Record<string, string> 
   return {
     "harness-memory-init.md": createOpencodeCommand(
       "Initialize harness-memory in this project",
-      `Run \`npx harness-memory init --db ${dbRelativePath} --write-opencode-commands\` in the current project root. If the project is already initialized, inspect and summarize the current setup instead of overwriting files.`
+      `Run \`npx harness-memory init --db ${dbRelativePath}\` in the current project root. If the project is already initialized, inspect and summarize the current setup instead of overwriting files.`
     ),
     "harness-memory-dream.md": createOpencodeCommand(
       "Run a manual harness-memory dream consolidation",

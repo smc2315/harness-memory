@@ -10,6 +10,7 @@ import {
 import {
   createDeterministicId,
   createMemoryContentHash,
+  createMemoryIdentityKey,
   createMemoryId,
   parseLifecycleTriggers,
   serializeLifecycleTriggers,
@@ -21,6 +22,7 @@ type SqlParameters = Record<string, SqlParameter>;
 const MEMORY_SELECT_COLUMNS = [
   "id",
   "content_hash",
+  "identity_key",
   "type",
   "summary",
   "details",
@@ -70,6 +72,7 @@ const EVIDENCE_SOURCE_KINDS = new Set<EvidenceSourceKind>([
 export interface MemoryRecord {
   id: string;
   contentHash: string;
+  identityKey: string | null;
   type: MemoryType;
   summary: string;
   details: string;
@@ -370,11 +373,13 @@ export class MemoryRepository {
   }
 
   createOrGet(input: CreateMemoryInput): CreateMemoryResult {
-    const contentHash = createMemoryContentHash({
+    const existing = this.findExactDuplicate({
+      type: input.type,
       summary: input.summary,
       details: input.details,
+      scopeGlob: input.scopeGlob,
+      lifecycleTriggers: input.lifecycleTriggers,
     });
-    const existing = this.getByContentHash(contentHash);
 
     if (existing !== null) {
       return {
@@ -390,26 +395,40 @@ export class MemoryRepository {
   }
 
   create(input: CreateMemoryInput): MemoryRecord {
+    const identityKey = createMemoryIdentityKey({
+      type: input.type,
+      summary: input.summary,
+      details: input.details,
+      scopeGlob: input.scopeGlob,
+      lifecycleTriggers: input.lifecycleTriggers,
+    });
     const contentHash = createMemoryContentHash({
       summary: input.summary,
       details: input.details,
     });
-    const existing = this.getByContentHash(contentHash);
+    const existing = this.findExactDuplicate({
+      type: input.type,
+      summary: input.summary,
+      details: input.details,
+      scopeGlob: input.scopeGlob,
+      lifecycleTriggers: input.lifecycleTriggers,
+    });
 
     if (existing !== null) {
-      throw new DuplicateMemoryContentError(contentHash, existing.id);
+      throw new DuplicateMemoryContentError(identityKey, existing.id);
     }
 
     const now = new Date().toISOString();
     const createdAt = input.createdAt ?? now;
     const updatedAt = input.updatedAt ?? createdAt;
-    const id = input.id ?? createMemoryId(contentHash);
+    const id = input.id ?? createMemoryId(identityKey);
 
     this.db.run(
       `
         INSERT INTO memories (
           id,
           content_hash,
+          identity_key,
           type,
           summary,
           details,
@@ -426,6 +445,7 @@ export class MemoryRepository {
         VALUES (
           $id,
           $contentHash,
+          $identityKey,
           $type,
           $summary,
           $details,
@@ -443,6 +463,7 @@ export class MemoryRepository {
       {
         $id: id,
         $contentHash: contentHash,
+        $identityKey: identityKey,
         $type: input.type,
         $summary: input.summary,
         $details: input.details,
@@ -484,6 +505,13 @@ export class MemoryRepository {
     return this.selectOne(
       `SELECT ${MEMORY_SELECT_COLUMNS} FROM memories WHERE content_hash = $contentHash`,
       { $contentHash: contentHash }
+    );
+  }
+
+  getByIdentityKey(identityKey: string): MemoryRecord | null {
+    return this.selectOne(
+      `SELECT ${MEMORY_SELECT_COLUMNS} FROM memories WHERE identity_key = $identityKey`,
+      { $identityKey: identityKey }
     );
   }
 
@@ -774,11 +802,27 @@ export class MemoryRepository {
 
     const summary = input.summary ?? existing.summary;
     const details = input.details ?? existing.details;
+    const type = input.type ?? existing.type;
+    const scopeGlob = input.scopeGlob ?? existing.scopeGlob;
+    const lifecycleTriggers = input.lifecycleTriggers ?? existing.lifecycleTriggers;
     const contentHash = createMemoryContentHash({ summary, details });
-    const duplicate = this.getByContentHash(contentHash);
+    const identityKey = createMemoryIdentityKey({
+      type,
+      summary,
+      details,
+      scopeGlob,
+      lifecycleTriggers,
+    });
+    const duplicate = this.findExactDuplicate({
+      type,
+      summary,
+      details,
+      scopeGlob,
+      lifecycleTriggers,
+    });
 
     if (duplicate !== null && duplicate.id !== id) {
-      throw new DuplicateMemoryContentError(contentHash, duplicate.id);
+      throw new DuplicateMemoryContentError(identityKey, duplicate.id);
     }
 
     this.db.run(
@@ -786,6 +830,7 @@ export class MemoryRepository {
         UPDATE memories
         SET
           content_hash = $contentHash,
+          identity_key = $identityKey,
           type = $type,
           summary = $summary,
           details = $details,
@@ -802,13 +847,12 @@ export class MemoryRepository {
       {
         $id: id,
         $contentHash: contentHash,
-        $type: input.type ?? existing.type,
+        $identityKey: identityKey,
+        $type: type,
         $summary: summary,
         $details: details,
-        $scopeGlob: input.scopeGlob ?? existing.scopeGlob,
-        $lifecycleTriggers: serializeLifecycleTriggers(
-          input.lifecycleTriggers ?? existing.lifecycleTriggers
-        ),
+        $scopeGlob: scopeGlob,
+        $lifecycleTriggers: serializeLifecycleTriggers(lifecycleTriggers),
         $confidence: normalizeScore(
           input.confidence ?? existing.confidence,
           "confidence"
@@ -1039,21 +1083,47 @@ export class MemoryRepository {
     return {
       id: expectString(row[0], "id"),
       contentHash: expectString(row[1], "content_hash"),
-      type: expectMemoryType(row[2]),
-      summary: expectString(row[3], "summary"),
-      details: expectString(row[4], "details"),
-      scopeGlob: expectString(row[5], "scope_glob"),
+      identityKey: expectNullableString(row[2], "identity_key"),
+      type: expectMemoryType(row[3]),
+      summary: expectString(row[4], "summary"),
+      details: expectString(row[5], "details"),
+      scopeGlob: expectString(row[6], "scope_glob"),
       lifecycleTriggers: parseLifecycleTriggers(
-        expectString(row[6], "lifecycle_triggers")
+        expectString(row[7], "lifecycle_triggers")
       ),
-      confidence: expectNumber(row[7], "confidence"),
-      importance: expectNumber(row[8], "importance"),
-      status: expectMemoryStatus(row[9]),
-      supersedesMemoryId: expectNullableString(row[10], "supersedes_memory_id"),
-      createdAt: expectString(row[11], "created_at"),
-      updatedAt: expectString(row[12], "updated_at"),
-      lastVerifiedAt: expectNullableString(row[13], "last_verified_at"),
+      confidence: expectNumber(row[8], "confidence"),
+      importance: expectNumber(row[9], "importance"),
+      status: expectMemoryStatus(row[10]),
+      supersedesMemoryId: expectNullableString(row[11], "supersedes_memory_id"),
+      createdAt: expectString(row[12], "created_at"),
+      updatedAt: expectString(row[13], "updated_at"),
+      lastVerifiedAt: expectNullableString(row[14], "last_verified_at"),
     };
+  }
+
+  private findExactDuplicate(input: {
+    type: MemoryType;
+    summary: string;
+    details: string;
+    scopeGlob: string;
+    lifecycleTriggers: readonly LifecycleTrigger[];
+  }): MemoryRecord | null {
+    return this.selectOne(
+      `SELECT ${MEMORY_SELECT_COLUMNS}
+       FROM memories
+       WHERE type = $type
+         AND summary = $summary
+         AND details = $details
+         AND scope_glob = $scopeGlob
+         AND lifecycle_triggers = $lifecycleTriggers`,
+      {
+        $type: input.type,
+        $summary: input.summary,
+        $details: input.details,
+        $scopeGlob: input.scopeGlob,
+        $lifecycleTriggers: serializeLifecycleTriggers(input.lifecycleTriggers),
+      }
+    );
   }
 
   private mapEvidenceRow(row: unknown[]): EvidenceRecord {

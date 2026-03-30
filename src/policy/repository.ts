@@ -92,7 +92,18 @@ export class PolicyRuleRepository {
       "ORDER BY created_at ASC, id ASC",
     ].filter((clause) => clause.length > 0);
 
-    return this.selectMany(clauses.join(" "), params);
+    const baseSql = clauses.join(" ");
+    const sql = baseSql.includes("WHERE")
+      ? baseSql.replace(
+          "WHERE",
+          "WHERE (memory_id IS NULL OR EXISTS (SELECT 1 FROM memories m WHERE m.id = policy_rules.memory_id AND m.status = 'active')) AND"
+        )
+      : `${baseSql.replace(
+          `SELECT ${POLICY_RULE_SELECT_COLUMNS} FROM policy_rules`,
+          `SELECT ${POLICY_RULE_SELECT_COLUMNS} FROM policy_rules WHERE (memory_id IS NULL OR EXISTS (SELECT 1 FROM memories m WHERE m.id = policy_rules.memory_id AND m.status = 'active'))`
+        )}`;
+
+    return this.selectMany(sql, params);
   }
 
   /**

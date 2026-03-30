@@ -1,6 +1,6 @@
 import { createHash } from "crypto";
 
-import type { LifecycleTrigger } from "../db/schema/types";
+import type { LifecycleTrigger, MemoryType } from "../db/schema/types";
 
 const LIFECYCLE_TRIGGER_ORDER: readonly LifecycleTrigger[] = [
   "session_start",
@@ -18,6 +18,12 @@ const LIFECYCLE_TRIGGER_SET = new Set<string>(LIFECYCLE_TRIGGER_ORDER);
 export interface MemoryContentInput {
   summary: string;
   details: string;
+}
+
+export interface MemoryIdentityInput extends MemoryContentInput {
+  type: MemoryType;
+  scopeGlob: string;
+  lifecycleTriggers: readonly LifecycleTrigger[];
 }
 
 function normalizeContentText(value: string): string {
@@ -84,6 +90,18 @@ export function createMemoryContentHash(input: MemoryContentInput): string {
   const normalized = JSON.stringify({
     summary: normalizeContentText(input.summary),
     details: normalizeContentText(input.details),
+  });
+
+  return createHash("sha256").update(normalized, "utf8").digest("hex");
+}
+
+export function createMemoryIdentityKey(input: MemoryIdentityInput): string {
+  const normalized = JSON.stringify({
+    type: input.type,
+    summary: normalizeContentText(input.summary),
+    details: normalizeContentText(input.details),
+    scopeGlob: normalizeContentText(input.scopeGlob),
+    lifecycleTriggers: sortLifecycleTriggers(input.lifecycleTriggers),
   });
 
   return createHash("sha256").update(normalized, "utf8").digest("hex");

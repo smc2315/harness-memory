@@ -11,6 +11,7 @@
 export interface Memory {
   id: string; // UUID
   content_hash: string; // SHA256 hash for deduplication
+  identity_key: string | null; // exact identity across type/scope/lifecycle
   type: 'policy' | 'workflow' | 'pitfall' | 'architecture_constraint' | 'decision';
   summary: string;
   details: string;

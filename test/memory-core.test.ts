@@ -140,6 +140,32 @@ describe("MemoryRepository", () => {
     ).toThrow(DuplicateMemoryContentError);
   });
 
+  test("allows same text when scope differs", () => {
+    const first = repository.create({
+      type: "policy",
+      summary: "Prefer explicit adapters",
+      details: "Keep repository and adapter boundaries thin.",
+      scopeGlob: "src/core/**/*.ts",
+      lifecycleTriggers: ["before_model"],
+      status: "active",
+      createdAt: "2026-03-28T00:00:00.000Z",
+      updatedAt: "2026-03-28T00:00:00.000Z",
+    });
+    const second = repository.create({
+      type: "policy",
+      summary: "Prefer explicit adapters",
+      details: "Keep repository and adapter boundaries thin.",
+      scopeGlob: "src/db/**/*.ts",
+      lifecycleTriggers: ["before_model"],
+      status: "active",
+      createdAt: "2026-03-28T00:05:00.000Z",
+      updatedAt: "2026-03-28T00:05:00.000Z",
+    });
+
+    expect(first.id).not.toBe(second.id);
+    expect(repository.list({ status: "active" })).toHaveLength(2);
+  });
+
   test("rejects candidate memory with a real rejected status", () => {
     const candidate = repository.create({
       type: "pitfall",

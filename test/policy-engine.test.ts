@@ -1,16 +1,19 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { Database as SqlJsDatabase } from "sql.js";
 
+import { MemoryRepository } from "../src/memory";
 import { PolicyEngine, PolicyRuleRepository } from "../src/policy";
 import { createTestDb } from "./helpers/create-test-db";
 
 describe("PolicyEngine", () => {
   let db: SqlJsDatabase;
+  let memoryRepository: MemoryRepository;
   let repository: PolicyRuleRepository;
   let engine: PolicyEngine;
 
   beforeEach(async () => {
     db = await createTestDb();
+    memoryRepository = new MemoryRepository(db);
     repository = new PolicyRuleRepository(db);
     engine = new PolicyEngine(repository);
   });
@@ -237,5 +240,41 @@ describe("PolicyEngine", () => {
 
     expect(result.warnings).toHaveLength(1);
     expect(result.warnings[0]?.scopeRef).toBe("src/memory/repo.ts");
+  });
+
+  test("ignores rules linked to non-active memories", () => {
+    const staleMemory = memoryRepository.create({
+      id: "mem_policy_stale",
+      type: "policy",
+      summary: "Legacy deployment policy",
+      details: "Old deployment policy that should not fire.",
+      scopeGlob: "src/**/*.ts",
+      lifecycleTriggers: ["before_tool"],
+      status: "stale",
+      createdAt: "2026-03-29T00:00:00.000Z",
+      updatedAt: "2026-03-29T00:00:00.000Z",
+    });
+    db.run(
+      `INSERT INTO policy_rules (id, memory_id, rule_code, severity, trigger_kind, scope_glob, message, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        "rule_stale_memory",
+        staleMemory.id,
+        "STALE_POLICY",
+        "warning",
+        "before_tool",
+        "src/**/*.ts",
+        "This stale rule should not fire",
+        "2026-03-29T00:00:00.000Z",
+        "2026-03-29T00:00:00.000Z",
+      ]
+    );
+
+    const result = engine.evaluate({
+      lifecycleTrigger: "before_tool",
+      scopeRef: "src/core/repo.ts",
+    });
+
+    expect(result.warnings).toHaveLength(0);
   });
 });
