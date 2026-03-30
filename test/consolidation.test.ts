@@ -133,12 +133,12 @@ describe("MemoryRepository consolidation", () => {
     expect(result.replacement.updatedAt).toBe("2026-03-29T02:20:00.000Z");
   });
 
-  test("rejects a memory review without changing its current status", () => {
+  test("rejects a candidate memory into a real rejected state", () => {
     const memory = createMemory({
       id: "mem_reject_candidate",
       summary: "Auto-promote every duplicate memory",
       details: "Promote duplicates immediately without review.",
-      status: "active",
+      status: "candidate",
       createdAt: "2026-03-29T03:00:00.000Z",
     });
 
@@ -150,7 +150,7 @@ describe("MemoryRepository consolidation", () => {
       lastVerifiedAt: "2026-03-29T03:15:00.000Z",
     });
 
-    expect(rejected.memory.status).toBe("active");
+    expect(rejected.memory.status).toBe("rejected");
     expect(rejected.memory.lastVerifiedAt).toBe("2026-03-29T03:15:00.000Z");
     expect(rejected.evidence).not.toBeNull();
     expect(rejected.evidence?.sourceKind).toBe("manual_note");

@@ -1,4 +1,5 @@
 import { openSqlJsDatabase } from "../db/sqlite";
+import { DreamRepository } from "../dream";
 import { MemoryRepository } from "../memory";
 
 interface CliOptions {
@@ -22,6 +23,14 @@ interface HistoryOutputEntry {
     id: string;
     sourceKind: string;
     sourceRef: string;
+    excerpt: string;
+    createdAt: string;
+  }[];
+  dreamEvidence: {
+    id: string;
+    status: string;
+    toolName: string;
+    topicGuess: string;
     excerpt: string;
     createdAt: string;
   }[];
@@ -93,9 +102,13 @@ async function main(): Promise<void> {
 
   try {
     const repository = new MemoryRepository(db);
+    const dreamRepository = new DreamRepository(db);
     const lineage = repository.getLineage(options.memoryId);
     const history = repository.getHistory(options.memoryId);
     const replacementIndex = buildReplacementIndex(history);
+    const dreamEvidenceByMemoryId = dreamRepository.listLinkedEvidenceByMemoryIds(
+      history.map((entry) => entry.memory.id)
+    );
     const entries: HistoryOutputEntry[] = history.map((entry) => ({
       relation: entry.relation,
       id: entry.memory.id,
@@ -111,6 +124,14 @@ async function main(): Promise<void> {
         id: evidence.id,
         sourceKind: evidence.sourceKind,
         sourceRef: evidence.sourceRef,
+        excerpt: evidence.excerpt,
+        createdAt: evidence.createdAt,
+      })),
+      dreamEvidence: (dreamEvidenceByMemoryId.get(entry.memory.id) ?? []).map((evidence) => ({
+        id: evidence.id,
+        status: evidence.status,
+        toolName: evidence.toolName,
+        topicGuess: evidence.topicGuess,
         excerpt: evidence.excerpt,
         createdAt: evidence.createdAt,
       })),
@@ -153,6 +174,22 @@ async function main(): Promise<void> {
             evidence.id,
             evidence.sourceKind,
             evidence.sourceRef,
+            evidence.excerpt,
+          ].join("\t")
+        );
+      }
+    }
+
+    console.log("dream_evidence");
+    for (const entry of output.entries) {
+      for (const evidence of entry.dreamEvidence) {
+        console.log(
+          [
+            entry.id,
+            evidence.id,
+            evidence.status,
+            evidence.toolName,
+            evidence.topicGuess,
             evidence.excerpt,
           ].join("\t")
         );

@@ -1,0 +1,311 @@
+{
+  "condition": "md-plus-memory-layer",
+  "scenarioId": "s05-session-start-conflicting-decisions",
+  "corpusScenarioNumber": 5,
+  "title": "Session Start - Conflicting Decisions",
+  "taskPrompt": "Add input validation for the new API endpoint in `src/routes/api/v1/users.ts`.",
+  "lifecycleTrigger": "session_start",
+  "scopeRef": "src/routes/api/v1/users.ts",
+  "tool": null,
+  "latency": {
+    "deterministicMs": 73
+  },
+  "activated_memory_ids": [
+    "mem_policy_gdpr_001",
+    "mem_arch_001",
+    "mem_decision_zod_001",
+    "mem_decision_valibot_001"
+  ],
+  "suppressed_memory_ids": [
+    "mem_workflow_vitest_001",
+    "mem_pitfall_save_await_001",
+    "mem_workflow_bun_001",
+    "mem_budget_payment_015",
+    "mem_budget_payment_014",
+    "mem_budget_payment_013",
+    "mem_budget_payment_012",
+    "mem_budget_payment_011",
+    "mem_budget_payment_010",
+    "mem_budget_payment_009",
+    "mem_budget_payment_008",
+    "mem_budget_payment_007",
+    "mem_budget_payment_006",
+    "mem_budget_payment_005",
+    "mem_budget_payment_004",
+    "mem_budget_payment_003",
+    "mem_budget_payment_002",
+    "mem_budget_payment_001",
+    "mem_policy_api_timeout_001",
+    "mem_policy_migration_001",
+    "mem_pitfall_deploy_branch_001",
+    "mem_workflow_deploy_001",
+    "mem_pitfall_readfilesync_001"
+  ],
+  "activated": [
+    {
+      "id": "mem_policy_gdpr_001",
+      "type": "policy",
+      "summary": "Never expose user email in API responses without consent flag check",
+      "status": "active",
+      "rank": 1,
+      "score": 0.9702,
+      "payloadBytes": 295
+    },
+    {
+      "id": "mem_arch_001",
+      "type": "architecture_constraint",
+      "summary": "All database access must go through repository pattern, never direct SQLite calls from routes",
+      "status": "active",
+      "rank": 2,
+      "score": 0.9023999999999999,
+      "payloadBytes": 358
+    },
+    {
+      "id": "mem_decision_zod_001",
+      "type": "decision",
+      "summary": "Use Zod for all validation",
+      "status": "active",
+      "rank": 3,
+      "score": 0.6794,
+      "payloadBytes": 257
+    },
+    {
+      "id": "mem_decision_valibot_001",
+      "type": "decision",
+      "summary": "Considering Valibot for hot paths",
+      "status": "active",
+      "rank": 4,
+      "score": 0.496,
+      "payloadBytes": 265
+    }
+  ],
+  "suppressed": [
+    {
+      "id": "mem_workflow_vitest_001",
+      "type": "workflow",
+      "summary": "Use vitest for test runs",
+      "status": "active",
+      "kind": "trigger_mismatch",
+      "reason": "Memory does not activate on session_start"
+    },
+    {
+      "id": "mem_pitfall_save_await_001",
+      "type": "pitfall",
+      "summary": "Always await .save() calls - missing await causes silent data loss",
+      "status": "active",
+      "kind": "trigger_mismatch",
+      "reason": "Memory does not activate on session_start"
+    },
+    {
+      "id": "mem_workflow_bun_001",
+      "type": "workflow",
+      "summary": "Use bun test for test runs",
+      "status": "stale",
+      "kind": "trigger_mismatch",
+      "reason": "Memory does not activate on session_start"
+    },
+    {
+      "id": "mem_budget_payment_015",
+      "type": "policy",
+      "summary": "Annotate charge records with reconciliation window",
+      "status": "active",
+      "kind": "trigger_mismatch",
+      "reason": "Memory does not activate on session_start"
+    },
+    {
+      "id": "mem_budget_payment_014",
+      "type": "pitfall",
+      "summary": "Avoid inline currency conversion tables",
+      "status": "active",
+      "kind": "trigger_mismatch",
+      "reason": "Memory does not activate on session_start"
+    },
+    {
+      "id": "mem_budget_payment_013",
+      "type": "policy",
+      "summary": "Use deterministic order when applying payment middleware",
+      "status": "active",
+      "kind": "trigger_mismatch",
+      "reason": "Memory does not activate on session_start"
+    },
+    {
+      "id": "mem_budget_payment_012",
+      "type": "workflow",
+      "summary": "Record retry metrics tags for every charge attempt",
+      "status": "active",
+      "kind": "trigger_mismatch",
+      "reason": "Memory does not activate on session_start"
+    },
+    {
+      "id": "mem_budget_payment_011",
+      "type": "decision",
+      "summary": "Prefer deterministic failure codes for retries",
+      "status": "active",
+      "kind": "trigger_mismatch",
+      "reason": "Memory does not activate on session_start"
+    },
+    {
+      "id": "mem_budget_payment_010",
+      "type": "policy",
+      "summary": "Round-trip provider response signature validation",
+      "status": "active",
+      "kind": "trigger_mismatch",
+      "reason": "Memory does not activate on session_start"
+    },
+    {
+      "id": "mem_budget_payment_009",
+      "type": "workflow",
+      "summary": "Persist payment intent state before side effects",
+      "status": "active",
+      "kind": "trigger_mismatch",
+      "reason": "Memory does not activate on session_start"
+    },
+    {
+      "id": "mem_budget_payment_008",
+      "type": "pitfall",
+      "summary": "Do not swallow declined-charge provider errors",
+      "status": "active",
+      "kind": "trigger_mismatch",
+      "reason": "Memory does not activate on session_start"
+    },
+    {
+      "id": "mem_budget_payment_007",
+      "type": "policy",
+      "summary": "Wrap provider calls with explicit timeout",
+      "status": "active",
+      "kind": "trigger_mismatch",
+      "reason": "Memory does not activate on session_start"
+    },
+    {
+      "id": "mem_budget_payment_006",
+      "type": "decision",
+      "summary": "Use provider tokenization SDK wrapper",
+      "status": "active",
+      "kind": "trigger_mismatch",
+      "reason": "Memory does not activate on session_start"
+    },
+    {
+      "id": "mem_budget_payment_005",
+      "type": "policy",
+      "summary": "Normalize currency to minor units before persistence",
+      "status": "active",
+      "kind": "trigger_mismatch",
+      "reason": "Memory does not activate on session_start"
+    },
+    {
+      "id": "mem_budget_payment_004",
+      "type": "workflow",
+      "summary": "Record charge attempt audit event on every transition",
+      "status": "active",
+      "kind": "trigger_mismatch",
+      "reason": "Memory does not activate on session_start"
+    },
+    {
+      "id": "mem_budget_payment_003",
+      "type": "pitfall",
+      "summary": "Never log full card payloads",
+      "status": "active",
+      "kind": "trigger_mismatch",
+      "reason": "Memory does not activate on session_start"
+    },
+    {
+      "id": "mem_budget_payment_002",
+      "type": "policy",
+      "summary": "Payment retries must use exponential backoff",
+      "status": "active",
+      "kind": "trigger_mismatch",
+      "reason": "Memory does not activate on session_start"
+    },
+    {
+      "id": "mem_budget_payment_001",
+      "type": "policy",
+      "summary": "Payment processing requires idempotency key verification",
+      "status": "active",
+      "kind": "trigger_mismatch",
+      "reason": "Memory does not activate on session_start"
+    },
+    {
+      "id": "mem_policy_api_timeout_001",
+      "type": "policy",
+      "summary": "All external API calls must include timeout and retry logic",
+      "status": "active",
+      "kind": "trigger_mismatch",
+      "reason": "Memory does not activate on session_start"
+    },
+    {
+      "id": "mem_policy_migration_001",
+      "type": "policy",
+      "summary": "Always use timestamped migration files, never edit existing migrations",
+      "status": "active",
+      "kind": "trigger_mismatch",
+      "reason": "Memory does not activate on session_start"
+    },
+    {
+      "id": "mem_pitfall_deploy_branch_001",
+      "type": "pitfall",
+      "summary": "Only deploy from main branch",
+      "status": "active",
+      "kind": "trigger_mismatch",
+      "reason": "Memory does not activate on session_start"
+    },
+    {
+      "id": "mem_workflow_deploy_001",
+      "type": "workflow",
+      "summary": "Deployment workflow: build && test:ci before deploy",
+      "status": "active",
+      "kind": "trigger_mismatch",
+      "reason": "Memory does not activate on session_start"
+    },
+    {
+      "id": "mem_pitfall_readfilesync_001",
+      "type": "pitfall",
+      "summary": "Avoid fs.readFileSync in route handlers",
+      "status": "stale",
+      "kind": "trigger_mismatch",
+      "reason": "Memory does not activate on session_start"
+    }
+  ],
+  "warning_count": 1,
+  "warnings": [
+    {
+      "ruleCode": "NO_EMAIL_WITHOUT_CONSENT",
+      "severity": "warning",
+      "triggerKind": "session_start",
+      "scopeGlob": "src/routes/**/*.ts",
+      "scopeRef": "src/routes/api/v1/users.ts",
+      "message": "Never expose user email in API responses without consent flag check (GDPR)."
+    }
+  ],
+  "conflict_markers": [
+    {
+      "marker": "CONFLICT",
+      "kind": "lineage_conflict",
+      "reason": "Active lineage conflict between mem_decision_zod_001 and mem_decision_valibot_001",
+      "rootId": "mem_decision_zod_001",
+      "memoryIds": [
+        "mem_decision_zod_001",
+        "mem_decision_valibot_001"
+      ]
+    }
+  ],
+  "stale_markers": [],
+  "outcome": {
+    "taskOutcome": "memory-layer-behavior-aligned",
+    "scenarioOutcome": "pass",
+    "expected": {
+      "requiredActivatedMemoryIds": [
+        "mem_decision_zod_001",
+        "mem_decision_valibot_001"
+      ],
+      "requireConflictMarker": true
+    },
+    "validation": {
+      "activated": true,
+      "suppressed": true,
+      "warnings": true,
+      "conflicts": true,
+      "stale": true,
+      "budget": true
+    }
+  }
+}

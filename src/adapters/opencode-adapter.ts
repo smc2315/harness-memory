@@ -54,34 +54,66 @@ export interface OpenCodeAdapterOptions {
   evidenceExcerptMaxChars?: number;
 }
 
-function buildDreamTopicGuess(input: AdapterAfterToolInput, scopeRef: string, excerpt: string): string {
+function buildDreamTopicGuess(
+  input: AdapterAfterToolInput,
+  scopeRef: string,
+  excerpt: string,
+  typeGuess: "policy" | "workflow" | "pitfall" | "architecture_constraint" | "decision"
+): string {
   const normalizedScope = scopeRef.replace(/\\/g, "/");
-  const excerptLower = excerpt.toLowerCase();
-
-  if (/(error|failed|exception|traceback|not found|enoent|eaddr|refused)/i.test(excerptLower)) {
-    return `pitfall:${input.tool}:${normalizedScope}`;
-  }
-
-  return `workflow:${input.tool}:${normalizedScope}`;
+  return `${typeGuess}:${input.tool}:${normalizedScope}`;
 }
 
-function inferDreamTypeGuess(excerpt: string): "workflow" | "pitfall" {
-  return /(error|failed|exception|traceback|not found|enoent|eaddr|refused)/i.test(
-    excerpt
-  )
-    ? "pitfall"
-    : "workflow";
+function inferDreamTypeGuess(
+  excerpt: string,
+  title: string,
+  toolName: string
+): "policy" | "workflow" | "pitfall" | "architecture_constraint" | "decision" {
+  const text = `${title} ${excerpt}`.toLowerCase();
+
+  if (/(error|failed|exception|traceback|not found|enoent|eaddr|refused|timeout|assertion)/i.test(text)) {
+    return "pitfall";
+  }
+
+  if (/(policy|warning|forbid|forbidden|must not|never |secret|gdpr|consent|compliance|permission)/i.test(text)) {
+    return "policy";
+  }
+
+  if (/(decided|decision|choose|chosen|standardize|switch to|migrate to|use .* instead)/i.test(text)) {
+    return "decision";
+  }
+
+  if (/(architecture|boundary|repository|adapter|interface|constraint|invariant|layer)/i.test(text)) {
+    return "architecture_constraint";
+  }
+
+  if (toolName === "bash" && /(passed|completed|succeeded|migrated|fixed|resolved)/i.test(text)) {
+    return "workflow";
+  }
+
+  return "workflow";
 }
 
 function estimateDreamSalience(
+  typeGuess: "policy" | "workflow" | "pitfall" | "architecture_constraint" | "decision",
+  title: string,
   excerpt: string,
+  toolName: string,
   relatedMemoryCount: number,
   conflictCount: number
 ): number {
   let salience = 0.45;
 
-  if (inferDreamTypeGuess(excerpt) === "pitfall") {
+  if (typeGuess === "pitfall") {
     salience += 0.25;
+  }
+
+  if (typeGuess === "policy" || typeGuess === "decision") {
+    salience += 0.15;
+  }
+
+  if (typeGuess === "architecture_constraint") {
+    salience += 0.1;
   }
 
   if (relatedMemoryCount > 0) {
@@ -92,15 +124,33 @@ function estimateDreamSalience(
     salience += 0.1;
   }
 
-  if (/fixed|completed|created|updated|migrated|passed/i.test(excerpt)) {
+  if (/fixed|completed|created|updated|migrated|passed|resolved/i.test(`${title} ${excerpt}`)) {
     salience += 0.1;
+  }
+
+  if (toolName === "bash") {
+    salience += 0.05;
   }
 
   return Math.min(1, salience);
 }
 
-function estimateDreamNovelty(relatedMemoryCount: number): number {
-  return relatedMemoryCount === 0 ? 0.8 : 0.6;
+function estimateDreamNovelty(
+  typeGuess: "policy" | "workflow" | "pitfall" | "architecture_constraint" | "decision",
+  relatedMemoryCount: number,
+  conflictCount: number
+): number {
+  let novelty = relatedMemoryCount === 0 ? 0.8 : 0.55;
+
+  if (typeGuess === "decision" || typeGuess === "architecture_constraint") {
+    novelty += 0.1;
+  }
+
+  if (conflictCount > 0) {
+    novelty += 0.1;
+  }
+
+  return Math.min(1, novelty);
 }
 
 function nowIsoString(): string {
@@ -405,7 +455,7 @@ export class OpenCodeAdapter {
     );
 
     if (this.dreamRepository !== null) {
-      const typeGuess = inferDreamTypeGuess(excerpt);
+      const typeGuess = inferDreamTypeGuess(excerpt, output.title, input.tool);
       this.dreamRepository.createEvidenceEvent({
         sessionId: input.sessionID,
         callId: input.callID,
@@ -416,14 +466,21 @@ export class OpenCodeAdapter {
         excerpt,
         args: input.args,
         metadata: output.metadata,
-        topicGuess: buildDreamTopicGuess(input, scopeRef, excerpt),
+        topicGuess: buildDreamTopicGuess(input, scopeRef, excerpt, typeGuess),
         typeGuess,
         salience: estimateDreamSalience(
+          typeGuess,
+          output.title,
           excerpt,
+          input.tool,
           activation.activated.length,
           activation.conflicts.length
         ),
-        novelty: estimateDreamNovelty(activation.activated.length),
+        novelty: estimateDreamNovelty(
+          typeGuess,
+          activation.activated.length,
+          activation.conflicts.length
+        ),
         contradictionSignal: activation.conflicts.length > 0,
         createdAt,
       });

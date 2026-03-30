@@ -1,0 +1,8 @@
+{
+  "task_id": 9,
+  "title": "Before Tool - Stale Pitfall (Resolved)",
+  "baseline_condition": "md_only",
+  "miss_type": "none",
+  "severity": "low",
+  "notes": "Negative control: stale fs.readFileSync pitfall should remain suppressed after async refactor, so no scored miss is expected."
+}

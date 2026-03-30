@@ -1,0 +1,8 @@
+{
+  "task_id": 4,
+  "title": "Before Model - Pitfall Recall",
+  "baseline_condition": "md_only",
+  "miss_type": "policy_miss",
+  "severity": "high",
+  "notes": "Missed pitfall about awaiting save calls; baseline likely writes user.save() without await and introduces a latent correctness bug."
+}

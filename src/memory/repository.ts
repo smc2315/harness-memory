@@ -57,6 +57,7 @@ const MEMORY_STATUSES = new Set<MemoryStatus>([
   "active",
   "stale",
   "superseded",
+  "rejected",
 ]);
 
 const EVIDENCE_SOURCE_KINDS = new Set<EvidenceSourceKind>([
@@ -643,8 +644,16 @@ export class MemoryRepository {
 
   rejectMemory(input: RejectMemoryInput): RejectMemoryResult {
     return this.withTransaction(() => {
+      const existing = this.requireMemory(input.memoryId);
+      if (existing.status !== "candidate") {
+        throw new InvalidMemoryTransitionError(
+          `Only candidate memories can be rejected (got ${existing.status})`
+        );
+      }
+
       const reviewedAt = input.updatedAt ?? new Date().toISOString();
       const memory = this.updateRequired(input.memoryId, {
+        status: "rejected",
         updatedAt: reviewedAt,
         lastVerifiedAt:
           input.lastVerifiedAt === undefined ? reviewedAt : input.lastVerifiedAt,

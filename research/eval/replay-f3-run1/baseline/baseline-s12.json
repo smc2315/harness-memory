@@ -1,0 +1,8 @@
+{
+  "task_id": 12,
+  "title": "Before Tool - Budget Overflow (Activation Limit)",
+  "baseline_condition": "md_only",
+  "miss_type": "none",
+  "severity": "low",
+  "notes": "Budget-overflow scenario validates activation behavior rather than a baseline user-facing miss; markdown-only condition has no structured budget to compare here."
+}

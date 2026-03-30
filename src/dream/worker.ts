@@ -1,6 +1,6 @@
 import { basename, extname } from "path";
 
-import type { DreamEvidenceTypeGuess, DreamTrigger, LifecycleTrigger } from "../db/schema/types";
+import type { DreamEvidenceTypeGuess, LifecycleTrigger } from "../db/schema/types";
 import { MemoryRepository, createDeterministicId } from "../memory";
 
 import { DreamRepository } from "./repository";
@@ -13,6 +13,7 @@ import type {
 
 const DEFAULT_EVIDENCE_LIMIT = 50;
 const DEFAULT_WINDOW_HOURS = 24;
+const MAX_DEFER_RETRIES = 2;
 
 function nowIsoString(): string {
   return new Date().toISOString();
@@ -32,9 +33,18 @@ function deriveScopeGlob(scopeRef: string): string {
 }
 
 function lifecycleForType(typeGuess: DreamEvidenceTypeGuess): LifecycleTrigger[] {
-  return typeGuess === "workflow"
-    ? ["before_model", "after_tool"]
-    : ["before_tool"];
+  switch (typeGuess) {
+    case "workflow":
+      return ["before_model", "after_tool"];
+    case "pitfall":
+      return ["before_tool"];
+    case "policy":
+      return ["before_tool", "before_model"];
+    case "architecture_constraint":
+      return ["session_start", "before_model"];
+    case "decision":
+      return ["session_start", "before_model"];
+  }
 }
 
 function buildGroupKey(event: DreamEvidenceEventRecord): string {
@@ -48,6 +58,18 @@ function buildCandidateSummary(
 ): string {
   if (typeGuess === "pitfall") {
     return `Pitfall around ${basename(scopeRef)} (${topicGuess})`;
+  }
+
+  if (typeGuess === "policy") {
+    return `Policy for ${basename(scopeRef)} (${topicGuess})`;
+  }
+
+  if (typeGuess === "architecture_constraint") {
+    return `Architecture constraint for ${basename(scopeRef)} (${topicGuess})`;
+  }
+
+  if (typeGuess === "decision") {
+    return `Decision for ${basename(scopeRef)} (${topicGuess})`;
   }
 
   return `Workflow for ${basename(scopeRef)} (${topicGuess})`;
@@ -73,6 +95,14 @@ function buildSuggestionId(
   return createDeterministicId(`dream-candidate:${typeGuess}:${scopeRef}:${topicGuess}`);
 }
 
+function parseArgsJson(event: DreamEvidenceEventRecord): string {
+  try {
+    return event.argsJson.toLowerCase();
+  } catch {
+    return event.argsJson.toLowerCase();
+  }
+}
+
 function scoreEvents(events: readonly DreamEvidenceEventRecord[]): {
   aggregate: number;
   confidence: number;
@@ -83,13 +113,58 @@ function scoreEvents(events: readonly DreamEvidenceEventRecord[]): {
   const noveltyAverage = events.reduce((acc, event) => acc + event.novelty, 0) / count;
   const contradictionBoost = events.some((event) => event.contradictionSignal) ? 0.15 : 0;
   const recurrenceBoost = Math.max(0, count - 1) * 0.25;
-  const aggregate = salienceAverage + noveltyAverage + contradictionBoost + recurrenceBoost;
+  const failureBoost = events.some((event) => /error|failed|exception|timeout|refused/i.test(event.excerpt))
+    ? 0.15
+    : 0;
+  const successBoost = events.some((event) => /passed|resolved|fixed|completed|migrated/i.test(event.excerpt))
+    ? 0.1
+    : 0;
+  const breadthBoost = events.some((event) => /path|file|src\//i.test(parseArgsJson(event)))
+    ? 0.05
+    : 0;
+  const aggregate =
+    salienceAverage +
+    noveltyAverage +
+    contradictionBoost +
+    recurrenceBoost +
+    failureBoost +
+    successBoost +
+    breadthBoost;
 
   return {
     aggregate,
-    confidence: Math.min(0.95, 0.45 + aggregate / 3),
-    importance: Math.min(0.95, 0.4 + recurrenceBoost + contradictionBoost + salienceAverage * 0.2),
-  };
+      confidence: Math.min(0.95, 0.45 + aggregate / 3),
+      importance: Math.min(
+        0.95,
+        0.4 + recurrenceBoost + contradictionBoost + failureBoost + successBoost + salienceAverage * 0.2
+      ),
+    };
+}
+
+function hoursFromNow(reference: string, hours: number): string {
+  return new Date(Date.parse(reference) + hours * 60 * 60 * 1000).toISOString();
+}
+
+function computeBackoffHours(retryCount: number): number {
+  return Math.min(24, 2 ** retryCount * 6);
+}
+
+function shouldDiscardDeferred(
+  events: readonly DreamEvidenceEventRecord[],
+  aggregateScore: number,
+  now: string
+): boolean {
+  if (events.every((event) => event.retryCount >= MAX_DEFER_RETRIES)) {
+    return true;
+  }
+
+  const oldestEvent = events[0];
+  if (oldestEvent === undefined) {
+    return false;
+  }
+
+  const ageHours = (Date.parse(now) - Date.parse(oldestEvent.createdAt)) / (1000 * 60 * 60);
+  return ageHours >= 72 && aggregateScore < 1.1;
 }
 
 function shouldMaterializeCandidate(
@@ -132,8 +207,7 @@ export class DreamWorker {
   run(request: DreamRunRequest): DreamRunResult {
     const now = request.now ?? nowIsoString();
     const createdAfter = request.createdAfter ?? isoHoursAgo(DEFAULT_WINDOW_HOURS, now);
-    const evidence = this.dreamRepository.listEvidenceEvents({
-      status: "pending",
+    const evidence = this.dreamRepository.listProcessableEvidenceEvents(now, {
       createdAfter,
       limit: request.limit ?? DEFAULT_EVIDENCE_LIMIT,
     });
@@ -147,12 +221,24 @@ export class DreamWorker {
 
     const suggestions: DreamCandidateSuggestion[] = [];
     const consumedEvidenceIds: string[] = [];
+    const deferredEvidenceIds: string[] = [];
+    const discardedEvidenceIds: string[] = [];
     const skippedEvidenceIds: string[] = [];
+    const deferredItems: Array<{ id: string; nextReviewAt: string }> = [];
 
     for (const events of groupEvents(evidence).values()) {
       const { aggregate, confidence, importance } = scoreEvents(events);
       if (!shouldMaterializeCandidate(events, aggregate)) {
         skippedEvidenceIds.push(...events.map((event) => event.id));
+        if (shouldDiscardDeferred(events, aggregate, now)) {
+          discardedEvidenceIds.push(...events.map((event) => event.id));
+        } else {
+          for (const event of events) {
+            const nextReviewAt = hoursFromNow(now, computeBackoffHours(event.retryCount));
+            deferredItems.push({ id: event.id, nextReviewAt });
+            deferredEvidenceIds.push(event.id);
+          }
+        }
         continue;
       }
 
@@ -203,17 +289,29 @@ export class DreamWorker {
         evidenceEventIds: events.map((event) => event.id),
         memory,
       });
+      this.dreamRepository.createEvidenceLinks(
+        memory.id,
+        events.map((event) => event.id),
+        run.id,
+        now
+      );
       consumedEvidenceIds.push(...events.map((event) => event.id));
     }
 
     if (consumedEvidenceIds.length > 0) {
       this.dreamRepository.markEvidenceEventsConsumed(consumedEvidenceIds, run.id, now);
     }
+    if (deferredItems.length > 0) {
+      this.dreamRepository.markEvidenceEventsDeferred(deferredItems, run.id, now);
+    }
+    if (discardedEvidenceIds.length > 0) {
+      this.dreamRepository.markEvidenceEventsDiscarded(discardedEvidenceIds, run.id, now);
+    }
 
     const summary =
       suggestions.length === 0
-        ? `No candidate memories created from ${evidence.length} recent evidence events`
-        : `Created or refreshed ${suggestions.length} candidate memories from ${consumedEvidenceIds.length} evidence events`;
+        ? `No candidate memories created from ${evidence.length} recent evidence events; deferred ${deferredEvidenceIds.length}, discarded ${discardedEvidenceIds.length}`
+        : `Created or refreshed ${suggestions.length} candidate memories from ${consumedEvidenceIds.length} evidence events; deferred ${deferredEvidenceIds.length}, discarded ${discardedEvidenceIds.length}`;
     const completedRun = this.dreamRepository.completeDreamRun(run.id, {
       status: "completed",
       summary,
@@ -225,6 +323,8 @@ export class DreamWorker {
       run: completedRun,
       processedEvidenceCount: evidence.length,
       consumedEvidenceIds,
+      deferredEvidenceIds,
+      discardedEvidenceIds,
       suggestions,
       skippedEvidenceIds,
     };

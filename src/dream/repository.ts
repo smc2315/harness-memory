@@ -11,7 +11,9 @@ import type {
   CreateDreamEvidenceEventInput,
   CreateDreamRunInput,
   DreamEvidenceEventRecord,
+  DreamEvidenceLinkRecord,
   DreamRunRecord,
+  ListDreamRunsInput,
   ListDreamEvidenceEventsInput,
 } from "./types";
 
@@ -35,9 +37,39 @@ const DREAM_EVIDENCE_COLUMNS = [
   "novelty",
   "contradiction_signal",
   "status",
+  "retry_count",
+  "next_review_at",
+  "last_reviewed_at",
   "dream_run_id",
   "created_at",
   "consumed_at",
+  "discarded_at",
+].join(", ");
+
+const DREAM_EVIDENCE_COLUMNS_PREFIXED = [
+  "evidence.id",
+  "evidence.session_id",
+  "evidence.call_id",
+  "evidence.tool_name",
+  "evidence.scope_ref",
+  "evidence.source_ref",
+  "evidence.title",
+  "evidence.excerpt",
+  "evidence.args_json",
+  "evidence.metadata_json",
+  "evidence.topic_guess",
+  "evidence.type_guess",
+  "evidence.salience",
+  "evidence.novelty",
+  "evidence.contradiction_signal",
+  "evidence.status",
+  "evidence.retry_count",
+  "evidence.next_review_at",
+  "evidence.last_reviewed_at",
+  "evidence.dream_run_id",
+  "evidence.created_at",
+  "evidence.consumed_at",
+  "evidence.discarded_at",
 ].join(", ");
 
 const DREAM_RUN_COLUMNS = [
@@ -51,6 +83,13 @@ const DREAM_RUN_COLUMNS = [
   "summary",
   "created_at",
   "completed_at",
+].join(", ");
+
+const DREAM_LINK_COLUMNS = [
+  "evidence_event_id",
+  "memory_id",
+  "dream_run_id",
+  "created_at",
 ].join(", ");
 
 function nowIsoString(): string {
@@ -75,9 +114,13 @@ function parseDreamEvidenceRow(values: readonly unknown[]): DreamEvidenceEventRe
     novelty: Number(values[13]),
     contradictionSignal: Number(values[14]) === 1,
     status: values[15] as DreamEvidenceStatus,
-    dreamRunId: values[16] === null ? null : String(values[16]),
-    createdAt: String(values[17]),
-    consumedAt: values[18] === null ? null : String(values[18]),
+    retryCount: Number(values[16]),
+    nextReviewAt: values[17] === null ? null : String(values[17]),
+    lastReviewedAt: values[18] === null ? null : String(values[18]),
+    dreamRunId: values[19] === null ? null : String(values[19]),
+    createdAt: String(values[20]),
+    consumedAt: values[21] === null ? null : String(values[21]),
+    discardedAt: values[22] === null ? null : String(values[22]),
   };
 }
 
@@ -93,6 +136,15 @@ function parseDreamRunRow(values: readonly unknown[]): DreamRunRecord {
     summary: String(values[7]),
     createdAt: String(values[8]),
     completedAt: values[9] === null ? null : String(values[9]),
+  };
+}
+
+function parseDreamEvidenceLinkRow(values: readonly unknown[]): DreamEvidenceLinkRecord {
+  return {
+    evidenceEventId: String(values[0]),
+    memoryId: String(values[1]),
+    dreamRunId: String(values[2]),
+    createdAt: String(values[3]),
   };
 }
 
@@ -225,6 +277,38 @@ export class DreamRepository {
     return result[0].values.map((row) => parseDreamEvidenceRow(row));
   }
 
+  listProcessableEvidenceEvents(
+    now: string,
+    input: Omit<ListDreamEvidenceEventsInput, "status"> = {}
+  ): DreamEvidenceEventRecord[] {
+    const clauses: string[] = [
+      "(status = 'pending' OR (status = 'deferred' AND next_review_at IS NOT NULL AND next_review_at <= $now))",
+    ];
+    const params: SqlParameters = { $now: now };
+
+    if (input.sessionId !== undefined) {
+      clauses.push("session_id = $sessionId");
+      params.$sessionId = input.sessionId;
+    }
+
+    if (input.createdAfter !== undefined) {
+      clauses.push("created_at >= $createdAfter");
+      params.$createdAfter = input.createdAfter;
+    }
+
+    const limitClause = input.limit === undefined ? "" : ` LIMIT ${input.limit}`;
+    const result = this.db.exec(
+      `SELECT ${DREAM_EVIDENCE_COLUMNS} FROM dream_evidence_events WHERE ${clauses.join(" AND ")} ORDER BY created_at ASC${limitClause}`,
+      params
+    );
+
+    if (result.length === 0) {
+      return [];
+    }
+
+    return result[0].values.map((row) => parseDreamEvidenceRow(row));
+  }
+
   markEvidenceEventsConsumed(
     ids: readonly string[],
     dreamRunId: string,
@@ -234,6 +318,9 @@ export class DreamRepository {
       this.db.run(
         `UPDATE dream_evidence_events
          SET status = 'consumed',
+             retry_count = retry_count + 1,
+             next_review_at = NULL,
+             last_reviewed_at = $consumedAt,
              dream_run_id = $dreamRunId,
              consumed_at = $consumedAt
          WHERE id = $id`,
@@ -244,6 +331,188 @@ export class DreamRepository {
         } satisfies SqlParameters
       );
     }
+  }
+
+  markEvidenceEventsDeferred(
+    items: ReadonlyArray<{ id: string; nextReviewAt: string }>,
+    dreamRunId: string,
+    reviewedAt: string = nowIsoString()
+  ): void {
+    for (const item of items) {
+      this.db.run(
+        `UPDATE dream_evidence_events
+         SET status = 'deferred',
+             retry_count = retry_count + 1,
+             next_review_at = $nextReviewAt,
+             last_reviewed_at = $reviewedAt,
+             dream_run_id = $dreamRunId
+         WHERE id = $id`,
+        {
+          $id: item.id,
+          $nextReviewAt: item.nextReviewAt,
+          $reviewedAt: reviewedAt,
+          $dreamRunId: dreamRunId,
+        } satisfies SqlParameters
+      );
+    }
+  }
+
+  markEvidenceEventsDiscarded(
+    ids: readonly string[],
+    dreamRunId: string,
+    discardedAt: string = nowIsoString()
+  ): void {
+    for (const id of ids) {
+      this.db.run(
+        `UPDATE dream_evidence_events
+         SET status = 'discarded',
+             retry_count = retry_count + 1,
+             next_review_at = NULL,
+             last_reviewed_at = $discardedAt,
+             dream_run_id = $dreamRunId,
+             discarded_at = $discardedAt
+         WHERE id = $id`,
+        {
+          $id: id,
+          $discardedAt: discardedAt,
+          $dreamRunId: dreamRunId,
+        } satisfies SqlParameters
+      );
+    }
+  }
+
+  createEvidenceLinks(
+    memoryId: string,
+    evidenceEventIds: readonly string[],
+    dreamRunId: string,
+    createdAt: string = nowIsoString()
+  ): void {
+    for (const evidenceEventId of evidenceEventIds) {
+      this.db.run(
+        `INSERT OR IGNORE INTO dream_memory_evidence_links (
+           evidence_event_id,
+           memory_id,
+           dream_run_id,
+           created_at
+         ) VALUES (
+           $evidenceEventId,
+           $memoryId,
+           $dreamRunId,
+           $createdAt
+         )`,
+        {
+          $evidenceEventId: evidenceEventId,
+          $memoryId: memoryId,
+          $dreamRunId: dreamRunId,
+          $createdAt: createdAt,
+        } satisfies SqlParameters
+      );
+    }
+  }
+
+  listLinkedEvidenceByMemoryIds(
+    memoryIds: readonly string[]
+  ): Map<string, DreamEvidenceEventRecord[]> {
+    if (memoryIds.length === 0) {
+      return new Map();
+    }
+
+    const params: SqlParameters = {};
+    const placeholders = memoryIds.map((_, index) => {
+      const key = `$memoryId${index}`;
+      params[key] = memoryIds[index]!;
+      return key;
+    });
+
+    const result = this.db.exec(
+      `SELECT links.memory_id, ${DREAM_EVIDENCE_COLUMNS_PREFIXED}
+       FROM dream_memory_evidence_links links
+       JOIN dream_evidence_events evidence ON evidence.id = links.evidence_event_id
+       WHERE links.memory_id IN (${placeholders.join(", ")})
+       ORDER BY evidence.created_at ASC, evidence.id ASC`,
+      params
+    );
+
+    const map = new Map<string, DreamEvidenceEventRecord[]>();
+    if (result.length === 0) {
+      return map;
+    }
+
+    for (const row of result[0].values) {
+      const memoryId = String(row[0]);
+      const evidence = parseDreamEvidenceRow(row.slice(1));
+      const items = map.get(memoryId) ?? [];
+      items.push(evidence);
+      map.set(memoryId, items);
+    }
+
+    return map;
+  }
+
+  listEvidenceLinksByRunId(runId: string): DreamEvidenceLinkRecord[] {
+    const result = this.db.exec(
+      `SELECT ${DREAM_LINK_COLUMNS} FROM dream_memory_evidence_links WHERE dream_run_id = $runId ORDER BY created_at ASC`,
+      { $runId: runId }
+    );
+
+    if (result.length === 0) {
+      return [];
+    }
+
+    return result[0].values.map((row) => parseDreamEvidenceLinkRow(row));
+  }
+
+  listLinkedEvidenceByRunId(runId: string): DreamEvidenceEventRecord[] {
+    const result = this.db.exec(
+      `SELECT ${DREAM_EVIDENCE_COLUMNS_PREFIXED}
+       FROM dream_memory_evidence_links links
+       JOIN dream_evidence_events evidence ON evidence.id = links.evidence_event_id
+       WHERE links.dream_run_id = $runId
+       ORDER BY evidence.created_at ASC, evidence.id ASC`,
+      { $runId: runId }
+    );
+
+    if (result.length === 0) {
+      return [];
+    }
+
+    return result[0].values.map((row) => parseDreamEvidenceRow(row));
+  }
+
+  listDreamRuns(input: ListDreamRunsInput = {}): DreamRunRecord[] {
+    const clauses: string[] = [];
+    const params: SqlParameters = {};
+
+    if (input.trigger !== undefined) {
+      const triggers = Array.isArray(input.trigger) ? input.trigger : [input.trigger];
+      const placeholders = triggers.map((_, index) => `$trigger${index}`);
+      clauses.push(`trigger IN (${placeholders.join(", ")})`);
+      triggers.forEach((trigger, index) => {
+        params[`$trigger${index}`] = trigger;
+      });
+    }
+
+    if (input.status !== undefined) {
+      const statuses = Array.isArray(input.status) ? input.status : [input.status];
+      const placeholders = statuses.map((_, index) => `$runStatus${index}`);
+      clauses.push(`status IN (${placeholders.join(", ")})`);
+      statuses.forEach((status, index) => {
+        params[`$runStatus${index}`] = status;
+      });
+    }
+
+    const whereClause = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+    const limitClause = input.limit === undefined ? "" : ` LIMIT ${input.limit}`;
+    const result = this.db.exec(
+      `SELECT ${DREAM_RUN_COLUMNS} FROM dream_runs ${whereClause} ORDER BY created_at DESC${limitClause}`,
+      params
+    );
+
+    if (result.length === 0) {
+      return [];
+    }
+
+    return result[0].values.map((row) => parseDreamRunRow(row));
   }
 
   createDreamRun(input: CreateDreamRunInput): DreamRunRecord {

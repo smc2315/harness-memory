@@ -83,6 +83,9 @@ try {
   run([...npmExec, "init", "--db", ".harness-memory/memory.sqlite", "--json"], consumerDir);
   run([...npmExec, "memory:list", "--db", "./.harness-memory/memory.sqlite", "--json"], consumerDir);
   run([...npmExec, "dream:run", "--db", "./.harness-memory/memory.sqlite", "--trigger", "manual", "--json"], consumerDir);
+  run([...npmExec, "dream:evidence:list", "--db", "./.harness-memory/memory.sqlite", "--json"], consumerDir);
+  run([...npmExec, "dream:runs:list", "--db", "./.harness-memory/memory.sqlite", "--json"], consumerDir);
+  run([...npmExec, "memory:review", "--db", "./.harness-memory/memory.sqlite", "--json"], consumerDir);
   run(
     [...npmExec, "eval:baseline", "--output-dir", "./artifacts/baseline"],
     consumerDir

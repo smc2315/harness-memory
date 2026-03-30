@@ -17,7 +17,15 @@ import {
 } from "./types";
 
 function calculateMemoryScore(memory: MemoryRecord): number {
-  return memory.importance * memory.confidence;
+  const base = memory.importance * memory.confidence;
+  const freshnessReference = memory.lastVerifiedAt ?? memory.updatedAt ?? memory.createdAt;
+  const ageDays = Math.max(
+    0,
+    (Date.now() - Date.parse(freshnessReference)) / (1000 * 60 * 60 * 24)
+  );
+  const freshnessMultiplier = Math.max(0.75, 1 - ageDays * 0.01);
+
+  return base * freshnessMultiplier;
 }
 
 function compareMemories(left: MemoryRecord, right: MemoryRecord): number {
@@ -146,10 +154,22 @@ export class ActivationEngine {
     const maxPayloadBytes =
       request.maxPayloadBytes ?? DEFAULT_ACTIVATION_LIMITS.maxPayloadBytes;
     const activated: RankedMemory[] = [];
+    const perTypeCounts = new Map<string, number>();
+    const maxPerType = Math.max(1, Math.ceil(maxMemories * 0.6));
     let usedPayloadBytes = 0;
 
     for (const memory of eligible) {
       const payloadBytes = getPayloadBytes(memory);
+      const typeCount = perTypeCounts.get(memory.type) ?? 0;
+
+      if (typeCount >= maxPerType && eligible.some((item) => item.type !== memory.type)) {
+        suppressed.push({
+          memory,
+          kind: "type_balance_limit",
+          reason: `Activation type balance limit exceeded for ${memory.type}`,
+        });
+        continue;
+      }
 
       if (activated.length >= maxMemories) {
         suppressed.push({
@@ -170,6 +190,7 @@ export class ActivationEngine {
       }
 
       usedPayloadBytes += payloadBytes;
+      perTypeCounts.set(memory.type, typeCount + 1);
       activated.push({
         ...memory,
         score: calculateMemoryScore(memory),

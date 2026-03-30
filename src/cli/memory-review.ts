@@ -63,16 +63,12 @@ async function main(): Promise<void> {
     const memoryRepository = new MemoryRepository(db);
     const dreamRepository = new DreamRepository(db);
     const candidates = memoryRepository.list({ status: "candidate", limit: options.limit });
-    const pendingEvidence = dreamRepository.listEvidenceEvents({ limit: 200 });
+    const linkedEvidenceByMemoryId = dreamRepository.listLinkedEvidenceByMemoryIds(
+      candidates.map((memory) => memory.id)
+    );
 
     const entries: CandidateReviewEntry[] = candidates.map((memory) => {
-      const topicHint = memory.type === "pitfall" ? "pitfall" : "workflow";
-      const matchingEvidence = pendingEvidence
-        .filter(
-          (event) =>
-            event.typeGuess === topicHint &&
-            (event.scopeRef === memory.scopeGlob || memory.scopeGlob.includes(event.scopeRef))
-        )
+      const matchingEvidence = (linkedEvidenceByMemoryId.get(memory.id) ?? [])
         .slice(-5)
         .map((event) => ({
           id: event.id,

@@ -31,7 +31,7 @@ From a packed tarball:
 
 ```bash
 npm pack
-npm install ./harness-memory-0.2.1.tgz
+npm install ./harness-memory-<version>.tgz
 ```
 
 GitHub repository:
@@ -76,8 +76,11 @@ Examples:
 harness-memory init --db ./.harness-memory/memory.sqlite
 harness-memory memory:add --db ./.harness-memory/memory.sqlite --type policy --scope "src/**/*.ts" --summary "Prefer explicit adapters" --details "Keep harness integration thin." --triggers before_model --status active
 harness-memory dream:run --db ./.harness-memory/memory.sqlite --trigger manual --json
+harness-memory dream:evidence:list --db ./.harness-memory/memory.sqlite --json
+harness-memory dream:runs:list --db ./.harness-memory/memory.sqlite --json
 harness-memory memory:review --db ./.harness-memory/memory.sqlite --json
 harness-memory memory:promote --db ./.harness-memory/memory.sqlite --memory <candidate-id>
+harness-memory memory:reject --db ./.harness-memory/memory.sqlite --memory <candidate-id> --reason "too noisy"
 harness-memory memory:list --db ./.harness-memory/memory.sqlite --json
 harness-memory policy:check --db ./.harness-memory/memory.sqlite --scope src/core/repo.ts --trigger before_tool --tool edit
 harness-memory eval:baseline --output-dir ./artifacts/baseline
@@ -104,3 +107,5 @@ These wrappers call the underlying `npx harness-memory ...` commands so you can 
 - Runtime target: Node.js 18+
 - `dream:run` creates or refreshes `candidate` memories only. It does not auto-promote directly to `active`.
 - Manual review loop: `dream:run` -> `memory:review` -> `memory:promote` or `memory:reject`
+- Weak dream evidence is deferred or discarded with backoff instead of reprocessing forever.
+- Candidate review and history now include dream provenance links so operators can inspect why a candidate exists.

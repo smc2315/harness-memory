@@ -1,0 +1,8 @@
+{
+  "task_id": 8,
+  "title": "Before Model - Multi-Trigger Policy",
+  "baseline_condition": "md_only",
+  "miss_type": "policy_miss",
+  "severity": "high",
+  "notes": "Missed timeout-and-retry policy for external CRM calls; baseline likely writes a bare API call without reliability safeguards."
+}

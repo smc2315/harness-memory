@@ -80,6 +80,7 @@ Each dream run follows four phases.
 
 - Record a `dream_run`
 - Mark consumed evidence events
+- Defer or discard low-value evidence so it does not loop forever
 - Emit a concise summary of candidate creation/refresh/skip decisions
 
 ## Promotion Policy
@@ -96,10 +97,14 @@ Dream requires two persistence layers beyond the existing MVP tables:
 
 - `dream_evidence_events`
   - append-only recent signal store
-  - later consumed/discarded by dream runs
+  - later consumed/deferred/discarded by dream runs
 
 - `dream_runs`
   - run history, trigger reason, time window, and summary
+
+- `dream_memory_evidence_links`
+  - durable provenance from dream evidence events to candidate memories
+  - used by review/history and later audit flows
 
 The existing `memories` table already supports the candidate layer through `status = candidate`.
 
@@ -111,3 +116,4 @@ This design intentionally does **not** do the following yet:
 - transcript-wide reprocessing on every dream
 - vector search or graph-based consolidation
 - hidden, opaque relevance scoring that cannot be explained
+- LLM-based candidate creation in the default dream path

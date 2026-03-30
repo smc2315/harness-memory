@@ -10,7 +10,8 @@ export type ActivationSuppressionKind =
   | "trigger_mismatch"
   | "scope_mismatch"
   | "status_inactive"
-  | "budget_limit";
+  | "budget_limit"
+  | "type_balance_limit";
 
 export type ActivationConflictKind = "lineage_conflict";
 

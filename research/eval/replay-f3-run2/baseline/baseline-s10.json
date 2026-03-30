@@ -1,0 +1,8 @@
+{
+  "task_id": 10,
+  "title": "Session Start - High-Priority Policy",
+  "baseline_condition": "md_only",
+  "miss_type": "policy_miss",
+  "severity": "critical",
+  "notes": "Missed GDPR email-consent policy; baseline likely exposes user email by default in the admin response."
+}

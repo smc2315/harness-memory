@@ -1,4 +1,4 @@
-import initSqlJs, { Database as SqlJsDatabase } from "sql.js";
+import initSqlJs from "sql.js";
 import { readFileSync, existsSync } from "fs";
 
 async function inspectDatabase(dbPath: string): Promise<void> {

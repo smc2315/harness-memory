@@ -1,6 +1,6 @@
 {
   "name": "harness-memory",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Project memory layer for coding harnesses",
   "type": "module",
   "main": "./dist/index.js",
@@ -70,7 +70,10 @@
     "adapter:test": "node dist/cli/adapter-test.js",
     "db:migrate": "node dist/cli/migrate.js",
     "db:inspect": "node dist/cli/inspect.js",
+    "dream:evidence:list": "node dist/cli/dream-evidence-list.js",
     "dream:run": "node dist/cli/dream-run.js",
+    "dream:runs:list": "node dist/cli/dream-runs-list.js",
+    "dream:runs:show": "node dist/cli/dream-runs-show.js",
     "eval:baseline": "node dist/cli/eval-baseline.js",
     "eval:memory": "node dist/cli/eval-memory.js",
     "init": "node dist/cli/init.js",

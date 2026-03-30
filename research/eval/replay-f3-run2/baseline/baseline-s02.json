@@ -1,0 +1,8 @@
+{
+  "task_id": 2,
+  "title": "Before Model - Stale Workflow Preference",
+  "baseline_condition": "md_only",
+  "miss_type": "stale_memory",
+  "severity": "medium",
+  "notes": "Markdown likely surfaces the old bun-test preference before the newer vitest decision, causing mixed or outdated test workflow guidance."
+}

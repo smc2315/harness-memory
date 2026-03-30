@@ -1,0 +1,8 @@
+{
+  "task_id": 1,
+  "title": "Session Start - Forgotten Architecture Constraint",
+  "baseline_condition": "md_only",
+  "miss_type": "policy_miss",
+  "severity": "high",
+  "notes": "Missed repository-pattern architecture constraint for routes; likely writes inline SQLite access in src/routes/preferences.ts instead of using a repository boundary."
+}

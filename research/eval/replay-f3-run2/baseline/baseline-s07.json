@@ -1,0 +1,8 @@
+{
+  "task_id": 7,
+  "title": "After Tool - Evidence Capture for Future Promotion",
+  "baseline_condition": "md_only",
+  "miss_type": "none",
+  "severity": "low",
+  "notes": "Baseline may fix the export bug but does not create durable evidence or promotion suggestions; treated as a coverage gap rather than a scored miss."
+}

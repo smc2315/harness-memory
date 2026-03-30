@@ -8,6 +8,13 @@ import type {
 } from "../db/schema/types";
 import type { MemoryRecord } from "../memory";
 
+export interface DreamEvidenceLinkRecord {
+  evidenceEventId: string;
+  memoryId: string;
+  dreamRunId: string;
+  createdAt: string;
+}
+
 export interface DreamEvidenceEventRecord {
   id: string;
   sessionId: string;
@@ -25,9 +32,13 @@ export interface DreamEvidenceEventRecord {
   novelty: number;
   contradictionSignal: boolean;
   status: DreamEvidenceStatus;
+  retryCount: number;
+  nextReviewAt: string | null;
+  lastReviewedAt: string | null;
   dreamRunId: string | null;
   createdAt: string;
   consumedAt: string | null;
+  discardedAt: string | null;
 }
 
 export interface CreateDreamEvidenceEventInput {
@@ -89,7 +100,7 @@ export interface CompleteDreamRunInput {
 
 export interface DreamCandidateSuggestion {
   memoryId: string;
-  type: Extract<MemoryType, "workflow" | "pitfall">;
+  type: Extract<MemoryType, "policy" | "workflow" | "pitfall" | "architecture_constraint" | "decision">;
   action: "created" | "updated";
   scopeGlob: string;
   lifecycleTriggers: LifecycleTrigger[];
@@ -111,6 +122,14 @@ export interface DreamRunResult {
   run: DreamRunRecord;
   processedEvidenceCount: number;
   consumedEvidenceIds: string[];
+  deferredEvidenceIds: string[];
+  discardedEvidenceIds: string[];
   suggestions: DreamCandidateSuggestion[];
   skippedEvidenceIds: string[];
+}
+
+export interface ListDreamRunsInput {
+  limit?: number;
+  trigger?: DreamTrigger | readonly DreamTrigger[];
+  status?: DreamRunStatus | readonly DreamRunStatus[];
 }

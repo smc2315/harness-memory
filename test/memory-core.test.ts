@@ -139,4 +139,29 @@ describe("MemoryRepository", () => {
       })
     ).toThrow(DuplicateMemoryContentError);
   });
+
+  test("rejects candidate memory with a real rejected status", () => {
+    const candidate = repository.create({
+      type: "pitfall",
+      summary: "Temporary candidate",
+      details: "This should be rejected after review.",
+      scopeGlob: "src/**/*.ts",
+      lifecycleTriggers: ["before_tool"],
+      status: "candidate",
+      createdAt: "2026-03-28T00:00:00.000Z",
+      updatedAt: "2026-03-28T00:00:00.000Z",
+    });
+
+    const result = repository.rejectMemory({
+      memoryId: candidate.id,
+      reason: "Low-value one-off note",
+      updatedAt: "2026-03-28T02:00:00.000Z",
+      lastVerifiedAt: "2026-03-28T02:00:00.000Z",
+    });
+
+    expect(result.memory.status).toBe("rejected");
+    expect(result.evidence?.sourceRef).toBe("memory:reject");
+    expect(repository.list({ status: "candidate" })).toHaveLength(0);
+    expect(repository.list({ status: "rejected" })).toHaveLength(1);
+  });
 });
