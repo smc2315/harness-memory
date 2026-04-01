@@ -21,6 +21,11 @@ export {
   type MemoryRecord,
   type UpdateMemoryInput,
 } from "./repository";
+export {
+  CompositeMemoryRepository,
+  type MemoryTier,
+  type TieredMemoryRecord,
+} from "./composite-repository";
 export type { ActivationClass } from "../db/schema/types";
 export {
   createDeterministicId,

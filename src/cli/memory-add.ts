@@ -1,3 +1,5 @@
+import { homedir } from "os";
+import { resolve } from "path";
 import { openSqlJsDatabase, saveSqlJsDatabase } from "../db/sqlite";
 import {
   MemoryRepository,
@@ -110,6 +112,7 @@ function parseScore(value: string, field: "confidence" | "importance"): number {
 
 function parseArgs(argv: string[]): CliOptions {
   let dbPath = ".harness-memory/memory.sqlite";
+  let isGlobal = false;
   let type: MemoryType | null = null;
   let scopeGlob = "**/*";
   let summary = "";
@@ -127,6 +130,11 @@ function parseArgs(argv: string[]): CliOptions {
     if (arg === "--db" && index + 1 < argv.length) {
       dbPath = argv[index + 1];
       index += 1;
+      continue;
+    }
+
+    if (arg === "--global") {
+      isGlobal = true;
       continue;
     }
 
@@ -203,6 +211,11 @@ function parseArgs(argv: string[]): CliOptions {
 
   if (details.length === 0) {
     throw new Error("Missing required --details <text> argument");
+  }
+
+  // If --global, switch to global DB path
+  if (isGlobal) {
+    dbPath = resolve(homedir(), ".harness-memory", "global.sqlite");
   }
 
   return {

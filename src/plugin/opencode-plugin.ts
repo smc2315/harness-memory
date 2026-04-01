@@ -15,6 +15,7 @@
 
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { dirname, resolve } from "path";
+import { homedir } from "os";
 
 import { ActivationEngine, EmbeddingService } from "../activation";
 import { AuditLogger } from "../audit/logger";
@@ -32,7 +33,7 @@ import {
   writeGateState,
   incrementSessionCount,
 } from "../cli/dream-extract";
-import { MemoryRepository } from "../memory";
+import { MemoryRepository, CompositeMemoryRepository } from "../memory";
 import { PolicyEngine, PolicyRuleRepository } from "../policy";
 
 // ---------------------------------------------------------------------------
@@ -426,9 +427,43 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
       warn("Embedding warmup failed, falling back to lexical search:", error);
     });
 
+    // Load global DB if it exists (~/.harness-memory/global.sqlite).
+    const globalDbPath = resolve(homedir(), ".harness-memory", "global.sqlite");
+    let globalMemoryRepository: MemoryRepository | undefined;
+
+    try {
+      if (existsSync(globalDbPath)) {
+        await runMigrations(globalDbPath);
+        const globalDb = await openSqlJsDatabase(globalDbPath);
+        globalMemoryRepository = new MemoryRepository(globalDb);
+        log("Global memory loaded from", globalDbPath);
+      }
+    } catch (error) {
+      warn("Failed to load global memory DB:", error);
+    }
+
+    const compositeRepo = new CompositeMemoryRepository(memoryRepository, globalMemoryRepository);
+
+    // The activation engine needs to see memories from BOTH tiers.
+    // Create a thin wrapper that merges list() results while
+    // delegating writes to the project repo.
+    const mergedRepoForEngine = new Proxy(memoryRepository, {
+      get(target, prop, receiver) {
+        if (prop === "list") {
+          return (input: Record<string, unknown>) => compositeRepo.list(input);
+        }
+
+        if (prop === "getById") {
+          return (id: string) => compositeRepo.getById(id) ?? target.getById(id);
+        }
+
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as MemoryRepository;
+
     const auditLogger = new AuditLogger(db);
     auditLog = auditLogger;
-    const activationEngine = new ActivationEngine(memoryRepository, embeddingService, auditLogger);
+    const activationEngine = new ActivationEngine(mergedRepoForEngine, embeddingService, auditLogger);
     const policyRuleRepository = new PolicyRuleRepository(db);
     const policyEngine = new PolicyEngine(policyRuleRepository);
     const dreamRepository = new DreamRepository(db);

@@ -6,6 +6,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, resolve } from "path";
+import { homedir } from "os";
 
 import { runMigrations } from "../db/migrator";
 
@@ -153,6 +154,13 @@ async function main(): Promise<void> {
   mkdirSync(dbDir, { recursive: true });
   await runMigrations(dbPath, { log: () => {}, error: () => {} });
   createdFiles.push(dbPath);
+
+  // Also create the global DB if it doesn't exist.
+  const globalDbDir = resolve(homedir(), ".harness-memory");
+  const globalDbPath = resolve(globalDbDir, "global.sqlite");
+
+  mkdirSync(globalDbDir, { recursive: true });
+  await runMigrations(globalDbPath, { log: () => {}, error: () => {} });
 
   const pluginEntry = "harness-memory/plugin";
   if (existsSync(configPath)) {
