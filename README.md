@@ -159,18 +159,18 @@ The `install` command creates `opencode.json` automatically:
 
 No additional configuration needed. The plugin auto-detects the database at `.harness-memory/memory.sqlite`.
 
-## Comparison
+## Why Not Just CLAUDE.md?
 
-| Feature | CLAUDE.md | opencode-mem | harness-memory |
-|---------|-----------|--------------|----------------|
-| **Storage** | Single file | SQLite | SQLite (WASM) |
-| **Activation** | Manual dump | Auto-inject | 4-layer engine |
-| **Vector Search** | ❌ | ✅ | ✅ (multilingual) |
-| **Cross-Language** | ❌ | ❌ | ✅ |
-| **Lifecycle** | Manual edit | Auto-save | Evidence → Dream → Review |
-| **Audit Logging** | ❌ | ❌ | ✅ |
-| **Token Efficiency** | Low | Medium | High (41% savings) |
-| **Quality Control** | Manual | Auto | Human-in-loop |
+| | CLAUDE.md | harness-memory |
+|--|-----------|----------------|
+| **Storage** | Single file, manual edit | SQLite (WASM, zero native deps) |
+| **Activation** | Dump everything every turn | 4-layer engine: right memory, right time |
+| **Search** | None | Vector + lexical (multilingual) |
+| **Cross-Language** | ❌ | ✅ Korean ↔ English |
+| **Lifecycle** | Edit the file yourself | Evidence → Dream → Human Review |
+| **Token Cost** | Full dump every turn | 41% savings via selective injection |
+| **Quality** | Whatever you wrote | Curated, evidence-backed, auditable |
+| **Scaling** | Gets messy past 50 lines | Structured DB, handles hundreds |
 
 ## Development
 

@@ -1,6 +1,6 @@
 {
   "name": "harness-memory",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Project memory layer for coding harnesses",
   "license": "MIT",
   "type": "module",
