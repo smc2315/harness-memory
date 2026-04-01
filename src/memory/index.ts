@@ -21,6 +21,7 @@ export {
   type MemoryRecord,
   type UpdateMemoryInput,
 } from "./repository";
+export type { ActivationClass } from "../db/schema/types";
 export {
   createDeterministicId,
   createMemoryContentHash,

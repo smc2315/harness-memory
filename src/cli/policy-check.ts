@@ -26,7 +26,7 @@ function parseTrigger(value: string): LifecycleTrigger {
 }
 
 function parseArgs(argv: string[]): CliOptions {
-  let dbPath = "memory.sqlite";
+  let dbPath = ".harness-memory/memory.sqlite";
   let scopeRef = ".";
   let lifecycleTrigger: LifecycleTrigger = "before_tool";
   let tool: string | undefined;

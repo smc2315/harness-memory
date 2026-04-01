@@ -20,7 +20,7 @@ describe("ActivationEngine", () => {
     db.close();
   });
 
-  test("activates only active memories matching trigger and scope in stable rank order", () => {
+  test("activates only active memories matching trigger and scope in stable rank order", async () => {
     const highest = repository.create({
       type: "policy",
       summary: "Prefer explicit adapters",
@@ -66,7 +66,7 @@ describe("ActivationEngine", () => {
       updatedAt: "2026-03-28T00:30:00.000Z",
     });
 
-    const result = engine.activate({
+    const result = await engine.activate({
       lifecycleTrigger: "before_model",
       scopeRef: "src/memory/repository.ts",
     });
@@ -82,7 +82,7 @@ describe("ActivationEngine", () => {
     ]);
   });
 
-  test("suppresses non-matching scopes with explicit reasons", () => {
+  test("suppresses non-matching scopes with explicit reasons", async () => {
     repository.create({
       type: "workflow",
       summary: "Inspect db after migrate",
@@ -94,7 +94,7 @@ describe("ActivationEngine", () => {
       updatedAt: "2026-03-28T00:00:00.000Z",
     });
 
-    const result = engine.activate({
+    const result = await engine.activate({
       lifecycleTrigger: "before_model",
       scopeRef: "src/memory/repository.ts",
     });
@@ -105,7 +105,7 @@ describe("ActivationEngine", () => {
     expect(result.suppressed[0]?.reason).toContain("does not match");
   });
 
-  test("enforces memory count and payload budgets deterministically", () => {
+  test("enforces memory count and payload budgets deterministically", async () => {
     const first = repository.create({
       type: "policy",
       summary: "A",
@@ -131,7 +131,7 @@ describe("ActivationEngine", () => {
       updatedAt: "2026-03-28T00:10:00.000Z",
     });
 
-    const countLimited = engine.activate({
+    const countLimited = await engine.activate({
       lifecycleTrigger: "before_model",
       scopeRef: "src/memory/repository.ts",
       maxMemories: 1,
@@ -140,7 +140,7 @@ describe("ActivationEngine", () => {
     expect(countLimited.activated.map((memory) => memory.id)).toEqual([first.id]);
     expect(countLimited.suppressed[0]?.kind).toBe("budget_limit");
 
-    const payloadLimited = engine.activate({
+    const payloadLimited = await engine.activate({
       lifecycleTrigger: "before_model",
       scopeRef: "src/memory/repository.ts",
       maxMemories: 5,

@@ -19,7 +19,7 @@ interface FixturePolicyRuleInput {
 }
 
 function parseArgs(argv: string[]): CliOptions {
-  let dbPath = "memory.sqlite";
+  let dbPath = ".harness-memory/memory.sqlite";
   let json = false;
 
   for (let index = 0; index < argv.length; index += 1) {

@@ -16,6 +16,7 @@ export interface Memory {
   summary: string;
   details: string;
   scope_glob: string; // e.g., "src/**/*.ts"
+  activation_class: ActivationClass; // determines activation layer
   lifecycle_triggers: string; // JSON array of trigger types
   confidence: number; // 0.0-1.0
   importance: number; // 0.0-1.0
@@ -136,6 +137,11 @@ export type MemoryType = 'policy' | 'workflow' | 'pitfall' | 'architecture_const
 export type MemoryStatus = 'candidate' | 'active' | 'stale' | 'superseded' | 'rejected';
 
 /**
+ * Activation class - determines which activation layer handles the memory
+ */
+export type ActivationClass = 'baseline' | 'startup' | 'scoped' | 'event';
+
+/**
  * Evidence source kind enumeration
  */
 export type EvidenceSourceKind = 'session' | 'task' | 'file' | 'manual_note';
@@ -178,6 +184,7 @@ export const ACTIVATION_BUDGET = {
  */
 export const MEMORY_DEFAULTS = {
   STATUS: 'candidate' as const,
+  ACTIVATION_CLASS: 'scoped' as const,
   CONFIDENCE: 0.5,
   IMPORTANCE: 0.5,
 } as const;

@@ -4,7 +4,13 @@ import {
   type CreateMemoryInput,
   type MemoryRecord,
 } from "../memory";
-import type { LifecycleTrigger, MemoryStatus, MemoryType } from "../db/schema/types";
+import { EmbeddingService, cosineSimilarity } from "../activation/embeddings";
+import type {
+  ActivationClass,
+  LifecycleTrigger,
+  MemoryStatus,
+  MemoryType,
+} from "../db/schema/types";
 
 const VALID_TYPES: readonly MemoryType[] = [
   "policy",
@@ -28,6 +34,13 @@ const VALID_TRIGGERS: readonly LifecycleTrigger[] = [
   "after_tool",
 ];
 
+const VALID_ACTIVATION_CLASSES: readonly ActivationClass[] = [
+  "baseline",
+  "startup",
+  "scoped",
+  "event",
+];
+
 interface CliOptions {
   dbPath: string;
   type: MemoryType;
@@ -36,6 +49,7 @@ interface CliOptions {
   details: string;
   lifecycleTriggers: LifecycleTrigger[];
   status: MemoryStatus;
+  activationClass: ActivationClass;
   confidence?: number;
   importance?: number;
   json: boolean;
@@ -55,6 +69,14 @@ function parseMemoryStatus(value: string): MemoryStatus {
   }
 
   throw new Error(`Invalid memory status: ${value}`);
+}
+
+function parseActivationClass(value: string): ActivationClass {
+  if (VALID_ACTIVATION_CLASSES.includes(value as ActivationClass)) {
+    return value as ActivationClass;
+  }
+
+  throw new Error(`Invalid activation class: ${value}`);
 }
 
 function parseLifecycleTriggers(value: string): LifecycleTrigger[] {
@@ -87,13 +109,14 @@ function parseScore(value: string, field: "confidence" | "importance"): number {
 }
 
 function parseArgs(argv: string[]): CliOptions {
-  let dbPath = "memory.sqlite";
+  let dbPath = ".harness-memory/memory.sqlite";
   let type: MemoryType | null = null;
-  let scopeGlob = "";
+  let scopeGlob = "**/*";
   let summary = "";
   let details = "";
   let lifecycleTriggers: LifecycleTrigger[] = ["before_model"];
   let status: MemoryStatus = "candidate";
+  let activationClass: ActivationClass = "scoped";
   let confidence: number | undefined;
   let importance: number | undefined;
   let json = false;
@@ -143,6 +166,12 @@ function parseArgs(argv: string[]): CliOptions {
       continue;
     }
 
+    if (arg === "--activation-class" && index + 1 < argv.length) {
+      activationClass = parseActivationClass(argv[index + 1]);
+      index += 1;
+      continue;
+    }
+
     if (arg === "--confidence" && index + 1 < argv.length) {
       confidence = parseScore(argv[index + 1], "confidence");
       index += 1;
@@ -184,6 +213,7 @@ function parseArgs(argv: string[]): CliOptions {
     details,
     lifecycleTriggers,
     status,
+    activationClass,
     confidence,
     importance,
     json,
@@ -206,6 +236,55 @@ async function main(): Promise<void> {
 
   try {
     const repository = new MemoryRepository(db);
+
+    // Embedding-based dedup: skip if a very similar memory already exists.
+    const existingMemories = repository.list({});
+    const memoriesWithEmbeddings = existingMemories.filter(
+      (m) =>
+        m.embedding !== null &&
+        (m.status === "active" || m.status === "candidate"),
+    );
+
+    if (memoriesWithEmbeddings.length > 0) {
+      try {
+        const embeddingService = new EmbeddingService();
+        await embeddingService.warmup();
+
+        const newText = `${options.summary} ${options.details}`;
+        const newEmbedding = await embeddingService.embedPassage(newText);
+
+        let maxSimilarity = 0;
+        let mostSimilarSummary = "";
+
+        for (const existing of memoriesWithEmbeddings) {
+          if (existing.embedding === null) {
+            continue;
+          }
+
+          const sim = cosineSimilarity(newEmbedding, existing.embedding);
+
+          if (sim > maxSimilarity) {
+            maxSimilarity = sim;
+            mostSimilarSummary = existing.summary;
+          }
+        }
+
+        if (maxSimilarity > 0.85) {
+          const message = `Skipped: similar memory already exists (similarity=${maxSimilarity.toFixed(3)}, "${mostSimilarSummary}")`;
+
+          if (options.json) {
+            console.log(JSON.stringify({ skipped: true, reason: message, similarity: maxSimilarity }));
+          } else {
+            console.log(message);
+          }
+
+          return;
+        }
+      } catch {
+        // Embedding not available — proceed without dedup check.
+      }
+    }
+
     const created = repository.create({
       type: options.type,
       scopeGlob: options.scopeGlob,
@@ -213,6 +292,7 @@ async function main(): Promise<void> {
       details: options.details,
       lifecycleTriggers: options.lifecycleTriggers,
       status: options.status,
+      activationClass: options.activationClass,
       confidence: options.confidence,
       importance: options.importance,
     } satisfies CreateMemoryInput);

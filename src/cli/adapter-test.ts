@@ -18,7 +18,7 @@ function isScenario(value: string): value is AdapterTestScenario {
 }
 
 function parseArgs(argv: string[]): CliOptions {
-  let dbPath = "memory.sqlite";
+  let dbPath = ".harness-memory/memory.sqlite";
   let scenario: AdapterTestScenario = "before-model";
   let json = false;
 

@@ -1085,7 +1085,7 @@ async function runScenario(
     let warnings: PolicyWarning[] = [];
 
     if (definition.lifecycleTrigger === "session_start") {
-      activation = harness.activationEngine.activate({
+      activation = await harness.activationEngine.activate({
         lifecycleTrigger: "session_start",
         scopeRef: definition.scopeRef,
       });
@@ -1094,7 +1094,7 @@ async function runScenario(
         scopeRef: definition.scopeRef,
       }).warnings;
     } else if (definition.lifecycleTrigger === "before_model") {
-      const beforeModel = harness.adapter.beforeModel({
+      const beforeModel = await harness.adapter.beforeModel({
         sessionID,
         model: DETERMINISTIC_MODEL,
         scopeRef: definition.scopeRef,
@@ -1117,7 +1117,7 @@ async function runScenario(
         callID: tool.callID,
         scopeRef: definition.scopeRef,
       });
-      activation = harness.activationEngine.activate({
+      activation = await harness.activationEngine.activate({
         lifecycleTrigger: "before_tool",
         scopeRef: definition.scopeRef,
       });
@@ -1129,7 +1129,7 @@ async function runScenario(
         throw new Error(`Scenario ${definition.id} requires tool context`);
       }
 
-      const afterTool = harness.adapter.afterTool(
+      const afterTool = await harness.adapter.afterTool(
         {
           sessionID,
           tool: tool.name,

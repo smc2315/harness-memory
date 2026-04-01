@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, resolve } from "path";
 
 import { runMigrations } from "../db/migrator";
@@ -9,6 +9,7 @@ interface CliOptions {
   force: boolean;
   writeReadme: boolean;
   writeOpencodeCommands: boolean;
+  writeOpencodePlugin: boolean;
   json: boolean;
 }
 
@@ -18,6 +19,7 @@ function parseArgs(argv: string[]): CliOptions {
   let force = false;
   let writeReadme = true;
   let writeOpencodeCommands = true;
+  let writeOpencodePlugin = true;
   let json = false;
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -50,12 +52,17 @@ function parseArgs(argv: string[]): CliOptions {
       continue;
     }
 
+    if (arg === "--no-opencode-plugin") {
+      writeOpencodePlugin = false;
+      continue;
+    }
+
     if (arg === "--json") {
       json = true;
     }
   }
 
-  return { projectDir, dbPath, force, writeReadme, writeOpencodeCommands, json };
+  return { projectDir, dbPath, force, writeReadme, writeOpencodeCommands, writeOpencodePlugin, json };
 }
 
 function ensureParent(path: string): void {
@@ -132,6 +139,34 @@ async function main(): Promise<void> {
       if (writeFileMaybe(commandPath, content, options.force)) {
         createdFiles.push(commandPath);
       }
+    }
+  }
+
+  if (options.writeOpencodePlugin) {
+    const configPath = resolve(projectDir, "opencode.json");
+    const pluginEntry = "harness-memory/plugin";
+
+    if (existsSync(configPath) && !options.force) {
+      // Merge plugin entry into existing config if not already present.
+      try {
+        const existing = JSON.parse(readFileSync(configPath, "utf-8")) as Record<string, unknown>;
+        const plugins = Array.isArray(existing.plugin) ? existing.plugin as string[] : [];
+
+        if (!plugins.includes(pluginEntry)) {
+          existing.plugin = [...plugins, pluginEntry];
+          writeFileSync(configPath, JSON.stringify(existing, null, 2) + "\n", "utf-8");
+          createdFiles.push(configPath);
+        }
+      } catch {
+        // If the file is not valid JSON, do not overwrite it.
+      }
+    } else if (!existsSync(configPath)) {
+      writeFileSync(
+        configPath,
+        JSON.stringify({ plugin: [pluginEntry] }, null, 2) + "\n",
+        "utf-8",
+      );
+      createdFiles.push(configPath);
     }
   }
 

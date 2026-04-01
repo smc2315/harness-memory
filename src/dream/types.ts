@@ -133,3 +133,53 @@ export interface ListDreamRunsInput {
   trigger?: DreamTrigger | readonly DreamTrigger[];
   status?: DreamRunStatus | readonly DreamRunStatus[];
 }
+
+// ---------------------------------------------------------------------------
+// LLM-based extraction types (dream:extract pipeline)
+// ---------------------------------------------------------------------------
+
+/**
+ * Actions the LLM can propose for memory lifecycle management.
+ *
+ * - `create`    — new fact not covered by any existing memory → candidate
+ * - `reinforce` — existing memory confirmed again → bump confidence
+ * - `supersede` — existing memory replaced by updated fact → supersede old, create new
+ * - `stale`     — existing memory no longer valid → mark stale
+ */
+export type DreamExtractionAction = "create" | "reinforce" | "supersede" | "stale";
+
+/** A single memory extraction proposed by the LLM. */
+export interface DreamExtractedFact {
+  action: DreamExtractionAction;
+  /** Memory type for new memories. */
+  type?: "policy" | "workflow" | "pitfall" | "architecture_constraint" | "decision";
+  /** One-line summary. */
+  summary: string;
+  /** Detailed explanation. */
+  details: string;
+  /** For reinforce/supersede/stale: the ID of the existing memory. */
+  targetMemoryId?: string;
+  /** LLM's confidence in this extraction (0.0–1.0). */
+  confidence?: number;
+}
+
+/** The structured response expected from the LLM extraction call. */
+export interface DreamExtractionResult {
+  facts: DreamExtractedFact[];
+}
+
+/** Options for the LLM extraction process. */
+export interface DreamExtractionOptions {
+  /** Path to the SQLite database. */
+  dbPath: string;
+  /** Maximum number of batches to process per run. */
+  maxBatches?: number;
+  /** Minimum evidence count before extraction is allowed. */
+  minEvidenceCount?: number;
+  /** Minimum hours since the last extraction run. */
+  minHoursSinceLastExtract?: number;
+  /** Whether to skip scheduler gates (for testing). */
+  skipGates?: boolean;
+  /** Dry run — build prompt but don't call LLM. */
+  dryRun?: boolean;
+}

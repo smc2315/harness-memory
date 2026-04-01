@@ -12,3 +12,10 @@ export {
   type RankedMemory,
   type SuppressedMemory,
 } from "./types";
+export { LexicalIndex, type LexicalDocument, type LexicalSearchResult } from "./lexical";
+export {
+  EmbeddingService,
+  cosineSimilarity,
+  findTopK,
+  EMBEDDING_DIMENSIONS,
+} from "./embeddings";

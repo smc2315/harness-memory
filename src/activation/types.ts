@@ -19,6 +19,8 @@ export interface ActivationRequest {
   lifecycleTrigger: LifecycleTrigger;
   scopeRef: string;
   types?: readonly MemoryType[];
+  queryTokens?: string[];
+  repoFingerprint?: string[];
   maxMemories?: number;
   maxPayloadBytes?: number;
 }

@@ -1,6 +1,7 @@
 import type { Database as SqlJsDatabase } from "sql.js";
 
 import {
+  type ActivationClass,
   type EvidenceSourceKind,
   MEMORY_DEFAULTS,
   type LifecycleTrigger,
@@ -16,7 +17,7 @@ import {
   serializeLifecycleTriggers,
 } from "./utils";
 
-type SqlParameter = string | number | null;
+type SqlParameter = string | number | Uint8Array | null;
 type SqlParameters = Record<string, SqlParameter>;
 
 const MEMORY_SELECT_COLUMNS = [
@@ -35,6 +36,8 @@ const MEMORY_SELECT_COLUMNS = [
   "created_at",
   "updated_at",
   "last_verified_at",
+  "activation_class",
+  "embedding",
 ].join(", ");
 
 const EVIDENCE_SELECT_COLUMNS = [
@@ -62,6 +65,13 @@ const MEMORY_STATUSES = new Set<MemoryStatus>([
   "rejected",
 ]);
 
+const ACTIVATION_CLASSES = new Set<ActivationClass>([
+  "baseline",
+  "startup",
+  "scoped",
+  "event",
+]);
+
 const EVIDENCE_SOURCE_KINDS = new Set<EvidenceSourceKind>([
   "session",
   "task",
@@ -77,6 +87,7 @@ export interface MemoryRecord {
   summary: string;
   details: string;
   scopeGlob: string;
+  activationClass: ActivationClass;
   lifecycleTriggers: LifecycleTrigger[];
   confidence: number;
   importance: number;
@@ -85,6 +96,7 @@ export interface MemoryRecord {
   createdAt: string;
   updatedAt: string;
   lastVerifiedAt: string | null;
+  embedding: Float32Array | null;
 }
 
 export interface EvidenceRecord {
@@ -102,6 +114,7 @@ export interface CreateMemoryInput {
   summary: string;
   details: string;
   scopeGlob: string;
+  activationClass?: ActivationClass;
   lifecycleTriggers: readonly LifecycleTrigger[];
   confidence?: number;
   importance?: number;
@@ -110,6 +123,7 @@ export interface CreateMemoryInput {
   createdAt?: string;
   updatedAt?: string;
   lastVerifiedAt?: string | null;
+  embedding?: Float32Array;
 }
 
 export interface UpdateMemoryInput {
@@ -117,6 +131,7 @@ export interface UpdateMemoryInput {
   summary?: string;
   details?: string;
   scopeGlob?: string;
+  activationClass?: ActivationClass;
   lifecycleTriggers?: readonly LifecycleTrigger[];
   confidence?: number;
   importance?: number;
@@ -138,6 +153,7 @@ export interface CreateEvidenceInput {
 export interface ListMemoriesInput {
   status?: MemoryStatus | readonly MemoryStatus[];
   type?: MemoryType | readonly MemoryType[];
+  activationClass?: ActivationClass | readonly ActivationClass[];
   limit?: number;
   offset?: number;
 }
@@ -244,6 +260,10 @@ function isMemoryStatus(value: string): value is MemoryStatus {
   return MEMORY_STATUSES.has(value as MemoryStatus);
 }
 
+function isActivationClass(value: string): value is ActivationClass {
+  return ACTIVATION_CLASSES.has(value as ActivationClass);
+}
+
 function expectString(value: unknown, column: string): string {
   if (typeof value !== "string") {
     throw new Error(`Expected ${column} to be a string`);
@@ -286,6 +306,16 @@ function expectMemoryStatus(value: unknown): MemoryStatus {
   }
 
   return status;
+}
+
+function expectActivationClass(value: unknown): ActivationClass {
+  const activationClass = expectString(value, "activation_class");
+
+  if (!isActivationClass(activationClass)) {
+    throw new Error(`Invalid activation class: ${activationClass}`);
+  }
+
+  return activationClass;
 }
 
 function expectEvidenceSourceKind(value: unknown): EvidenceSourceKind {
@@ -348,6 +378,12 @@ function isMemoryTypeArray(
   return Array.isArray(value);
 }
 
+function isActivationClassArray(
+  value: ListMemoriesInput["activationClass"]
+): value is readonly ActivationClass[] {
+  return Array.isArray(value);
+}
+
 function toStatusArray(value: ListMemoriesInput["status"]): MemoryStatus[] {
   if (value === undefined) {
     return [];
@@ -362,6 +398,16 @@ function toTypeArray(value: ListMemoriesInput["type"]): MemoryType[] {
   }
 
   return isMemoryTypeArray(value) ? [...value] : [value];
+}
+
+function toActivationClassArray(
+  value: ListMemoriesInput["activationClass"]
+): ActivationClass[] {
+  if (value === undefined) {
+    return [];
+  }
+
+  return isActivationClassArray(value) ? [...value] : [value];
 }
 
 export class MemoryRepository {
@@ -422,6 +468,14 @@ export class MemoryRepository {
     const createdAt = input.createdAt ?? now;
     const updatedAt = input.updatedAt ?? createdAt;
     const id = input.id ?? createMemoryId(identityKey);
+    const embeddingBlob =
+      input.embedding === undefined
+        ? null
+        : new Uint8Array(
+            input.embedding.buffer,
+            input.embedding.byteOffset,
+            input.embedding.byteLength
+          );
 
     this.db.run(
       `
@@ -433,6 +487,7 @@ export class MemoryRepository {
           summary,
           details,
           scope_glob,
+          activation_class,
           lifecycle_triggers,
           confidence,
           importance,
@@ -440,7 +495,8 @@ export class MemoryRepository {
           supersedes_memory_id,
           created_at,
           updated_at,
-          last_verified_at
+          last_verified_at,
+          embedding
         )
         VALUES (
           $id,
@@ -450,6 +506,7 @@ export class MemoryRepository {
           $summary,
           $details,
           $scopeGlob,
+          $activationClass,
           $lifecycleTriggers,
           $confidence,
           $importance,
@@ -457,7 +514,8 @@ export class MemoryRepository {
           $supersedesMemoryId,
           $createdAt,
           $updatedAt,
-          $lastVerifiedAt
+          $lastVerifiedAt,
+          $embedding
         )
       `,
       {
@@ -468,6 +526,8 @@ export class MemoryRepository {
         $summary: input.summary,
         $details: input.details,
         $scopeGlob: input.scopeGlob,
+        $activationClass:
+          input.activationClass ?? MEMORY_DEFAULTS.ACTIVATION_CLASS,
         $lifecycleTriggers: serializeLifecycleTriggers(input.lifecycleTriggers),
         $confidence: normalizeScore(
           input.confidence ?? MEMORY_DEFAULTS.CONFIDENCE,
@@ -482,6 +542,7 @@ export class MemoryRepository {
         $createdAt: createdAt,
         $updatedAt: updatedAt,
         $lastVerifiedAt: input.lastVerifiedAt ?? null,
+        $embedding: embeddingBlob,
       }
     );
 
@@ -537,6 +598,17 @@ export class MemoryRepository {
       });
     }
 
+    const activationClasses = toActivationClassArray(input.activationClass);
+    if (activationClasses.length > 0) {
+      const placeholders = activationClasses.map(
+        (_, index) => `$activationClass${index}`
+      );
+      where.push(`activation_class IN (${placeholders.join(", ")})`);
+      activationClasses.forEach((activationClass, index) => {
+        params[`$activationClass${index}`] = activationClass;
+      });
+    }
+
     const limit = normalizeLimit(input.limit, "limit");
     const offset = normalizeLimit(input.offset, "offset");
 
@@ -559,6 +631,13 @@ export class MemoryRepository {
     ].filter((clause) => clause.length > 0);
 
     return this.selectMany(clauses.join(" "), params);
+  }
+
+  listWithEmbeddings(): MemoryRecord[] {
+    return this.selectMany(
+      `SELECT ${MEMORY_SELECT_COLUMNS} FROM memories WHERE embedding IS NOT NULL ORDER BY created_at DESC, id ASC`,
+      {}
+    );
   }
 
   createEvidence(input: CreateEvidenceInput): EvidenceRecord {
@@ -835,6 +914,7 @@ export class MemoryRepository {
           summary = $summary,
           details = $details,
           scope_glob = $scopeGlob,
+          activation_class = $activationClass,
           lifecycle_triggers = $lifecycleTriggers,
           confidence = $confidence,
           importance = $importance,
@@ -852,6 +932,7 @@ export class MemoryRepository {
         $summary: summary,
         $details: details,
         $scopeGlob: scopeGlob,
+        $activationClass: input.activationClass ?? existing.activationClass,
         $lifecycleTriggers: serializeLifecycleTriggers(lifecycleTriggers),
         $confidence: normalizeScore(
           input.confidence ?? existing.confidence,
@@ -875,6 +956,15 @@ export class MemoryRepository {
     );
 
     return this.getById(id);
+  }
+
+  updateEmbedding(id: string, embedding: Float32Array): void {
+    const blob = new Uint8Array(
+      embedding.buffer,
+      embedding.byteOffset,
+      embedding.byteLength
+    );
+    this.db.run("UPDATE memories SET embedding = ? WHERE id = ?", [blob, id]);
   }
 
   private replaceMemory(
@@ -1080,6 +1170,16 @@ export class MemoryRepository {
   }
 
   private mapMemoryRow(row: unknown[]): MemoryRecord {
+    const rawEmbedding = row[16];
+    const embedding =
+      rawEmbedding instanceof Uint8Array
+        ? new Float32Array(
+            rawEmbedding.buffer,
+            rawEmbedding.byteOffset,
+            rawEmbedding.byteLength / 4
+          )
+        : null;
+
     return {
       id: expectString(row[0], "id"),
       contentHash: expectString(row[1], "content_hash"),
@@ -1088,6 +1188,7 @@ export class MemoryRepository {
       summary: expectString(row[4], "summary"),
       details: expectString(row[5], "details"),
       scopeGlob: expectString(row[6], "scope_glob"),
+      activationClass: expectActivationClass(row[15]),
       lifecycleTriggers: parseLifecycleTriggers(
         expectString(row[7], "lifecycle_triggers")
       ),
@@ -1098,6 +1199,7 @@ export class MemoryRepository {
       createdAt: expectString(row[12], "created_at"),
       updatedAt: expectString(row[13], "updated_at"),
       lastVerifiedAt: expectNullableString(row[14], "last_verified_at"),
+      embedding,
     };
   }
 

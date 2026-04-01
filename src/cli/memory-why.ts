@@ -26,7 +26,7 @@ function parseTrigger(value: string): LifecycleTrigger {
 }
 
 function parseArgs(argv: string[]): CliOptions {
-  let dbPath = "memory.sqlite";
+  let dbPath = ".harness-memory/memory.sqlite";
   let scopeRef = ".";
   let lifecycleTrigger: LifecycleTrigger = "before_model";
   let json = false;
@@ -72,7 +72,7 @@ async function main(): Promise<void> {
   try {
     const repository = new MemoryRepository(db);
     const engine = new ActivationEngine(repository);
-    const result = engine.activate({
+    const result = await engine.activate({
       lifecycleTrigger: options.lifecycleTrigger,
       scopeRef: options.scopeRef,
     });

@@ -24,6 +24,9 @@ export interface AdapterBeforeModelInput {
   model: AdapterModelRef;
   scopeRef?: string;
   types?: readonly MemoryType[];
+  queryTokens?: string[];
+  repoFingerprint?: string[];
+  messageText?: string;
   maxMemories?: number;
   maxPayloadBytes?: number;
 }
@@ -115,3 +118,6 @@ export interface AdapterSessionContext {
   toolPolicyChecks: AdapterToolPolicyCheck[];
   toolEvidence: AdapterToolEvidenceCapture[];
 }
+
+export type AdapterBeforeModelResponse = Promise<AdapterBeforeModelResult>;
+export type AdapterAfterToolResponse = Promise<AdapterAfterToolResult>;

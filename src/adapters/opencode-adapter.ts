@@ -232,6 +232,11 @@ function formatMemoryLine(memory: RankedMemory): string {
   return `- [${presentation.tag}] ${summaryText}: ${detailText}`;
 }
 
+/**
+ * Format activated memories into prompt sections: static (baseline) and
+ * dynamic (scoped/vector results). This separation enables LLM prompt
+ * caching — the static section is identical across turns.
+ */
 function formatActivatedMemoryAdvisory(
   memories: readonly RankedMemory[]
 ): string | null {
@@ -239,20 +244,48 @@ function formatActivatedMemoryAdvisory(
     return null;
   }
 
-  const sections: string[] = ["## Active Memories"];
+  const baseline = memories.filter((m) => m.activationClass === "baseline");
+  const dynamic = memories.filter((m) => m.activationClass !== "baseline");
 
-  for (const memoryType of MEMORY_TYPE_ORDER) {
-    const matchingMemories = memories.filter((memory) => memory.type === memoryType);
+  const sections: string[] = [];
 
-    if (matchingMemories.length === 0) {
-      continue;
+  // Static section — baseline memories (cacheable, identical across turns)
+  if (baseline.length > 0) {
+    sections.push("## Project Baseline");
+
+    for (const memoryType of MEMORY_TYPE_ORDER) {
+      const matching = baseline.filter((m) => m.type === memoryType);
+
+      if (matching.length > 0) {
+        sections.push("");
+        sections.push(`### ${MEMORY_TYPE_PRESENTATION[memoryType].heading}`);
+
+        for (const memory of matching) {
+          sections.push(formatMemoryLine(memory));
+        }
+      }
+    }
+  }
+
+  // Dynamic section — scoped/vector/event memories (varies per turn)
+  if (dynamic.length > 0) {
+    if (baseline.length > 0) {
+      sections.push("");
     }
 
-    sections.push("");
-    sections.push(`### ${MEMORY_TYPE_PRESENTATION[memoryType].heading}`);
+    sections.push("## Context Memories");
 
-    for (const memory of matchingMemories) {
-      sections.push(formatMemoryLine(memory));
+    for (const memoryType of MEMORY_TYPE_ORDER) {
+      const matching = dynamic.filter((m) => m.type === memoryType);
+
+      if (matching.length > 0) {
+        sections.push("");
+        sections.push(`### ${MEMORY_TYPE_PRESENTATION[memoryType].heading}`);
+
+        for (const memory of matching) {
+          sections.push(formatMemoryLine(memory));
+        }
+      }
     }
   }
 
@@ -384,14 +417,16 @@ export class OpenCodeAdapter {
     return this.updateSessionMetadata(input.sessionID, input);
   }
 
-  beforeModel(input: AdapterBeforeModelInput): AdapterBeforeModelResult {
+  async beforeModel(input: AdapterBeforeModelInput): Promise<AdapterBeforeModelResult> {
     const session =
       input.sessionID === undefined ? null : this.getOrCreateSession(input.sessionID);
     const scopeRef = this.resolveScopeRef(input.scopeRef, session);
-    const activation = this.activationEngine.activate({
+    const activation = await this.activationEngine.activate({
       lifecycleTrigger: "before_model",
       scopeRef,
       types: input.types,
+      queryTokens: input.queryTokens,
+      repoFingerprint: input.repoFingerprint,
       maxMemories: input.maxMemories,
       maxPayloadBytes: input.maxPayloadBytes,
     });
@@ -457,13 +492,13 @@ export class OpenCodeAdapter {
     };
   }
 
-  afterTool(
+  async afterTool(
     input: AdapterAfterToolInput,
     output: AdapterAfterToolOutput
-  ): AdapterAfterToolResult {
+  ): Promise<AdapterAfterToolResult> {
     const session = this.getOrCreateSession(input.sessionID);
     const scopeRef = this.resolveScopeRef(input.scopeRef, session);
-    const activation = this.activationEngine.activate({
+    const activation = await this.activationEngine.activate({
       lifecycleTrigger: "after_tool",
       scopeRef,
       types: input.types,

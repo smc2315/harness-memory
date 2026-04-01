@@ -37,7 +37,7 @@ interface HistoryOutputEntry {
 }
 
 function parseArgs(argv: string[]): CliOptions {
-  let dbPath = "memory.sqlite";
+  let dbPath = ".harness-memory/memory.sqlite";
   let memoryId = "";
   let json = false;
 

@@ -2,7 +2,7 @@ import { MemoryRepository } from "../memory";
 import { openSqlJsDatabase, saveSqlJsDatabase } from "../db/sqlite";
 
 function parseDbPath(argv: string[]): string {
-  let dbPath = "memory.sqlite";
+  let dbPath = ".harness-memory/memory.sqlite";
 
   for (let index = 0; index < argv.length; index += 1) {
     if (argv[index] === "--db" && index + 1 < argv.length) {

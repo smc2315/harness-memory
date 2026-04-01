@@ -36,7 +36,7 @@ describe("OpenCodeAdapter", () => {
     expect(adapter.getSession(fixtures.sessionID)).toBe(session);
   });
 
-  test("injects bounded memory into before-model system text", () => {
+  test("injects bounded memory into before-model system text", async () => {
     const { adapter, fixtures } = prepareAdapterHarnessDb(db);
 
     adapter.initializeSession({
@@ -44,7 +44,7 @@ describe("OpenCodeAdapter", () => {
       agent: "adapter-test",
     });
 
-    const result = adapter.beforeModel({
+    const result = await adapter.beforeModel({
       sessionID: fixtures.sessionID,
       model: fixtures.model,
       scopeRef: fixtures.scopeRef,
@@ -53,7 +53,7 @@ describe("OpenCodeAdapter", () => {
     });
 
     expect(result.system).toHaveLength(1);
-    expect(result.advisoryText).toContain("## Active Memories");
+    expect(result.advisoryText).toMatch(/## (Project Baseline|Context Memories)/);
     expect(result.advisoryText).toContain("[POLICY]");
     expect(result.activation.activated.map((memory) => memory.id)).toEqual([
       fixtures.memoryIds.injected,
@@ -89,7 +89,7 @@ describe("OpenCodeAdapter", () => {
     expect(result.session.toolPolicyChecks[0]?.callID).toBe(fixtures.callID);
   });
 
-  test("captures after-tool evidence through the adapter", () => {
+  test("captures after-tool evidence through the adapter", async () => {
     const { adapter, dreamRepository, memoryRepository, fixtures } = prepareAdapterHarnessDb(db);
 
     adapter.initializeSession({
@@ -97,7 +97,7 @@ describe("OpenCodeAdapter", () => {
       agent: "adapter-test",
     });
 
-    const result = adapter.afterTool(
+    const result = await adapter.afterTool(
       {
         sessionID: fixtures.sessionID,
         tool: fixtures.toolName,

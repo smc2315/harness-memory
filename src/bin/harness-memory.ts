@@ -18,6 +18,7 @@ const COMMANDS = new Map<string, string>([
   ["policy:check", "../cli/policy-check.js"],
   ["adapter:test", "../cli/adapter-test.js"],
   ["dream:evidence:list", "../cli/dream-evidence-list.js"],
+  ["dream:extract", "../cli/dream-extract.js"],
   ["dream:run", "../cli/dream-run.js"],
   ["dream:runs:list", "../cli/dream-runs-list.js"],
   ["dream:runs:show", "../cli/dream-runs-show.js"],
@@ -26,6 +27,7 @@ const COMMANDS = new Map<string, string>([
   ["fixtures:add-conflict", "../cli/fixtures-add-conflict.js"],
   ["fixtures:add-duplicate-memory", "../cli/fixtures-add-duplicate-memory.js"],
   ["fixtures:add-policy-rules", "../cli/fixtures-add-policy-rules.js"],
+  ["install", "../cli/install.js"],
   ["init", "../cli/init.js"],
 ]);
 

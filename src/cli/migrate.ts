@@ -2,7 +2,7 @@ import { runMigrations } from "../db/migrator";
 
 // Parse command line arguments
 const args = process.argv.slice(2);
-let dbPath = "memory.sqlite";
+let dbPath = ".harness-memory/memory.sqlite";
 
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--db" && i + 1 < args.length) {

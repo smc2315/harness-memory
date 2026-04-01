@@ -25,7 +25,7 @@ interface FixtureMemoryInput {
 }
 
 function parseArgs(argv: string[]): CliOptions {
-  let dbPath = "memory.sqlite";
+  let dbPath = ".harness-memory/memory.sqlite";
   let json = false;
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -176,7 +176,7 @@ async function main(): Promise<void> {
     saveSqlJsDatabase(db, options.dbPath);
 
     const engine = new ActivationEngine(repository);
-    const activation = engine.activate({
+    const activation = await engine.activate({
       lifecycleTrigger: "before_model",
       scopeRef: "src/core/repo.ts",
     });

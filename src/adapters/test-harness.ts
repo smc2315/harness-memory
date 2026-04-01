@@ -399,10 +399,10 @@ export function prepareAdapterHarnessDb(db: SqlJsDatabase): AdapterHarness {
   };
 }
 
-export function runAdapterTestScenarioWithDb(
+export async function runAdapterTestScenarioWithDb(
   db: SqlJsDatabase,
   scenario: AdapterTestScenario
-): AdapterTestScenarioPayload {
+): Promise<AdapterTestScenarioPayload> {
   const harness = prepareAdapterHarnessDb(db);
   const { adapter, fixtures } = harness;
 
@@ -414,7 +414,7 @@ export function runAdapterTestScenarioWithDb(
   });
 
   if (scenario === "before-model") {
-    const result = adapter.beforeModel({
+    const result = await adapter.beforeModel({
       sessionID: fixtures.sessionID,
       model: fixtures.model,
       scopeRef: fixtures.scopeRef,
@@ -445,7 +445,7 @@ export function runAdapterTestScenarioWithDb(
     callID: fixtures.callID,
     scopeRef: fixtures.scopeRef,
   });
-  const evidenceResult = adapter.afterTool(
+  const evidenceResult = await adapter.afterTool(
     {
       sessionID: fixtures.sessionID,
       tool: fixtures.toolName,
@@ -483,7 +483,7 @@ export async function runAdapterTestScenario(
   const db = await openSqlJsDatabase(dbPath);
 
   try {
-    const result = runAdapterTestScenarioWithDb(db, scenario);
+    const result = await runAdapterTestScenarioWithDb(db, scenario);
     saveSqlJsDatabase(db, dbPath);
 
     if (result.scenario === "before-model") {
