@@ -14,7 +14,9 @@ import {
   createMemoryIdentityKey,
   createMemoryId,
   parseLifecycleTriggers,
+  parseRelevantTools,
   serializeLifecycleTriggers,
+  serializeRelevantTools,
 } from "./utils";
 
 type SqlParameter = string | number | Uint8Array | null;
@@ -33,11 +35,16 @@ const MEMORY_SELECT_COLUMNS = [
   "importance",
   "status",
   "supersedes_memory_id",
+  "promotion_source",
+  "ttl_expires_at",
+  "validation_count",
+  "policy_subtype",
   "created_at",
   "updated_at",
   "last_verified_at",
   "activation_class",
   "embedding",
+  "relevant_tools_json",
 ].join(", ");
 
 const EVIDENCE_SELECT_COLUMNS = [
@@ -93,10 +100,15 @@ export interface MemoryRecord {
   importance: number;
   status: MemoryStatus;
   supersedesMemoryId: string | null;
+  promotionSource: "manual" | "auto";
+  ttlExpiresAt: string | null;
+  validationCount: number;
+  policySubtype: "hard" | "soft" | null;
   createdAt: string;
   updatedAt: string;
   lastVerifiedAt: string | null;
   embedding: Float32Array | null;
+  relevantTools: string[] | null;
 }
 
 export interface EvidenceRecord {
@@ -124,6 +136,7 @@ export interface CreateMemoryInput {
   updatedAt?: string;
   lastVerifiedAt?: string | null;
   embedding?: Float32Array;
+  relevantTools?: string[] | null;
 }
 
 export interface UpdateMemoryInput {
@@ -137,8 +150,12 @@ export interface UpdateMemoryInput {
   importance?: number;
   status?: MemoryStatus;
   supersedesMemoryId?: string | null;
+  promotionSource?: "manual" | "auto";
+  ttlExpiresAt?: string | null;
+  validationCount?: number;
   updatedAt?: string;
   lastVerifiedAt?: string | null;
+  relevantTools?: string[] | null;
 }
 
 export interface CreateEvidenceInput {
@@ -496,7 +513,8 @@ export class MemoryRepository {
           created_at,
           updated_at,
           last_verified_at,
-          embedding
+          embedding,
+          relevant_tools_json
         )
         VALUES (
           $id,
@@ -515,7 +533,8 @@ export class MemoryRepository {
           $createdAt,
           $updatedAt,
           $lastVerifiedAt,
-          $embedding
+          $embedding,
+          $relevantToolsJson
         )
       `,
       {
@@ -543,6 +562,7 @@ export class MemoryRepository {
         $updatedAt: updatedAt,
         $lastVerifiedAt: input.lastVerifiedAt ?? null,
         $embedding: embeddingBlob,
+        $relevantToolsJson: serializeRelevantTools(input.relevantTools ?? null),
       }
     );
 
@@ -920,6 +940,10 @@ export class MemoryRepository {
           importance = $importance,
           status = $status,
           supersedes_memory_id = $supersedesMemoryId,
+          promotion_source = $promotionSource,
+          ttl_expires_at = $ttlExpiresAt,
+          validation_count = $validationCount,
+          relevant_tools_json = $relevantToolsJson,
           updated_at = $updatedAt,
           last_verified_at = $lastVerifiedAt
         WHERE id = $id
@@ -947,6 +971,17 @@ export class MemoryRepository {
           input.supersedesMemoryId !== undefined
             ? input.supersedesMemoryId
             : existing.supersedesMemoryId,
+        $promotionSource: input.promotionSource ?? existing.promotionSource,
+        $ttlExpiresAt:
+          input.ttlExpiresAt !== undefined
+            ? input.ttlExpiresAt
+            : existing.ttlExpiresAt,
+        $validationCount: input.validationCount ?? existing.validationCount,
+        $relevantToolsJson: serializeRelevantTools(
+          input.relevantTools !== undefined
+            ? input.relevantTools
+            : existing.relevantTools ?? null
+        ),
         $updatedAt: input.updatedAt ?? new Date().toISOString(),
         $lastVerifiedAt:
           input.lastVerifiedAt !== undefined
@@ -1170,7 +1205,7 @@ export class MemoryRepository {
   }
 
   private mapMemoryRow(row: unknown[]): MemoryRecord {
-    const rawEmbedding = row[16];
+    const rawEmbedding = row[20];
     const embedding =
       rawEmbedding instanceof Uint8Array
         ? new Float32Array(
@@ -1188,7 +1223,6 @@ export class MemoryRepository {
       summary: expectString(row[4], "summary"),
       details: expectString(row[5], "details"),
       scopeGlob: expectString(row[6], "scope_glob"),
-      activationClass: expectActivationClass(row[15]),
       lifecycleTriggers: parseLifecycleTriggers(
         expectString(row[7], "lifecycle_triggers")
       ),
@@ -1196,10 +1230,18 @@ export class MemoryRepository {
       importance: expectNumber(row[9], "importance"),
       status: expectMemoryStatus(row[10]),
       supersedesMemoryId: expectNullableString(row[11], "supersedes_memory_id"),
-      createdAt: expectString(row[12], "created_at"),
-      updatedAt: expectString(row[13], "updated_at"),
-      lastVerifiedAt: expectNullableString(row[14], "last_verified_at"),
+      promotionSource: (expectString(row[12], "promotion_source") as "manual" | "auto"),
+      ttlExpiresAt: expectNullableString(row[13], "ttl_expires_at"),
+      validationCount: expectNumber(row[14], "validation_count"),
+      policySubtype: expectNullableString(row[15], "policy_subtype") as "hard" | "soft" | null,
+      createdAt: expectString(row[16], "created_at"),
+      updatedAt: expectString(row[17], "updated_at"),
+      lastVerifiedAt: expectNullableString(row[18], "last_verified_at"),
+      activationClass: expectActivationClass(row[19]),
       embedding,
+      relevantTools: parseRelevantTools(
+        expectNullableString(row[21], "relevant_tools_json")
+      ),
     };
   }
 

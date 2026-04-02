@@ -32,7 +32,9 @@ export {
   createMemoryContentHash,
   createMemoryId,
   parseLifecycleTriggers,
+  parseRelevantTools,
   serializeLifecycleTriggers,
+  serializeRelevantTools,
   sortLifecycleTriggers,
   type MemoryContentInput,
 } from "./utils";

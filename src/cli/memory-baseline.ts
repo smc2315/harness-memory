@@ -1,7 +1,6 @@
 import { openSqlJsDatabase, saveSqlJsDatabase } from "../db/sqlite";
+import { MemoryRepository } from "../memory";
 import type { ActivationClass } from "../db/schema/types";
-import { MemoryRepository, type UpdateMemoryInput } from "../memory";
-import { scanMemoryContent } from "../security";
 
 const VALID_ACTIVATION_CLASSES: readonly ActivationClass[] = [
   "baseline",
@@ -13,7 +12,7 @@ const VALID_ACTIVATION_CLASSES: readonly ActivationClass[] = [
 interface CliOptions {
   dbPath: string;
   memoryId: string;
-  activationClass: ActivationClass | null;
+  activationClass: ActivationClass;
   json: boolean;
 }
 
@@ -29,30 +28,26 @@ function parseActivationClass(value: string): ActivationClass {
 function parseArgs(argv: string[]): CliOptions {
   let dbPath = ".harness-memory/memory.sqlite";
   let memoryId = "";
-  let activationClass: ActivationClass | null = null;
+  let activationClass: ActivationClass = "baseline";
   let json = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-
     if (arg === "--db" && index + 1 < argv.length) {
       dbPath = argv[index + 1];
       index += 1;
       continue;
     }
-
     if (arg === "--memory" && index + 1 < argv.length) {
       memoryId = argv[index + 1];
       index += 1;
       continue;
     }
-
     if (arg === "--activation-class" && index + 1 < argv.length) {
       activationClass = parseActivationClass(argv[index + 1]);
       index += 1;
       continue;
     }
-
     if (arg === "--json") {
       json = true;
     }
@@ -77,52 +72,19 @@ async function main(): Promise<void> {
       throw new Error(`Memory not found: ${options.memoryId}`);
     }
 
-    if (current.status !== "candidate") {
-      throw new Error(`Only candidate memories can be promoted (got ${current.status})`);
+    if (current.status !== "active" && current.status !== "candidate") {
+      throw new Error(
+        `Only active or candidate memories can have their activation class changed (got ${current.status})`,
+      );
     }
 
-    const scanResult = scanMemoryContent(current.summary, current.details);
-    const blockedThreats = scanResult.threats.filter((threat) => threat.severity === "block");
-
-    if (blockedThreats.length > 0) {
-      const threatDetails = blockedThreats
-        .map((threat) => `  [${threat.category}] ${threat.pattern}: ${threat.match}`)
-        .join("\n");
-
-      if (options.json) {
-        console.log(
-          JSON.stringify(
-            {
-              blocked: true,
-              memoryId: options.memoryId,
-              reason: "Security scan detected threats",
-              threats: blockedThreats,
-            },
-            null,
-            2
-          )
-        );
-      } else {
-        console.error(
-          `Blocked: Security scan detected threats in memory ${options.memoryId}:\n${threatDetails}`
-        );
-      }
-      process.exit(1);
-    }
-
-    const updateInput: UpdateMemoryInput = {
-      status: "active",
+    const updated = repository.update(options.memoryId, {
+      activationClass: options.activationClass,
       updatedAt: new Date().toISOString(),
-      lastVerifiedAt: new Date().toISOString(),
-    };
-    if (options.activationClass !== null) {
-      updateInput.activationClass = options.activationClass;
-    }
-
-    const updated = repository.update(options.memoryId, updateInput);
+    });
 
     if (updated === null) {
-      throw new Error(`Failed to promote memory: ${options.memoryId}`);
+      throw new Error(`Failed to update memory: ${options.memoryId}`);
     }
 
     saveSqlJsDatabase(db, options.dbPath);
@@ -132,7 +94,9 @@ async function main(): Promise<void> {
       return;
     }
 
-    console.log([updated.id, updated.status, updated.type, updated.summary].join("\t"));
+    console.log(
+      [updated.id, updated.activationClass, updated.status, updated.type, updated.summary].join("\t"),
+    );
   } finally {
     db.close();
   }

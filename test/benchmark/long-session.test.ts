@@ -694,7 +694,7 @@ describe("Benchmark: Long-Session Simulator", () => {
       for (const toolCall of turn.toolCalls) {
         const callID = `${turn.id}-${toolCall.tool}-${toolCallCount}`;
 
-        adapter.beforeTool({
+        await adapter.beforeTool({
           sessionID,
           tool: toolCall.tool,
           callID,
@@ -761,7 +761,7 @@ describe("Benchmark: Long-Session Simulator", () => {
       for (const toolCall of turn.toolCalls) {
         const callID = `${turn.id}-${toolCall.tool}-${callSeq}`;
 
-        adapter.beforeTool({
+        await adapter.beforeTool({
           sessionID,
           tool: toolCall.tool,
           callID,
@@ -882,7 +882,7 @@ describe("Benchmark: Long-Session Simulator", () => {
       for (const toolCall of turn.toolCalls) {
         const callID = `${turn.id}-${toolCall.tool}-${callSeq}`;
 
-        adapter.beforeTool({
+        await adapter.beforeTool({
           sessionID,
           tool: toolCall.tool,
           callID,
@@ -973,7 +973,7 @@ describe("Benchmark: Long-Session Simulator", () => {
       for (const toolCall of turn.toolCalls) {
         const callID = `${turn.id}-${toolCall.tool}-${callSeq}`;
 
-        adapter.beforeTool({
+        await adapter.beforeTool({
           sessionID,
           tool: toolCall.tool,
           callID,

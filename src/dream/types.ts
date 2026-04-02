@@ -30,6 +30,7 @@ export interface DreamEvidenceEventRecord {
   typeGuess: DreamEvidenceTypeGuess;
   salience: number;
   novelty: number;
+  salienceBoost: number;
   contradictionSignal: boolean;
   status: DreamEvidenceStatus;
   retryCount: number;
@@ -56,6 +57,7 @@ export interface CreateDreamEvidenceEventInput {
   typeGuess: DreamEvidenceTypeGuess;
   salience: number;
   novelty: number;
+  salienceBoost?: number;
   contradictionSignal?: boolean;
   createdAt?: string;
 }
@@ -109,6 +111,7 @@ export interface DreamCandidateSuggestion {
   importance: number;
   evidenceEventIds: string[];
   memory: MemoryRecord;
+  previousSummary: string | null;
 }
 
 export interface DreamRunRequest {

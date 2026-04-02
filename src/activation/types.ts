@@ -9,7 +9,9 @@ import type { MemoryRecord } from "../memory";
 export type ActivationSuppressionKind =
   | "trigger_mismatch"
   | "scope_mismatch"
+  | "tool_mismatch"
   | "status_inactive"
+  | "ttl_expired"
   | "budget_limit"
   | "type_balance_limit";
 
@@ -21,6 +23,7 @@ export interface ActivationRequest {
   types?: readonly MemoryType[];
   queryTokens?: string[];
   repoFingerprint?: string[];
+  toolName?: string;
   maxMemories?: number;
   maxPayloadBytes?: number;
 }

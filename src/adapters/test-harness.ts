@@ -439,7 +439,7 @@ export async function runAdapterTestScenarioWithDb(
     return payload;
   }
 
-  const warningResult = adapter.beforeTool({
+  const warningResult = await adapter.beforeTool({
     sessionID: fixtures.sessionID,
     tool: fixtures.toolName,
     callID: fixtures.callID,

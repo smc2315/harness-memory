@@ -18,10 +18,15 @@ export interface Memory {
   scope_glob: string; // e.g., "src/**/*.ts"
   activation_class: ActivationClass; // determines activation layer
   lifecycle_triggers: string; // JSON array of trigger types
+  relevant_tools_json: string | null; // JSON array of tool names, null = all tools
   confidence: number; // 0.0-1.0
   importance: number; // 0.0-1.0
   status: 'candidate' | 'active' | 'stale' | 'superseded' | 'rejected';
   supersedes_memory_id: string | null;
+  promotion_source: 'manual' | 'auto'; // how the memory was promoted
+  ttl_expires_at: string | null; // ISO 8601, auto-promoted memory expiry
+  validation_count: number; // revalidation count (reconfirmed evidence)
+  policy_subtype: 'hard' | 'soft' | null; // for policy type memories
   created_at: string; // ISO 8601
   updated_at: string; // ISO 8601
   last_verified_at: string | null; // ISO 8601
@@ -86,6 +91,7 @@ export interface DreamEvidenceEvent {
   type_guess: DreamEvidenceTypeGuess;
   salience: number;
   novelty: number;
+  salience_boost: number; // 0 = no boost, 0.1-0.3 for milestone moments
   contradiction_signal: 0 | 1;
   status: DreamEvidenceStatus;
   retry_count: number;
@@ -140,6 +146,16 @@ export type MemoryStatus = 'candidate' | 'active' | 'stale' | 'superseded' | 're
  * Activation class - determines which activation layer handles the memory
  */
 export type ActivationClass = 'baseline' | 'startup' | 'scoped' | 'event';
+
+/**
+ * How a memory was promoted from candidate to active.
+ */
+export type PromotionSource = 'manual' | 'auto';
+
+/**
+ * Policy subtype — determines auto-promotion eligibility for policy memories.
+ */
+export type PolicySubtype = 'hard' | 'soft' | null;
 
 /**
  * Evidence source kind enumeration

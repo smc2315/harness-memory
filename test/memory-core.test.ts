@@ -190,4 +190,57 @@ describe("MemoryRepository", () => {
     expect(repository.list({ status: "candidate" })).toHaveLength(0);
     expect(repository.list({ status: "rejected" })).toHaveLength(1);
   });
+
+  test("creates memory with relevantTools and reads them back", () => {
+    const created = repository.create({
+      type: "pitfall",
+      summary: "Never use --force with push",
+      details: "Always check branch status before push.",
+      scopeGlob: "**/*",
+      lifecycleTriggers: ["before_tool"],
+      relevantTools: ["bash", "edit"],
+      status: "active",
+    });
+    expect(created.relevantTools).toEqual(["bash", "edit"]);
+    const fetched = repository.getById(created.id);
+    expect(fetched?.relevantTools).toEqual(["bash", "edit"]);
+  });
+
+  test("creates memory without relevantTools defaults to null", () => {
+    const created = repository.create({
+      type: "workflow",
+      summary: "Standard workflow",
+      details: "Details here.",
+      scopeGlob: "src/**",
+      lifecycleTriggers: ["before_model"],
+      status: "active",
+    });
+    expect(created.relevantTools).toBeNull();
+  });
+
+  test("updates memory relevantTools", () => {
+    const created = repository.create({
+      type: "pitfall",
+      summary: "Tool-specific pitfall",
+      details: "Only relevant for bash.",
+      scopeGlob: "**/*",
+      lifecycleTriggers: ["before_tool"],
+      relevantTools: ["bash"],
+      status: "active",
+    });
+    const updated = repository.update(created.id, {
+      relevantTools: ["bash", "read", "edit"],
+    });
+    expect(updated?.relevantTools).toEqual(["bash", "edit", "read"]);
+  });
+
+  test("legacy memories without relevant_tools_json read as null", () => {
+    const id = "legacy-no-tools";
+    repository.db.run(
+      `INSERT INTO memories (id, content_hash, identity_key, type, summary, details, scope_glob, lifecycle_triggers, confidence, importance, status, activation_class, created_at, updated_at)
+       VALUES ('${id}', 'hash1', 'key1', 'policy', 'Legacy policy', 'Old details', '**/*', '["before_model"]', 0.5, 0.5, 'active', 'scoped', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`
+    );
+    const fetched = repository.getById(id);
+    expect(fetched?.relevantTools).toBeNull();
+  });
 });

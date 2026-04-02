@@ -226,14 +226,45 @@ Based on answers:
 
 ---
 
-## Future: Automatic Promotion
+## Conditional Auto-Promotion (B+ Model)
 
-The MVP requires manual approval for all promotions. Future versions may introduce automatic promotion for:
-- High-confidence candidates (e.g., repeated patterns across multiple sessions)
-- Low-risk types (e.g., workflow suggestions, not policies)
-- User-configured auto-promotion rules
+Since v0.4.0, harness-memory supports conditional auto-promotion for low-risk memory types.
 
-Automatic promotion is **explicitly out of scope** for MVP.
+### How It Works
+
+Auto-promotion runs after dream extraction (in `session.idle`). Candidates must pass ALL 5 gates:
+
+| Gate | Condition | Rationale |
+|------|-----------|-----------|
+| Security | `scanMemoryContent()` passes | No prompt injection / credential leaks |
+| Confidence | `confidence >= 0.85` | High-quality extractions only |
+| Evidence | `evidence >= 3` | Repeated observation, not single instance |
+| Type | `pitfall` or `workflow` only | Low-risk types first |
+| Policy | `policy` NEVER auto-promotes | Policies require human judgment |
+
+### Trust Scoring
+
+Auto-promoted memories start with lower activation scores:
+
+| Source | Validation Count | Trust Multiplier |
+|--------|-----------------|------------------|
+| Manual | — | 1.00 |
+| Auto | 0 | 0.65 |
+| Auto | 1 | 0.80 |
+| Auto | ≥2 | 0.95 |
+
+### TTL Management
+
+- Auto-promoted memories get a 14-day TTL
+- Revalidation (same-topic evidence) extends TTL by 14 days and increments `validation_count`
+- Contradicting evidence immediately marks the memory as `stale`
+- Manual memories have no TTL (permanent until manually changed)
+
+### Demotion
+
+- `memory:demote <id>` — manually revert active → stale
+- Contradicting evidence → automatic stale transition
+- TTL expiration → suppressed from activation (not deleted)
 
 ---
 

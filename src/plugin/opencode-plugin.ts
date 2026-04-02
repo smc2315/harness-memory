@@ -636,6 +636,19 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
 
       saveDb();
 
+      // Run auto-promotion cycle after extraction
+      const promoRepo = new MemoryRepository(dbInstance!);
+      const { runAutoPromotionCycle } = await import("../promotion/auto-promoter");
+      const promoResult = await runAutoPromotionCycle(promoRepo);
+
+      if (promoResult.promoted.length > 0) {
+        for (const p of promoResult.promoted) {
+          log("Auto-promoted:", `[${p.summary}]`);
+        }
+
+        saveDb();
+      }
+
       // Show toast notification for review
       const applied = actionResults.filter((r) => !r.skipped);
 
@@ -852,7 +865,7 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
         pendingToolArgs.set(input.callID, output.args);
 
         if (currentSessionID !== undefined) {
-          adp.beforeTool({
+          await adp.beforeTool({
             sessionID: currentSessionID,
             tool: input.tool,
             callID: input.callID,

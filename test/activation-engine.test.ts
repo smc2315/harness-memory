@@ -154,4 +154,71 @@ describe("ActivationEngine", () => {
     expect(payloadLimited.budget.usedPayloadBytes).toBe(0);
     expect(second.id).toBeTruthy();
   });
+
+  test("suppresses memory when toolName does not match relevantTools", async () => {
+    const memory = repository.create({
+      type: "workflow",
+      summary: "Use bash for workspace scripts",
+      details: "Run scripted checks via bash tool.",
+      scopeGlob: "src/**/*.ts",
+      lifecycleTriggers: ["before_model"],
+      status: "active",
+      relevantTools: ["bash"],
+    });
+
+    const result = await engine.activate({
+      lifecycleTrigger: "before_model",
+      scopeRef: "src/activation/engine.ts",
+      toolName: "edit",
+      maxMemories: 1,
+    });
+
+    expect(result.activated).toHaveLength(0);
+    expect(result.suppressed).toHaveLength(1);
+    expect(result.suppressed[0]?.memory.id).toBe(memory.id);
+    expect(result.suppressed[0]?.kind).toBe("tool_mismatch");
+  });
+
+  test("activates memory when toolName matches relevantTools", async () => {
+    const memory = repository.create({
+      type: "workflow",
+      summary: "Use edit for source changes",
+      details: "Prefer edit for code modifications.",
+      scopeGlob: "src/**/*.ts",
+      lifecycleTriggers: ["before_model"],
+      status: "active",
+      relevantTools: ["bash", "edit"],
+    });
+
+    const result = await engine.activate({
+      lifecycleTrigger: "before_model",
+      scopeRef: "src/activation/engine.ts",
+      toolName: "edit",
+      maxMemories: 1,
+    });
+
+    expect(result.activated.map((entry) => entry.id)).toContain(memory.id);
+    expect(result.suppressed.map((entry) => entry.kind)).not.toContain("tool_mismatch");
+  });
+
+  test("activates memory when relevantTools is null (backward compat)", async () => {
+    const memory = repository.create({
+      type: "workflow",
+      summary: "General workflow memory",
+      details: "Applies regardless of tool.",
+      scopeGlob: "src/**/*.ts",
+      lifecycleTriggers: ["before_model"],
+      status: "active",
+    });
+
+    const result = await engine.activate({
+      lifecycleTrigger: "before_model",
+      scopeRef: "src/activation/engine.ts",
+      toolName: "bash",
+      maxMemories: 1,
+    });
+
+    expect(result.activated.map((entry) => entry.id)).toContain(memory.id);
+    expect(result.suppressed.map((entry) => entry.kind)).not.toContain("tool_mismatch");
+  });
 });

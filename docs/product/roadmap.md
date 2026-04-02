@@ -37,7 +37,15 @@ Exit criteria:
 Do not pull these into the next roadmap phase unless new evidence demands them:
 - vector retrieval
 - graph storage
-- autonomous promotion
 - personal-memory features
 - replacing markdown as the source of truth
 - broad platform packaging before the live benchmark is complete
+
+## Completed: Conditional Auto-Promotion (v0.4.0)
+
+Moved from "Explicitly Deferred" after implementing the B+ model:
+- 5-gate conditional promotion (security, confidence, evidence, type, policy exclusion)
+- Trust multiplier scoring (auto memories start at 0.65, earn up to 0.95 through revalidation)
+- 14-day TTL for auto-promoted memories with revalidation extension
+- Negative evidence demotion (contradiction → immediate stale)
+- `memory:demote` CLI for manual reversion

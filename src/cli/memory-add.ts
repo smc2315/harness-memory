@@ -50,6 +50,7 @@ interface CliOptions {
   summary: string;
   details: string;
   lifecycleTriggers: LifecycleTrigger[];
+  relevantTools: string[] | null;
   status: MemoryStatus;
   activationClass: ActivationClass;
   confidence?: number;
@@ -118,6 +119,7 @@ function parseArgs(argv: string[]): CliOptions {
   let summary = "";
   let details = "";
   let lifecycleTriggers: LifecycleTrigger[] = ["before_model"];
+  let relevantTools: string[] | null = null;
   let status: MemoryStatus = "candidate";
   let activationClass: ActivationClass = "scoped";
   let confidence: number | undefined;
@@ -192,6 +194,18 @@ function parseArgs(argv: string[]): CliOptions {
       continue;
     }
 
+    if (arg === "--relevant-tools" && index + 1 < argv.length) {
+      relevantTools = argv[index + 1]
+        .split(",")
+        .map((toolName) => toolName.trim())
+        .filter((toolName) => toolName.length > 0);
+      if (relevantTools.length === 0) {
+        relevantTools = null;
+      }
+      index += 1;
+      continue;
+    }
+
     if (arg === "--json") {
       json = true;
     }
@@ -225,6 +239,7 @@ function parseArgs(argv: string[]): CliOptions {
     summary,
     details,
     lifecycleTriggers,
+    relevantTools,
     status,
     activationClass,
     confidence,
@@ -304,6 +319,7 @@ async function main(): Promise<void> {
       summary: options.summary,
       details: options.details,
       lifecycleTriggers: options.lifecycleTriggers,
+      relevantTools: options.relevantTools,
       status: options.status,
       activationClass: options.activationClass,
       confidence: options.confidence,

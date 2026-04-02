@@ -62,7 +62,7 @@ describe("Conversation Buffer Integration", () => {
     });
 
     // Simulate a tool call
-    adapter.beforeTool({
+    await adapter.beforeTool({
       sessionID,
       tool: "edit",
       callID: "call-001",
@@ -109,7 +109,7 @@ describe("Conversation Buffer Integration", () => {
     ];
 
     for (const tc of toolCalls) {
-      adapter.beforeTool({ sessionID, tool: tc.tool, callID: tc.callID });
+      await adapter.beforeTool({ sessionID, tool: tc.tool, callID: tc.callID });
       await adapter.afterTool(
         { sessionID, tool: tc.tool, callID: tc.callID, args: {} },
         { title: tc.title, output: tc.output },
@@ -729,6 +729,7 @@ function makeBatchEvent(excerpt: string): DreamEvidenceEventRecord {
     typeGuess: "workflow",
     salience: 0.5,
     novelty: 0.8,
+    salienceBoost: 0,
     contradictionSignal: false,
     status: "pending",
     retryCount: 0,

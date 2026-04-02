@@ -27,8 +27,16 @@ function calculateMemoryScore(memory: MemoryRecord): number {
     (Date.now() - Date.parse(freshnessReference)) / (1000 * 60 * 60 * 24)
   );
   const freshnessMultiplier = Math.max(0.75, 1 - ageDays * 0.01);
+  const trustMultiplier =
+    memory.promotionSource === "manual"
+      ? 1
+      : memory.validationCount === 0
+        ? 0.65
+        : memory.validationCount === 1
+          ? 0.8
+          : 0.95;
 
-  return base * freshnessMultiplier;
+  return base * freshnessMultiplier * trustMultiplier;
 }
 
 function compareMemories(left: MemoryRecord, right: MemoryRecord): number {
@@ -122,9 +130,7 @@ export class ActivationEngine {
     const activationStart = Date.now();
     const scopeRef = normalizeScopeRef(request.scopeRef);
     const allMemories = this.repository.list(buildTypeFilter(request.types));
-    const activeMemories = allMemories.filter((memory) =>
-      DEFAULT_ACTIVE_STATUSES.includes(memory.status)
-    );
+    const activeMemories: MemoryRecord[] = [];
     const suppressed: SuppressedMemory[] = [];
 
     for (const memory of allMemories) {
@@ -134,7 +140,19 @@ export class ActivationEngine {
           kind: "status_inactive",
           reason: `Memory status ${memory.status} is not eligible for activation`,
         });
+        continue;
       }
+
+      if (memory.ttlExpiresAt !== null && new Date(memory.ttlExpiresAt) < new Date()) {
+        suppressed.push({
+          memory,
+          kind: "ttl_expired",
+          reason: `Auto-promoted memory TTL expired at ${memory.ttlExpiresAt}`,
+        });
+        continue;
+      }
+
+      activeMemories.push(memory);
     }
 
     const maxMemories = request.maxMemories ?? DEFAULT_ACTIVATION_LIMITS.maxMemories;
@@ -296,6 +314,19 @@ export class ActivationEngine {
         continue;
       }
 
+      if (
+        request.toolName !== undefined &&
+        memory.relevantTools !== null &&
+        !memory.relevantTools.includes(request.toolName)
+      ) {
+        suppressed.push({
+          memory,
+          kind: "tool_mismatch",
+          reason: `Memory relevant tools [${memory.relevantTools.join(",")}] do not include ${request.toolName}`,
+        });
+        continue;
+      }
+
       const added = tryAdd(memory);
       if (added === "memory_budget") {
         suppressed.push({
@@ -394,6 +425,11 @@ export class ActivationEngine {
           memory.lifecycleTriggers.includes(request.lifecycleTrigger)
         )
         .filter((memory) => matchesScope(memory.scopeGlob, scopeRef))
+        .filter((memory) =>
+          request.toolName === undefined ||
+          memory.relevantTools === null ||
+          memory.relevantTools.includes(request.toolName)
+        )
         .sort(
           (left, right) =>
             Date.parse(right.updatedAt) - Date.parse(left.updatedAt)

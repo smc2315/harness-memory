@@ -1,6 +1,7 @@
 import { ActivationEngine, type RankedMemory } from "../activation";
 import { DreamRepository } from "../dream";
 import { PolicyEngine, type PolicyWarning } from "../policy";
+import { scanMemoryContent } from "../security";
 
 import type {
   AdapterAfterToolInput,
@@ -31,6 +32,7 @@ interface MemoryTypePresentation {
 }
 
 type PresentedMemoryType = typeof MEMORY_TYPE_ORDER[number];
+type DisclosureTier = "full" | "summary" | "hint";
 
 const MEMORY_TYPE_PRESENTATION: Record<PresentedMemoryType, MemoryTypePresentation> = {
   policy: { heading: "Policies", tag: "POLICY" },
@@ -45,6 +47,8 @@ const MEMORY_TYPE_PRESENTATION: Record<PresentedMemoryType, MemoryTypePresentati
 
 const DEFAULT_SCOPE_REF = ".";
 const DEFAULT_EVIDENCE_EXCERPT_MAX_CHARS = 2000;
+const DEFAULT_SALIENCE_BOUNDARY_INTERVAL = 10;
+const DEFAULT_SALIENCE_BOUNDARY_BOOST = 0.15;
 
 export interface OpenCodeAdapterOptions {
   activationEngine: ActivationEngine;
@@ -52,6 +56,8 @@ export interface OpenCodeAdapterOptions {
   dreamRepository?: DreamRepository;
   defaultScopeRef?: string;
   evidenceExcerptMaxChars?: number;
+  salienceBoundaryInterval?: number;
+  salienceBoundaryBoost?: number;
 }
 
 function buildDreamTopicGuess(
@@ -220,9 +226,18 @@ function mergeSessionMetadata(
   return next;
 }
 
-function formatMemoryLine(memory: RankedMemory): string {
+function formatMemoryLine(memory: RankedMemory, tier: DisclosureTier): string {
   const presentation = MEMORY_TYPE_PRESENTATION[memory.type];
   const summaryText = collapseWhitespace(memory.summary);
+
+  if (tier === "hint") {
+    return `- [${presentation.tag}] ${summaryText} [expand: memory:view ${memory.id}]`;
+  }
+
+  if (tier === "summary") {
+    return `- [${presentation.tag}] ${summaryText}`;
+  }
+
   const detailText = collapseWhitespace(memory.details);
 
   if (detailText.length === 0) {
@@ -230,6 +245,20 @@ function formatMemoryLine(memory: RankedMemory): string {
   }
 
   return `- [${presentation.tag}] ${summaryText}: ${detailText}`;
+}
+
+function getDisclosureTier(rank: number, totalCount: number): DisclosureTier {
+  void totalCount;
+
+  if (rank <= 5) {
+    return "full";
+  }
+
+  if (rank <= 8) {
+    return "summary";
+  }
+
+  return "hint";
 }
 
 /**
@@ -240,12 +269,17 @@ function formatMemoryLine(memory: RankedMemory): string {
 function formatActivatedMemoryAdvisory(
   memories: readonly RankedMemory[]
 ): string | null {
-  if (memories.length === 0) {
+  const safeMemories = memories.filter((memory) => {
+    const result = scanMemoryContent(memory.summary, memory.details);
+    return result.safe;
+  });
+
+  if (safeMemories.length === 0) {
     return null;
   }
 
-  const baseline = memories.filter((m) => m.activationClass === "baseline");
-  const dynamic = memories.filter((m) => m.activationClass !== "baseline");
+  const baseline = safeMemories.filter((m) => m.activationClass === "baseline");
+  const dynamic = safeMemories.filter((m) => m.activationClass !== "baseline");
 
   const sections: string[] = [];
 
@@ -261,7 +295,8 @@ function formatActivatedMemoryAdvisory(
         sections.push(`### ${MEMORY_TYPE_PRESENTATION[memoryType].heading}`);
 
         for (const memory of matching) {
-          sections.push(formatMemoryLine(memory));
+          const tier: DisclosureTier = "full";
+          sections.push(formatMemoryLine(memory, tier));
         }
       }
     }
@@ -283,7 +318,8 @@ function formatActivatedMemoryAdvisory(
         sections.push(`### ${MEMORY_TYPE_PRESENTATION[memoryType].heading}`);
 
         for (const memory of matching) {
-          sections.push(formatMemoryLine(memory));
+          const tier = getDisclosureTier(memory.rank, safeMemories.length);
+          sections.push(formatMemoryLine(memory, tier));
         }
       }
     }
@@ -364,6 +400,8 @@ export class OpenCodeAdapter {
   readonly dreamRepository: DreamRepository | null;
   readonly defaultScopeRef: string;
   readonly evidenceExcerptMaxChars: number;
+  readonly salienceBoundaryInterval: number;
+  readonly salienceBoundaryBoost: number;
 
   private readonly sessions = new Map<string, AdapterSessionContext>();
 
@@ -374,6 +412,10 @@ export class OpenCodeAdapter {
     this.defaultScopeRef = options.defaultScopeRef ?? DEFAULT_SCOPE_REF;
     this.evidenceExcerptMaxChars =
       options.evidenceExcerptMaxChars ?? DEFAULT_EVIDENCE_EXCERPT_MAX_CHARS;
+    this.salienceBoundaryInterval =
+      options.salienceBoundaryInterval ?? DEFAULT_SALIENCE_BOUNDARY_INTERVAL;
+    this.salienceBoundaryBoost =
+      options.salienceBoundaryBoost ?? DEFAULT_SALIENCE_BOUNDARY_BOOST;
   }
 
   getSession(sessionID: string): AdapterSessionContext | null {
@@ -397,6 +439,7 @@ export class OpenCodeAdapter {
       lastBeforeModel: null,
       toolPolicyChecks: [],
       toolEvidence: [],
+      toolCallCount: 0,
     };
 
     this.sessions.set(sessionID, session);
@@ -462,7 +505,32 @@ export class OpenCodeAdapter {
     };
   }
 
-  beforeTool(input: AdapterBeforeToolInput): AdapterBeforeToolResult {
+  expandMemory(memoryId: string): string | null {
+    const memory = this.activationEngine.repository.getById(memoryId);
+    if (memory === null) {
+      return null;
+    }
+
+    const scanResult = scanMemoryContent(memory.summary, memory.details);
+    if (!scanResult.safe) {
+      return null;
+    }
+
+    const presentation = MEMORY_TYPE_PRESENTATION[memory.type];
+    if (presentation === undefined) {
+      return null;
+    }
+
+    return [
+      `## ${presentation.heading}: ${memory.summary}`,
+      "",
+      memory.details,
+      "",
+      `Type: ${memory.type} | Scope: ${memory.scopeGlob} | Confidence: ${memory.confidence}`,
+    ].join("\n");
+  }
+
+  async beforeTool(input: AdapterBeforeToolInput): Promise<AdapterBeforeToolResult> {
     const session = this.getOrCreateSession(input.sessionID);
     const scopeRef = this.resolveScopeRef(input.scopeRef, session);
     const evaluation = this.policyEngine.evaluate({
@@ -470,6 +538,12 @@ export class OpenCodeAdapter {
       scopeRef,
     });
     const warningText = formatPolicyWarnings(evaluation.warnings);
+    const activation = await this.activationEngine.activate({
+      lifecycleTrigger: "before_tool",
+      scopeRef,
+      toolName: input.tool,
+    });
+    const advisoryText = formatActivatedMemoryAdvisory(activation.activated);
     const policyCheck: AdapterToolPolicyCheck = {
       toolName: input.tool,
       callID: input.callID,
@@ -487,6 +561,8 @@ export class OpenCodeAdapter {
       session,
       warnings: evaluation.warnings,
       warningText,
+      advisoryText,
+      activation,
       evaluatedAt: evaluation.evaluatedAt,
       blocked: false,
     };
@@ -510,6 +586,11 @@ export class OpenCodeAdapter {
     );
     const sourceRef = `${input.sessionID}:${input.callID}:${input.tool}`;
     const createdAt = nowIsoString();
+    session.toolCallCount += 1;
+    const salienceBoost =
+      session.toolCallCount % this.salienceBoundaryInterval === 0
+        ? this.salienceBoundaryBoost
+        : 0;
     const createdEvidence = activation.activated.map((memory) =>
       this.activationEngine.repository.createEvidence({
         memoryId: memory.id,
@@ -547,6 +628,7 @@ export class OpenCodeAdapter {
           activation.activated.length,
           activation.conflicts.length
         ),
+        salienceBoost,
         contradictionSignal: activation.conflicts.length > 0,
         createdAt,
       });

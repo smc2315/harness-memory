@@ -1111,7 +1111,7 @@ async function runScenario(
         throw new Error(`Scenario ${definition.id} requires tool context`);
       }
 
-      const beforeTool = harness.adapter.beforeTool({
+      const beforeTool = await harness.adapter.beforeTool({
         sessionID,
         tool: tool.name,
         callID: tool.callID,

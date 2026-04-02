@@ -86,6 +86,46 @@ export function parseLifecycleTriggers(serialized: string): LifecycleTrigger[] {
   return sortLifecycleTriggers(triggers);
 }
 
+export function serializeRelevantTools(
+  tools: readonly string[] | null
+): string | null {
+  if (tools === null || tools.length === 0) {
+    return null;
+  }
+
+  return JSON.stringify([...new Set(tools)].sort());
+}
+
+export function parseRelevantTools(serialized: string | null): string[] | null {
+  if (serialized === null) {
+    return null;
+  }
+
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(serialized);
+  } catch (error) {
+    throw new Error(`Invalid relevant_tools_json JSON: ${String(error)}`);
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error("Invalid relevant_tools_json JSON: expected an array");
+  }
+
+  const tools: string[] = [];
+
+  for (const value of parsed) {
+    if (typeof value !== "string") {
+      throw new Error(`Invalid relevant tool value: ${String(value)}`);
+    }
+
+    tools.push(value);
+  }
+
+  return [...new Set(tools)].sort();
+}
+
 export function createMemoryContentHash(input: MemoryContentInput): string {
   const normalized = JSON.stringify({
     summary: normalizeContentText(input.summary),

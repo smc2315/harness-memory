@@ -75,14 +75,27 @@ function buildCandidateSummary(
   return `Workflow for ${basename(scopeRef)} (${topicGuess})`;
 }
 
-function buildCandidateDetails(events: readonly DreamEvidenceEventRecord[]): string {
-  const lines = [
-    "Dream consolidation candidate built from recent evidence:",
+function buildCandidateDetails(
+  events: readonly DreamEvidenceEventRecord[],
+  previousSummary: string | null
+): string {
+  const lines: string[] = [];
+
+  if (previousSummary !== null) {
+    lines.push("Previous understanding:");
+    lines.push(previousSummary);
+    lines.push("");
+    lines.push("New evidence:");
+  } else {
+    lines.push("Dream consolidation candidate built from recent evidence:");
+  }
+
+  lines.push(
     ...events.map(
       (event) =>
         `- ${event.createdAt} :: ${event.toolName} :: ${event.title} :: ${event.excerpt}`
-    ),
-  ];
+    )
+  );
 
   return lines.join("\n");
 }
@@ -111,6 +124,7 @@ function scoreEvents(events: readonly DreamEvidenceEventRecord[]): {
   const count = events.length;
   const salienceAverage = events.reduce((acc, event) => acc + event.salience, 0) / count;
   const noveltyAverage = events.reduce((acc, event) => acc + event.novelty, 0) / count;
+  const salienceBoostMax = Math.max(...events.map((event) => event.salienceBoost));
   const contradictionBoost = events.some((event) => event.contradictionSignal) ? 0.15 : 0;
   const recurrenceBoost = Math.max(0, count - 1) * 0.25;
   const failureBoost = events.some((event) => /error|failed|exception|timeout|refused/i.test(event.excerpt))
@@ -125,6 +139,7 @@ function scoreEvents(events: readonly DreamEvidenceEventRecord[]): {
   const aggregate =
     salienceAverage +
     noveltyAverage +
+    salienceBoostMax +
     contradictionBoost +
     recurrenceBoost +
     failureBoost +
@@ -245,10 +260,12 @@ export class DreamWorker {
       const lead = events[0]!;
       const memoryId = buildSuggestionId(lead.typeGuess, lead.scopeRef, lead.topicGuess);
       const summary = buildCandidateSummary(lead.typeGuess, lead.scopeRef, lead.topicGuess);
-      const details = buildCandidateDetails(events);
       const scopeGlob = deriveScopeGlob(lead.scopeRef);
       const lifecycleTriggers = lifecycleForType(lead.typeGuess);
+      const inferredTools = [...new Set(events.map((event) => event.toolName))].sort();
       const existing = this.memoryRepository.getById(memoryId);
+      const previousSummary = existing !== null ? existing.summary : null;
+      const details = buildCandidateDetails(events, previousSummary);
 
       const memory =
         existing === null
@@ -262,6 +279,7 @@ export class DreamWorker {
               confidence,
               importance,
               status: "candidate",
+              relevantTools: inferredTools,
               lastVerifiedAt: events[events.length - 1]?.createdAt ?? now,
               createdAt: now,
               updatedAt: now,
@@ -273,6 +291,10 @@ export class DreamWorker {
               lifecycleTriggers,
               confidence,
               importance,
+              relevantTools:
+                existing !== null && existing.relevantTools !== null
+                  ? [...new Set([...existing.relevantTools, ...inferredTools])].sort()
+                  : inferredTools,
               updatedAt: now,
               lastVerifiedAt: events[events.length - 1]?.createdAt ?? now,
             })!;
@@ -288,6 +310,7 @@ export class DreamWorker {
         importance,
         evidenceEventIds: events.map((event) => event.id),
         memory,
+        previousSummary,
       });
       this.dreamRepository.createEvidenceLinks(
         memory.id,

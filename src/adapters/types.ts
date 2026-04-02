@@ -66,6 +66,8 @@ export interface AdapterBeforeToolResult {
   session: AdapterSessionContext;
   warnings: PolicyWarning[];
   warningText: string | null;
+  advisoryText: string | null;
+  activation: ActivationResult;
   evaluatedAt: string;
   blocked: false;
 }
@@ -117,6 +119,7 @@ export interface AdapterSessionContext {
   lastBeforeModel: AdapterBeforeModelRecord | null;
   toolPolicyChecks: AdapterToolPolicyCheck[];
   toolEvidence: AdapterToolEvidenceCapture[];
+  toolCallCount: number;
 }
 
 export type AdapterBeforeModelResponse = Promise<AdapterBeforeModelResult>;
