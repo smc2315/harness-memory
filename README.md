@@ -1,7 +1,7 @@
 # harness-memory
 
 [![npm version](https://img.shields.io/npm/v/harness-memory.svg)](https://www.npmjs.com/package/harness-memory)
-[![license](https://img.shields.io/npm/l/harness-memory.svg)](https://github.com/smc2315/harness-memory/blob/main/LICENSE)
+[![license](https://img.shields.io/npm/l/harness-memory.svg)](https://github.com/smc2315/harness-memory/blob/master/LICENSE)
 [![downloads](https://img.shields.io/npm/dm/harness-memory.svg)](https://www.npmjs.com/package/harness-memory)
 
 **High-precision project memory for AI coding assistants**
