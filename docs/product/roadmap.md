@@ -35,11 +35,17 @@ Exit criteria:
 ## Explicitly Deferred
 
 Do not pull these into the next roadmap phase unless new evidence demands them:
-- vector retrieval
 - graph storage
 - personal-memory features
 - replacing markdown as the source of truth
 - broad platform packaging before the live benchmark is complete
+
+## Completed: Hybrid Retrieval + English Storage (v0.4.1)
+
+- Dense ∪ Lexical (MiniSearch BM25) → RRF fusion for candidate generation
+- Shared LexicalIndex built once per activation (not per-query)
+- English-only storage enforced in LLM extraction prompts
+- Tier 2 benchmarks: EN→KO hit 0.25→0.75, domain purity 55.6%→78.4%, hard-negative loss 7.7%→0.0%
 
 ## Completed: Conditional Auto-Promotion (v0.4.0)
 

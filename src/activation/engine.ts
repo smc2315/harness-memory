@@ -5,7 +5,7 @@ import {
   type MemoryRecord,
 } from "../memory";
 
-import { LexicalIndex, type LexicalDocument } from "./lexical";
+import { LexicalIndex } from "./lexical";
 import { matchesScope, normalizeScopeRef } from "./scope";
 import {
   DEFAULT_ACTIVE_STATUSES,
@@ -17,7 +17,17 @@ import {
   type SuppressedMemory,
 } from "./types";
 import { EmbeddingService, findTopK } from "./embeddings";
+import { RRF_K, rrfFusion, type FusionCandidate } from "./fusion";
 import type { AuditLogger } from "../audit/logger";
+
+type StartupScoreSource = "vector" | "lexical" | "hybrid";
+const SCOPE_BOOST = 0.05;
+
+interface RetrievalMatch {
+  id: string;
+  score: number;
+  source: StartupScoreSource;
+}
 
 function calculateMemoryScore(memory: MemoryRecord): number {
   const base = memory.importance * memory.confidence;
@@ -106,6 +116,49 @@ function getScopePrefix(scopeGlob: string): string {
   return prefix ?? "";
 }
 
+function isBroadScopeRef(scopeRef: string): boolean {
+  return scopeRef === ".";
+}
+
+function containsHangul(text: string): boolean {
+  return /[\u3131-\u318e\uac00-\ud7a3]/i.test(text);
+}
+
+function containsHangulMemory(memory: MemoryRecord): boolean {
+  return containsHangul(`${memory.summary} ${memory.details}`);
+}
+
+function isEnglishLikeQuery(text: string): boolean {
+  return /[A-Za-z]/.test(text) && !containsHangul(text);
+}
+
+function normalizeStartupRetrievalScore(
+  score: number,
+  source: StartupScoreSource,
+): number {
+  if (source === "vector") {
+    return Math.max(0, Math.min(1, score));
+  }
+
+  if (source === "hybrid") {
+    return Math.min(1, score * (RRF_K + 1));
+  }
+
+  if (score <= 0) {
+    return 0;
+  }
+
+  return score / (score + 1);
+}
+
+function calculateStartupActivationScore(
+  memory: MemoryRecord,
+  retrievalScore: number,
+  source: StartupScoreSource,
+): number {
+  return calculateMemoryScore(memory) + normalizeStartupRetrievalScore(retrievalScore, source);
+}
+
 function compareRankedMemories(left: RankedMemory, right: RankedMemory): number {
   const scoreDelta = right.score - left.score;
   if (scoreDelta !== 0) {
@@ -155,15 +208,28 @@ export class ActivationEngine {
       activeMemories.push(memory);
     }
 
+    const sharedLexicalIndex = new LexicalIndex();
+    sharedLexicalIndex.rebuild(
+      activeMemories.map((memory) => ({
+        id: memory.id,
+        summary: memory.summary,
+        details: memory.details,
+      })),
+    );
+
     const maxMemories = request.maxMemories ?? DEFAULT_ACTIVATION_LIMITS.maxMemories;
     const maxPayloadBytes =
       request.maxPayloadBytes ?? DEFAULT_ACTIVATION_LIMITS.maxPayloadBytes;
+    const queryText = (request.queryTokens ?? []).join(" ").trim();
+    const broadEnglishQuery = isBroadScopeRef(scopeRef) && isEnglishLikeQuery(queryText);
     const selected: RankedMemory[] = [];
     const selectedIds = new Set<string>();
     let usedPayloadBytes = 0;
+    let cachedQueryEmbedding: Float32Array | null | undefined;
 
     const tryAdd = (
-      memory: MemoryRecord
+      memory: MemoryRecord,
+      scoreOverride?: number,
     ): "ok" | "duplicate" | "memory_budget" | "payload_budget" => {
       if (selectedIds.has(memory.id)) {
         return "duplicate";
@@ -182,11 +248,189 @@ export class ActivationEngine {
       selectedIds.add(memory.id);
       selected.push({
         ...memory,
-        score: calculateMemoryScore(memory),
+        score: scoreOverride ?? calculateMemoryScore(memory),
         payloadBytes,
         rank: selected.length + 1,
       });
       return "ok";
+    };
+
+    const getQueryEmbedding = async (): Promise<Float32Array | null> => {
+      if (cachedQueryEmbedding !== undefined) {
+        return cachedQueryEmbedding;
+      }
+
+      if (!this.embeddingService?.isReady || queryText.length === 0) {
+        cachedQueryEmbedding = null;
+        return cachedQueryEmbedding;
+      }
+
+      try {
+        cachedQueryEmbedding = await this.embeddingService.embedQuery(queryText);
+      } catch {
+        cachedQueryEmbedding = null;
+      }
+
+      return cachedQueryEmbedding;
+    };
+
+    const getRetrievedMemoryScore = (
+      memory: MemoryRecord,
+      match: RetrievalMatch,
+    ): number => calculateStartupActivationScore(memory, match.score, match.source);
+
+    const retrieveMatches = async (
+      candidates: readonly MemoryRecord[],
+      limit: number,
+    ): Promise<RetrievalMatch[]> => {
+      if (limit <= 0 || candidates.length === 0 || queryText.length === 0) {
+        return [];
+      }
+
+      const expandedQueryText = isBroadScopeRef(scopeRef)
+        ? queryText
+        : `${scopeRef.replace(/[/\\]/g, " ").replace(/\.[^.]+$/, "")}: ${queryText}`;
+      const candidateIdSet = new Set(candidates.map((memory) => memory.id));
+      const memoryById = new Map(candidates.map((memory) => [memory.id, memory]));
+      const widerLimit = Math.min(candidates.length, limit * 2);
+
+      const denseResults: FusionCandidate[] = [];
+      const denseQueryEmbedding = isBroadScopeRef(scopeRef)
+        ? await getQueryEmbedding()
+        : (this.embeddingService?.isReady && expandedQueryText.length > 0
+          ? await this.embeddingService.embedQuery(expandedQueryText).catch(() => null)
+          : null);
+      if (denseQueryEmbedding !== null) {
+        const memoriesWithEmbeddings = candidates.filter(
+          (memory) => memory.embedding !== null || memory.embeddingSummary !== null
+        );
+        if (memoriesWithEmbeddings.length > 0) {
+          const fullEmbeddings = memoriesWithEmbeddings
+            .filter((memory) => memory.embedding !== null)
+            .map((memory) => ({
+              id: memory.id,
+              embedding: memory.embedding as Float32Array,
+            }));
+          const fullResults = fullEmbeddings.length > 0
+            ? findTopK(denseQueryEmbedding, fullEmbeddings, widerLimit)
+            : [];
+
+          const summaryEmbeddings = memoriesWithEmbeddings
+            .filter((memory) => memory.embeddingSummary !== null)
+            .map((memory) => ({
+              id: memory.id,
+              embedding: memory.embeddingSummary as Float32Array,
+            }));
+          const summaryResults = summaryEmbeddings.length > 0
+            ? findTopK(denseQueryEmbedding, summaryEmbeddings, widerLimit)
+            : [];
+
+          const scoreById = new Map<string, number>();
+          for (const result of fullResults) {
+            scoreById.set(result.id, result.score);
+          }
+          for (const result of summaryResults) {
+            const existingScore = scoreById.get(result.id);
+            scoreById.set(
+              result.id,
+              existingScore === undefined ? result.score : Math.max(existingScore, result.score),
+            );
+          }
+
+          const mergedResults = [...scoreById.entries()]
+            .sort((left, right) => right[1] - left[1])
+            .slice(0, widerLimit);
+
+          for (const [id, score] of mergedResults) {
+            denseResults.push({
+              id,
+              score,
+              source: "vector",
+            });
+          }
+        }
+      }
+
+      const lexicalResults: FusionCandidate[] = sharedLexicalIndex
+        .search(queryText, widerLimit, candidateIdSet)
+        .map((result) => ({
+          id: result.id,
+          score: result.score,
+          source: "lexical" as const,
+        }));
+
+      if (denseResults.length === 0 && lexicalResults.length === 0) {
+        return [];
+      }
+
+      if (denseResults.length === 0) {
+        return lexicalResults.slice(0, limit).map((result) => ({
+          id: result.id,
+          score: result.score,
+          source: "lexical" as const,
+        }));
+      }
+
+      if (lexicalResults.length === 0) {
+        return denseResults.slice(0, limit).map((result) => ({
+          id: result.id,
+          score: result.score,
+          source: "vector" as const,
+        }));
+      }
+
+      const denseById = new Map(denseResults.map((result) => [result.id, result]));
+      const lexicalById = new Map(lexicalResults.map((result) => [result.id, result]));
+
+      const fusedResults = rrfFusion([denseResults, lexicalResults], limit).map((result) => {
+        const denseResult = denseById.get(result.id);
+        const lexicalResult = lexicalById.get(result.id);
+
+        if (denseResult !== undefined && lexicalResult !== undefined) {
+          return {
+            id: result.id,
+            score: result.score,
+            source: "hybrid" as const,
+          };
+        }
+
+        if (denseResult !== undefined) {
+          return {
+            id: result.id,
+            score: denseResult.score,
+            source: "vector" as const,
+          };
+        }
+
+        return {
+          id: result.id,
+          score: lexicalResult?.score ?? 0,
+          source: "lexical" as const,
+        };
+      });
+
+      const boostedResults = fusedResults
+        .map((result) => {
+          const memory = memoryById.get(result.id);
+          if (memory === undefined || !matchesScope(memory.scopeGlob, scopeRef)) {
+            return result;
+          }
+
+          return {
+            ...result,
+            score: result.score + SCOPE_BOOST,
+          };
+        })
+        .sort((left, right) => {
+          const scoreDelta = right.score - left.score;
+          if (scoreDelta !== 0) {
+            return scoreDelta;
+          }
+
+          return left.id.localeCompare(right.id);
+        });
+
+      return boostedResults.slice(0, limit);
     };
 
     // Layer A: Baseline memories (always inject)
@@ -198,6 +442,34 @@ export class ActivationEngine {
     const baselinePayloadCap = 2_048;
     let baselineUsedBytes = 0;
     let baselineCount = 0;
+
+    if (broadEnglishQuery) {
+      const alternateScriptBaseline = await retrieveMatches(
+        baselineMemories.filter(containsHangulMemory),
+        1,
+      );
+
+      for (const match of alternateScriptBaseline) {
+        const memory = baselineMemories.find((candidate) => candidate.id === match.id);
+        if (memory === undefined) {
+          continue;
+        }
+
+        const payloadBytes = getPayloadBytes(memory);
+        if (baselineUsedBytes + payloadBytes > baselinePayloadCap) {
+          continue;
+        }
+
+        const added = tryAdd(
+          memory,
+          getRetrievedMemoryScore(memory, match),
+        );
+        if (added === "ok") {
+          baselineUsedBytes += payloadBytes;
+          baselineCount += 1;
+        }
+      }
+    }
 
     for (const memory of baselineMemories) {
       if (baselineCount >= baselineCap) {
@@ -216,53 +488,30 @@ export class ActivationEngine {
       }
     }
 
-    // Layer B: Startup priors via vector retrieval (preferred) or lexical fallback
+    // Layer B: Startup priors via hybrid retrieval (dense + lexical fusion)
     if ((request.queryTokens?.length ?? 0) > 0) {
       const nonBaseline = activeMemories.filter(
         (memory) =>
-          memory.activationClass !== "baseline" && !selectedIds.has(memory.id)
+          memory.activationClass !== "baseline" &&
+          !selectedIds.has(memory.id) &&
+          (isBroadScopeRef(scopeRef) || matchesScope(memory.scopeGlob, scopeRef))
       );
-      let startupResults: { id: string; score: number }[] = [];
+      const alternateScriptSlot = broadEnglishQuery ? 1 : 0;
+      const startupResults = await retrieveMatches(
+        nonBaseline,
+        Math.max(0, maxMemories - selected.length - alternateScriptSlot),
+      );
 
-      const queryText = (request.queryTokens ?? []).join(" ");
-      if (this.embeddingService?.isReady) {
-        const memoriesWithEmbeddings = nonBaseline.filter(
-          (memory) => memory.embedding !== null
+      if (broadEnglishQuery) {
+        const alternateScriptResults = await retrieveMatches(
+          nonBaseline.filter(
+            (memory) =>
+              containsHangulMemory(memory) &&
+              !startupResults.some((result) => result.id === memory.id),
+          ),
+          1,
         );
-        if (memoriesWithEmbeddings.length > 0) {
-          try {
-            const queryEmbedding = await this.embeddingService.embedQuery(queryText);
-            startupResults = findTopK(
-              queryEmbedding,
-              memoriesWithEmbeddings.map((memory) => ({
-                id: memory.id,
-                embedding: memory.embedding as Float32Array,
-              })),
-              Math.max(0, maxMemories - selected.length)
-            );
-          } catch {
-            // Fall through to lexical search.
-          }
-        }
-      }
-
-      if (startupResults.length === 0) {
-        const lexical = new LexicalIndex();
-        const lexicalDocs: LexicalDocument[] = nonBaseline.map((memory) => ({
-          id: memory.id,
-          summary: memory.summary,
-          details: memory.details,
-        }));
-
-        lexical.rebuild(lexicalDocs);
-        const queryTerms = [
-          ...(request.queryTokens ?? []),
-          ...(request.repoFingerprint ?? []),
-        ];
-        startupResults = lexical.search(
-          queryTerms.join(" "),
-          Math.max(0, maxMemories - selected.length)
-        );
+        startupResults.push(...alternateScriptResults);
       }
 
       const memoryById = new Map(nonBaseline.map((memory) => [memory.id, memory]));
@@ -273,7 +522,10 @@ export class ActivationEngine {
           continue;
         }
 
-        const added = tryAdd(memory);
+        const added = tryAdd(
+          memory,
+          getRetrievedMemoryScore(memory, startupResult),
+        );
         if (added === "memory_budget") {
           suppressed.push({
             memory,

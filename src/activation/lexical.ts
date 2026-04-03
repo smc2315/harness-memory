@@ -75,12 +75,16 @@ export class LexicalIndex {
     this.index.remove(document);
   }
 
-  search(query: string, limit?: number): LexicalSearchResult[] {
+  search(query: string, limit?: number, candidateIds?: ReadonlySet<string>): LexicalSearchResult[] {
     if (query.trim().length === 0) {
       return [];
     }
 
-    const results = this.index.search(query);
+    let results = this.index.search(query);
+    if (candidateIds !== undefined) {
+      results = results.filter((result) => candidateIds.has(String(result.id)));
+    }
+
     const capped = limit !== undefined ? results.slice(0, limit) : results;
 
     return capped.map((result) => ({

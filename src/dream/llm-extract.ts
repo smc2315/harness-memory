@@ -21,8 +21,10 @@ import type {
 // Extraction prompt builder
 // ---------------------------------------------------------------------------
 
-const EXTRACTION_SYSTEM_PROMPT = `You are a memory extraction assistant for a coding project.
+export const EXTRACTION_SYSTEM_PROMPT = `You are a memory extraction assistant for a coding project.
 Your ONLY job is to analyze conversation logs and output a JSON object.
+All summaries and details MUST be written in English, regardless of the input language.
+If the conversation is in another language, translate the key facts to English.
 Do NOT use any tools. Do NOT run any commands.
 Respond with ONLY a valid JSON object — no markdown, no explanation.`;
 
@@ -54,6 +56,8 @@ Analyze the conversation below and extract facts worth remembering long-term.
 - Architecture decisions (patterns, frameworks, deployment targets)
 - Project constraints (what NOT to use, requirements)
 - Recurring workflows or conventions
+
+IMPORTANT: All output text (summary, details) MUST be in English. If the conversation contains non-English text, translate the facts to English.
 
 ## What to IGNORE
 - One-off commands ("check this file", "run tests")

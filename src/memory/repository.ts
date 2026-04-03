@@ -44,6 +44,7 @@ const MEMORY_SELECT_COLUMNS = [
   "last_verified_at",
   "activation_class",
   "embedding",
+  "embedding_summary",
   "relevant_tools_json",
 ].join(", ");
 
@@ -108,6 +109,7 @@ export interface MemoryRecord {
   updatedAt: string;
   lastVerifiedAt: string | null;
   embedding: Float32Array | null;
+  embeddingSummary: Float32Array | null;
   relevantTools: string[] | null;
 }
 
@@ -135,7 +137,8 @@ export interface CreateMemoryInput {
   createdAt?: string;
   updatedAt?: string;
   lastVerifiedAt?: string | null;
-  embedding?: Float32Array;
+  embedding?: Float32Array | null;
+  embeddingSummary?: Float32Array | null;
   relevantTools?: string[] | null;
 }
 
@@ -155,6 +158,7 @@ export interface UpdateMemoryInput {
   validationCount?: number;
   updatedAt?: string;
   lastVerifiedAt?: string | null;
+  embeddingSummary?: Float32Array | null;
   relevantTools?: string[] | null;
 }
 
@@ -486,12 +490,20 @@ export class MemoryRepository {
     const updatedAt = input.updatedAt ?? createdAt;
     const id = input.id ?? createMemoryId(identityKey);
     const embeddingBlob =
-      input.embedding === undefined
+      input.embedding === undefined || input.embedding === null
         ? null
         : new Uint8Array(
             input.embedding.buffer,
             input.embedding.byteOffset,
             input.embedding.byteLength
+          );
+    const embeddingSummaryBlob =
+      input.embeddingSummary === undefined || input.embeddingSummary === null
+        ? null
+        : new Uint8Array(
+            input.embeddingSummary.buffer,
+            input.embeddingSummary.byteOffset,
+            input.embeddingSummary.byteLength
           );
 
     this.db.run(
@@ -514,6 +526,7 @@ export class MemoryRepository {
           updated_at,
           last_verified_at,
           embedding,
+          embedding_summary,
           relevant_tools_json
         )
         VALUES (
@@ -534,6 +547,7 @@ export class MemoryRepository {
           $updatedAt,
           $lastVerifiedAt,
           $embedding,
+          $embeddingSummary,
           $relevantToolsJson
         )
       `,
@@ -562,6 +576,7 @@ export class MemoryRepository {
         $updatedAt: updatedAt,
         $lastVerifiedAt: input.lastVerifiedAt ?? null,
         $embedding: embeddingBlob,
+        $embeddingSummary: embeddingSummaryBlob,
         $relevantToolsJson: serializeRelevantTools(input.relevantTools ?? null),
       }
     );
@@ -919,6 +934,22 @@ export class MemoryRepository {
       scopeGlob,
       lifecycleTriggers,
     });
+    const embeddingSummaryBlob =
+      input.embeddingSummary === undefined
+        ? existing.embeddingSummary === null
+          ? null
+          : new Uint8Array(
+              existing.embeddingSummary.buffer,
+              existing.embeddingSummary.byteOffset,
+              existing.embeddingSummary.byteLength
+            )
+        : input.embeddingSummary === null
+          ? null
+          : new Uint8Array(
+              input.embeddingSummary.buffer,
+              input.embeddingSummary.byteOffset,
+              input.embeddingSummary.byteLength
+            );
 
     if (duplicate !== null && duplicate.id !== id) {
       throw new DuplicateMemoryContentError(identityKey, duplicate.id);
@@ -943,6 +974,7 @@ export class MemoryRepository {
           promotion_source = $promotionSource,
           ttl_expires_at = $ttlExpiresAt,
           validation_count = $validationCount,
+          embedding_summary = $embeddingSummary,
           relevant_tools_json = $relevantToolsJson,
           updated_at = $updatedAt,
           last_verified_at = $lastVerifiedAt
@@ -977,6 +1009,7 @@ export class MemoryRepository {
             ? input.ttlExpiresAt
             : existing.ttlExpiresAt,
         $validationCount: input.validationCount ?? existing.validationCount,
+        $embeddingSummary: embeddingSummaryBlob,
         $relevantToolsJson: serializeRelevantTools(
           input.relevantTools !== undefined
             ? input.relevantTools
@@ -1000,6 +1033,15 @@ export class MemoryRepository {
       embedding.byteLength
     );
     this.db.run("UPDATE memories SET embedding = ? WHERE id = ?", [blob, id]);
+  }
+
+  updateEmbeddingSummary(id: string, embedding: Float32Array): void {
+    const blob = new Uint8Array(
+      embedding.buffer,
+      embedding.byteOffset,
+      embedding.byteLength
+    );
+    this.db.run("UPDATE memories SET embedding_summary = ? WHERE id = ?", [blob, id]);
   }
 
   private replaceMemory(
@@ -1214,6 +1256,15 @@ export class MemoryRepository {
             rawEmbedding.byteLength / 4
           )
         : null;
+    const rawEmbeddingSummary = row[21];
+    const embeddingSummary =
+      rawEmbeddingSummary instanceof Uint8Array
+        ? new Float32Array(
+            rawEmbeddingSummary.buffer,
+            rawEmbeddingSummary.byteOffset,
+            rawEmbeddingSummary.byteLength / 4
+          )
+        : null;
 
     return {
       id: expectString(row[0], "id"),
@@ -1239,8 +1290,9 @@ export class MemoryRepository {
       lastVerifiedAt: expectNullableString(row[18], "last_verified_at"),
       activationClass: expectActivationClass(row[19]),
       embedding,
+      embeddingSummary,
       relevantTools: parseRelevantTools(
-        expectNullableString(row[21], "relevant_tools_json")
+        expectNullableString(row[22], "relevant_tools_json")
       ),
     };
   }

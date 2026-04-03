@@ -1,219 +1,155 @@
 # TODO
 
-이 문서는 harness-memory의 구현 상태와 미완료 작업을 추적한다.
-Hermes Agent 분석, GPT Pro 리뷰, 내부 아키텍처 검토에서 도출된 항목을 포함한다.
+harness-memory 개선 작업 추적.
+Tier 2 벤치마크 결과 + GPT Pro 리뷰 + 임베딩 모델 조사에 기반.
 
-마지막 업데이트: 2026-04-02
+마지막 업데이트: 2026-04-03
 
 ---
 
-## 완료된 항목 (v0.3.1 → v0.4.0 예정)
+## 완료된 항목
 
-### Tier 1 — 보안 + 활성화 정밀도 + 첫 턴
+### v0.4.0 Feature Implementation (Tier 1-3)
 
-| 항목 | 상태 | 파일 |
-|------|------|------|
-| Security scanner (5개 threat category, 순수 함수) | ✅ | `src/security/scanner.ts` |
-| Defense line 1: promote CLI에서 scan 후 block | ✅ | `src/cli/memory-promote.ts` |
-| Defense line 2: adapter injection 시 unsafe memory 제거 | ✅ | `src/adapters/opencode-adapter.ts` |
-| `relevant_tools_json` 컬럼 + Migration 011 | ✅ | `src/db/migrations/011_memory_relevant_tools.sql` |
-| MemoryRecord/Create/Update에 `relevantTools` 필드 | ✅ | `src/memory/repository.ts` |
-| Activation Layer C + Layer D exploration slot에 tool filter | ✅ | `src/activation/engine.ts` |
-| Dream worker에서 evidence tool name → relevantTools 추론 | ✅ | `src/dream/worker.ts` |
-| `memory:add --relevant-tools` CLI 지원 | ✅ | `src/cli/memory-add.ts` |
-| `beforeTool()` async + activation with toolName | ✅ | `src/adapters/opencode-adapter.ts` |
-| Plugin에서 `await adp.beforeTool()` 전파 | ✅ | `src/plugin/opencode-plugin.ts` |
-| `memory:baseline` CLI (activation_class 설정) | ✅ | `src/cli/memory-baseline.ts` |
-| `memory:promote --activation-class` 옵션 | ✅ | `src/cli/memory-promote.ts` |
+12개 task 전부 완료. 18 test files, 145 tests, build 통과.
 
-### Tier 2 — 주입 품질 + 통합 품질
+- Security scanner (dual defense: promote + inject)
+- relevant_tools metadata + activation tool filtering
+- Startup pack (memory:baseline CLI, beforeTool activation)
+- Progressive disclosure (3-tier: full/summary/hint + expandMemory)
+- Iterative re-compression (previousSummary in dream worker)
+- Salience boundary nudge (toolCallCount + salienceBoost)
+- Skill export CLI (memory:export-skill)
+- Migration safety harness (v10→v12)
 
-| 항목 | 상태 | 파일 |
-|------|------|------|
-| Progressive disclosure (full/summary/hint 3-tier) | ✅ | `src/adapters/opencode-adapter.ts` |
-| `expandMemory()` 메서드 (security scan 포함) | ✅ | `src/adapters/opencode-adapter.ts` |
-| Iterative re-compression (previousSummary 보존) | ✅ | `src/dream/worker.ts` |
-| `DreamCandidateSuggestion.previousSummary` 필드 | ✅ | `src/dream/types.ts` |
+### v0.4.0 Auto-Promotion (B+ Model)
 
-### Tier 3 — 확장
+- Migration 013: promotion_source, ttl_expires_at, validation_count, policy_subtype
+- Trust multiplier: manual=1.0, auto+v0=0.65, auto+v1=0.80, auto+v2+=0.95
+- Auto-promote engine: security scan + confidence≥0.85 + evidence≥3 + type∈{pitfall,workflow}
+- TTL 14일 + lazy check + background check
+- Revalidation: validation_count++, TTL 연장
+- Contradiction demotion: 반대 evidence → stale
+- memory:demote CLI + session digest
 
-| 항목 | 상태 | 파일 |
-|------|------|------|
-| `salience_boost` 컬럼 + Migration 012 | ✅ | `src/db/migrations/012_dream_evidence_salience_boost.sql` |
-| Session `toolCallCount` 추적 + boundary nudge | ✅ | `src/adapters/opencode-adapter.ts` |
-| Dream worker scoring에 `salienceBoostMax` 반영 | ✅ | `src/dream/worker.ts` |
-| `memory:export-skill` CLI (SKILL.md 출력) | ✅ | `src/cli/memory-export-skill.ts` |
-| Migration safety harness (v10→v12 테스트) | ✅ | `test/migrator.test.ts` |
+### Tier 2 Benchmark Infrastructure
 
-### 테스트 현황
+8 test files, 30 tests, 실제 multilingual-e5-small 모델 사용.
 
-- 기존: 13 test files, 82 tests
-- 현재: 18 test files, 145 tests (+63)
-- 전부 통과, build 성공
+- 72 memories (3 domains × 24), 36 queries, 12 Korean memories
+- 5 hard-negative groups across domains
+- Dataset integrity validation (8 tests)
+- Real embedding smoke test
+- First-turn hit rate, cross-language, scope discrimination
+- Hard-negative rejection, token efficiency, similarity distribution
+- Tier 1 vs Tier 2 comparison with optimistic flags
+
+---
+
+## Tier 2 벤치마크 결과 요약
+
+```
+메트릭                        Tier 2 (real)          판정
+──────────────────────────────────────────────────────
+First-turn hit rate           0.92 (CI: 0.65-0.99)   ✅ 좋음
+Hard-negative loss rate       7.7% (1/13)             ✅ 양호
+KO→EN hit rate                0.75                    ✅ 쓸만함
+Recall@5                      0.20                    ⚠️ 개선 필요
+MRR                           0.25                    ⚠️ 개선 필요
+EN→KO hit rate                0.25                    🔴 거의 불가
+EN→KO Recall@5                0.00                    🔴 완전 실패
+Domain purity (scoped)        55.6%                   ⚠️ 개선 필요
+Token savings                 87.4% (86.1% cap효과)   ⚠️ ranking intelligence 1.3%만
+Similarity gap (rel vs irrel) 0.034                   🔴 분리 매우 약함
+```
 
 ---
 
 ## 미완료 항목
 
-### Phase A — 조건부 자동 승격 (B+ 모델) ✅ 완료
+### P0-0. 영어 단일 저장 ✅ 완료
 
-모든 A-1~A-6 항목이 구현됨:
-- Migration 013: promotion_source, ttl_expires_at, validation_count, policy_subtype
-- MemoryRecord/UpdateMemoryInput 필드 추가
-- Trust multiplier in calculateMemoryScore() (manual=1.0, auto+0=0.65, auto+1=0.80, auto+2+=0.95)
-- TTL suppression in activation (ttl_expired 필터)
-- Auto-promoter: 5-gate (security, confidence>=0.85, evidence>=3, type∈{pitfall,workflow}, policy 제외)
-- Revalidation: validation_count++, TTL 14일 연장
-- Contradiction demotion: 반대 evidence → immediate stale
-- memory:demote CLI
-- session.idle에서 dream extraction 후 auto-promote 호출
+- EXTRACTION_SYSTEM_PROMPT에 영어 강제 지시 추가
+- buildExtractionUserPrompt()에 번역 지시 추가
+- 2개 prompt contract test 추가
+- worker.ts에 영어 컨벤션 JSDoc 추가
 
-**배경**: 현재 모든 candidate→active 승격은 수동이다. 실전에서 `memory:promote`를 정기적으로 실행하는 사용자는 극소수이므로, 시스템이 실제로 학습하려면 조건부 자동 승격이 필요하다.
+### P0-1. Hybrid Candidate Generation ✅ 완료
 
-**합의된 모델**: B+ (상태 머신 유지 + provenance/review 메타데이터 추가)
+- src/activation/fusion.ts: RRF fusion primitive (k=60)
+- src/activation/lexical.ts: candidateIds 필터
+- src/activation/engine.ts: shared LexicalIndex + hybrid retrieveMatches (dense ∪ lexical → RRF)
+- 8 fusion unit tests + integration tests
+- 벤치마크 개선: EN→KO 0.25→0.75, domain purity 55.6%→78.4%, hard-negative loss 7.7%→0.0%
 
-#### A-1. 스키마 확장 (Migration 013)
+### P0-2. Summary/Details Dual Indexing ✅ 완료
 
-새로운 필드를 memories 테이블에 추가:
+- Migration 014: `embedding_summary BLOB DEFAULT NULL`
+- `updateEmbeddingSummary()` repository 메서드
+- Engine: dense retrieval에서 max(full_similarity, summary_similarity) 사용
+- Tier 2 fixture seeder: summary embedding도 생성
+- 3개 round-trip tests + 1개 engine integration test
 
-```sql
-ALTER TABLE memories ADD COLUMN promotion_source TEXT DEFAULT 'manual';  -- 'manual' | 'auto'
-ALTER TABLE memories ADD COLUMN ttl_expires_at TEXT DEFAULT NULL;
-ALTER TABLE memories ADD COLUMN validation_count INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE memories ADD COLUMN policy_subtype TEXT DEFAULT NULL;  -- 'hard' | 'soft' | null
-```
+### P0-3. Query Expansion ✅ 완료
 
-수정 대상:
-- `src/db/schema/types.ts` — Memory 인터페이스에 필드 추가
-- `src/memory/repository.ts` — CRUD + mapMemoryRow 업데이트
-- `src/memory/utils.ts` — 직렬화/파싱 유틸
-- `test/memory-core.test.ts` — round-trip 테스트
+- Scoped query (scopeRef !== ".") 시 dense embedding에 path context 추가
+- 예: "error handling" + scopeRef "web-app/src/api/route.ts" → "web-app src api route: error handling"
+- Lexical search는 원본 query 유지 (BM25에는 exact keywords가 유리)
+- First-turn (scopeRef=".") 은 확장하지 않음
+- 2개 integration tests (scoped expansion + broad non-expansion)
 
-#### A-2. Trust multiplier를 activation scoring에 반영
+### P1. Scope-Aware Rerank ✅ 완료
 
-```
-trust_multiplier =
-  manual                    → 1.0
-  auto + validation_count=0 → 0.65
-  auto + validation_count=1 → 0.80
-  auto + validation_count≥2 → 0.95
-```
+- RRF fusion 결과에 scope_glob 매칭 memory +0.05 boost
+- Boost 후 재정렬하여 same-domain memory 우선
+- 1개 integration test (scope boost verification)
 
-적용 위치: `src/activation/engine.ts`의 `calculateMemoryScore()`에 trust_multiplier 곱하기.
+### P2. 인프라 + 문서 ✅ 완료
 
-Progressive disclosure와 자동 결합:
-- trust 낮음 → 낮은 score → rank 8-10 → hint/summary만 주입
-- trust 높음 → 높은 score → rank 1-5 → full details 주입
+- Canary set benchmark: 10쌍 고정 query→memory, baseline MRR 0.395, 10% regression guard
+- roadmap.md: vector retrieval을 deferred에서 completed로 이동, hybrid retrieval 기록
+- promotion-rubric.md: B+ 모델 섹션 이미 존재 (이전 작업에서 추가)
 
-수정 대상:
-- `src/activation/engine.ts` — scoring 함수
-- `test/activation-engine.test.ts` — trust multiplier 테스트
+### P0.5. Small Cross-Encoder Reranker (조건부 — 보류)
 
-#### A-3. Auto-promote 엔진
+**전제**: P0-0~P1 적용 후 Tier 2 recall@5가 0.35 미만이면 실행
+**현재 상태**: Tier 2 재측정 필요. Hybrid + dual embedding + scope rerank 적용 후 recall이 충분히 올랐으면 불필요
+**구현**: top-20 candidate에 작은 cross-encoder (예: ms-marco-MiniLM-L-6-v2) 적용
 
-자동 승격 조건 (전부 AND):
-1. `security scan` 통과
-2. `confidence ≥ 0.85`
-3. `evidence ≥ 3` (단일 관찰이 아닌 반복 확인)
-4. `type ∈ {pitfall, workflow}` (1단계)
-5. `policy`는 전부 수동 유지 (2단계에서 `policy_subtype=soft`만 허용)
+### P1. Scope-Aware Rerank ✅ 완료 (위에서 기술)
 
-실행 시점:
-- `session.idle` hook에서 dream extraction 후
-- 또는 `dream:extract` CLI 실행 후
+### P2. 인프라 + 문서 ✅ 완료 (위에서 기술)
 
-수정 대상:
-- `src/dream/worker.ts` 또는 별도 `src/promotion/auto-promoter.ts`
-- `src/plugin/opencode-plugin.ts` — session.idle에서 auto-promote 호출
-- `src/cli/dream-extract.ts` — extraction 후 auto-promote 실행
-- 테스트
+### P3. 장기 검토
 
-#### A-4. TTL 관리 + Revalidation
-
-TTL 체크 두 군데:
-1. **Background**: `session.idle` / dream worker에서 `ttl_expires_at < now` → stale 전이
-2. **Activation query**: `WHERE (ttl_expires_at IS NULL OR ttl_expires_at > ?)` 조건
-
-Revalidation:
-- 같은 scope/topic에서 재확인 evidence → `validation_count++`, `ttl_expires_at` 연장
-- 반대 evidence → 즉시 stale
-
-기본 TTL: auto-promoted = 14일, 재확인 시 +14일 연장
-
-수정 대상:
-- `src/activation/engine.ts` — TTL 필터 추가
-- `src/dream/worker.ts` — revalidation 시 validation_count 증가
-- `src/plugin/opencode-plugin.ts` — TTL 만료 체크
-- 테스트
-
-#### A-5. Negative Evidence Demotion
-
-반대 evidence 감지 시 즉시 stale로 전이.
-
-조건:
-- `workflow/pitfall`: 같은 scope/topic에서 반대 패턴 감지
-- `policy_soft`: 명시적 user correction
-
-수정 대상:
-- `src/dream/worker.ts` — contradiction_signal 처리 강화
-- 테스트
-
-#### A-6. 알림 + Demotion UX
-
-자동 승격 시:
-- 콘솔 로그: `"[harness-memory] Auto-promoted: [type] summary"` 
-- `memory:demote <id>` CLI 추가 (active → stale)
-- `memory:why <id>` 에 promotion_source 표시
-
-세션당 digest:
-- system prompt에 "N개 memory가 자동 승격됨" 한 줄 추가
-- 고위험 타입 (decision, architecture_constraint)만 candidate queue에 표시
-
-수정 대상:
-- `src/cli/memory-demote.ts` (신규 — memory-reject.ts 패턴 따르기)
-- `src/cli/memory-why.ts` — promotion_source 표시 추가
-- `src/plugin/opencode-plugin.ts` — digest 표시
-- `src/bin/harness-memory.ts`, `tsup.config.ts`, `package.json` — 등록
+- [ ] `policy_subtype=soft` auto-promote 허용 (현재 workflow/pitfall만)
+- [ ] Stronger model 검토 (snowflake-arctic-embed-m-v2.0, gte-multilingual-base) — 영어 저장 기준으로 영어 특화 모델 평가
+- [ ] Late-interaction reranker (jina-colbert-v2 등) 검토
+- [ ] Cross-project 학습 (global.sqlite 활성화)
+- [ ] review_state 필드 추가
 
 ---
 
-### Phase B — promotion-rubric.md 업데이트
+## 홍보 시 사용 가능한 표현
 
-현재 `docs/spec/promotion-rubric.md`는 "자동 승격은 MVP에서 명시적으로 scope 밖"이라고 명시한다. Phase A 구현 후 이 문서를 업데이트해야 한다:
+**✅ 쓸 수 있는 것**:
+- "92% first-turn retrieval hit rate (real multilingual-e5-small, 72 memories, 12 queries)"
+- "7.7% hard-negative leakage across 3 project domains"
+- "Local memory budget enforcement — no context window bloat"
+- "Ranking precision and cross-language retrieval under active tuning"
 
-- "Future: Automatic Promotion" 섹션을 현재 구현으로 교체
-- B+ 모델 설명 추가 (promotion_source, trust_multiplier, TTL)
-- 타입별 자동 승격 정책 표 추가
-- Manual Review Checklist를 "고위험 타입에 대해서만 수동 검토" 방향으로 수정
-
----
-
-### Phase C — roadmap.md 업데이트
-
-현재 `docs/product/roadmap.md`의 "Explicitly Deferred" 에 "autonomous promotion"이 있다. Phase A 구현 후:
-
-- "autonomous promotion"을 deferred에서 제거
-- Phase 3로 추가: "조건부 자동 승격 (B+ 모델) — 저위험 타입만, TTL 관리, trust multiplier"
-
----
-
-### Phase D — 추가 개선 (필요 시)
-
-이 항목들은 Phase A 이후 실제 사용 데이터를 보고 결정한다.
-
-| 항목 | 설명 | 우선순위 |
-|------|------|----------|
-| `policy_subtype=soft` auto-promote | Phase A에서 workflow/pitfall만 열고, soft policy는 2단계에서 | 중간 |
-| Cross-project 학습 | global.sqlite 활성화 경로에 auto-promote 적용 | 낮음 |
-| Vector embedding 기반 semantic dedup | scope_glob의 근본 한계 보완 | 낮음 |
-| 사용자별 auto-promote 설정 | `harness-memory.json`에 `autoPromote: { types: [...], minConfidence: ... }` | 중간 |
-| review_state 필드 추가 | auto-promoted를 사람이 명시적으로 확인했는지 구분 | 중간 |
-| Hermes 호환 context file import | `.hermes.md` / `AGENTS.md` / `.cursorrules` 읽기 | 낮음 |
+**❌ 피해야 하는 것**:
+- "87% token savings" (대부분 cap 효과)
+- "Semantic retrieval이 매우 정교하다"
+- "Multilingual retrieval이 완성됐다"
 
 ---
 
 ## 참조
 
-- Hermes Agent 분석: NousResearch/hermes-agent에서 memory/skills/trajectory compression 패턴 참조
-- GPT Pro 리뷰: security scan, relevant_tools, startup pack, progressive disclosure, iterative re-compression, salience nudge, skill export 우선순위 협의
-- B+ 모델 합의: 상태 머신 유지 + promotion_source/ttl/validation_count 메타데이터로 provisional 효과 구현
+- Hermes Agent 분석: memory/skills/trajectory compression 패턴
+- GPT Pro 리뷰 (3회): 우선순위, B+ 모델, hybrid retrieval, 홍보 전략
+- Tier 2 벤치마크: 8 files, 30 tests, real e5-small
+- 임베딩 모델 조사: 영어 단일 저장 결정 후 영어 특화 모델 후보 정리
+- 핵심 설계 결정: "cross-language를 모델로 풀지 말고, 저장 언어를 통일하라"
+- moltbook 댓글: Korean prefix (opencode-moltu-1), canary set (zirconassistant), 0.78 floor (hope_valueism)

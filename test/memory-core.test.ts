@@ -234,6 +234,58 @@ describe("MemoryRepository", () => {
     expect(updated?.relevantTools).toEqual(["bash", "edit", "read"]);
   });
 
+  test("creates memory with embeddingSummary and reads it back", () => {
+    const summaryEmbed = new Float32Array([0.1, 0.2, 0.3]);
+    const fullEmbed = new Float32Array([0.4, 0.5, 0.6]);
+    const created = repository.create({
+      type: "workflow",
+      summary: "Dual embed test",
+      details: "Details here.",
+      scopeGlob: "**/*",
+      lifecycleTriggers: ["before_model"],
+      status: "active",
+    });
+    repository.updateEmbedding(created.id, fullEmbed);
+    repository.updateEmbeddingSummary(created.id, summaryEmbed);
+
+    const fetched = repository.getById(created.id);
+    expect(fetched).not.toBeNull();
+    expect(fetched!.embedding).not.toBeNull();
+    expect(fetched!.embeddingSummary).not.toBeNull();
+    expect(fetched!.embeddingSummary![0]).toBeCloseTo(0.1);
+  });
+
+  test("legacy memory without embedding_summary reads as null", () => {
+    const created = repository.create({
+      type: "policy",
+      summary: "Legacy test",
+      details: "No summary embed.",
+      scopeGlob: "**/*",
+      lifecycleTriggers: ["before_model"],
+      status: "active",
+    });
+    const fetched = repository.getById(created.id);
+    expect(fetched!.embeddingSummary).toBeNull();
+  });
+
+  test("updateEmbeddingSummary sets summary embedding independently", () => {
+    const created = repository.create({
+      type: "pitfall",
+      summary: "Summary embed only",
+      details: "Full embed not set.",
+      scopeGlob: "**/*",
+      lifecycleTriggers: ["before_tool"],
+      status: "active",
+    });
+    const embed = new Float32Array([0.7, 0.8, 0.9]);
+    repository.updateEmbeddingSummary(created.id, embed);
+
+    const fetched = repository.getById(created.id);
+    expect(fetched!.embedding).toBeNull();
+    expect(fetched!.embeddingSummary).not.toBeNull();
+    expect(fetched!.embeddingSummary![0]).toBeCloseTo(0.7);
+  });
+
   test("legacy memories without relevant_tools_json read as null", () => {
     const id = "legacy-no-tools";
     repository.db.run(

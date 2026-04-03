@@ -15,7 +15,12 @@ import { DreamRepository } from "../../src/dream";
 import { MemoryRepository } from "../../src/memory";
 import { PolicyEngine, PolicyRuleRepository } from "../../src/policy";
 import { buildExtractionPrompt } from "../../src/cli/dream-extract";
-import { buildExtractionUserPrompt, parseExtractionResponse, executeExtractionActions } from "../../src/dream/llm-extract";
+import {
+  EXTRACTION_SYSTEM_PROMPT,
+  buildExtractionUserPrompt,
+  parseExtractionResponse,
+  executeExtractionActions,
+} from "../../src/dream/llm-extract";
 import type { DreamEvidenceEventRecord } from "../../src/dream/types";
 import { createTestDb } from "../helpers/create-test-db";
 import { MockEmbeddingService } from "../benchmark/benchmark-helpers";
@@ -126,6 +131,48 @@ describe("Conversation Buffer Integration", () => {
 // ---------------------------------------------------------------------------
 
 describe("dream:extract Prompt Building", () => {
+  test("extraction system prompt requires English output", () => {
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain("MUST be written in English");
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain("translate");
+  });
+
+  test("extraction user prompt requires English output", () => {
+    const prompt = buildExtractionUserPrompt(
+      [
+        {
+          id: "test-ev-1",
+          sessionId: "s1",
+          callId: "c1",
+          toolName: "edit",
+          scopeRef: "src/main.ts",
+          sourceRef: "s1:c1:edit",
+          title: "Edit done",
+          excerpt: "Updated file",
+          argsJson: "{}",
+          metadataJson: "null",
+          topicGuess: "test",
+          typeGuess: "workflow",
+          salience: 0.5,
+          novelty: 0.5,
+          salienceBoost: 0,
+          contradictionSignal: false,
+          status: "pending",
+          retryCount: 0,
+          nextReviewAt: null,
+          lastReviewedAt: null,
+          dreamRunId: null,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          consumedAt: null,
+          discardedAt: null,
+        },
+      ],
+      [],
+    );
+
+    expect(prompt).toContain("MUST be in English");
+    expect(prompt).toContain("translate");
+  });
+
   test("includes conversation content in prompt", () => {
     const batches = [
       makeBatchEvent("[user] repository 패턴으로 DB 접근하자\n[tool] [edit] Created UserRepository"),

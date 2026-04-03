@@ -18,6 +18,8 @@ export interface Memory {
   scope_glob: string; // e.g., "src/**/*.ts"
   activation_class: ActivationClass; // determines activation layer
   lifecycle_triggers: string; // JSON array of trigger types
+  embedding: ArrayBuffer | null;
+  embedding_summary: ArrayBuffer | null;
   relevant_tools_json: string | null; // JSON array of tool names, null = all tools
   confidence: number; // 0.0-1.0
   importance: number; // 0.0-1.0

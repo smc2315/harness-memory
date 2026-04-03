@@ -19,3 +19,5 @@ export {
   findTopK,
   EMBEDDING_DIMENSIONS,
 } from "./embeddings";
+export { rrfFusion, RRF_K } from "./fusion";
+export type { FusionCandidate, RetrievalSource } from "./fusion";

@@ -75,6 +75,14 @@ function buildCandidateSummary(
   return `Workflow for ${basename(scopeRef)} (${topicGuess})`;
 }
 
+/**
+ * Build the details text for a dream candidate memory.
+ *
+ * Convention: synthesized summaries (from buildCandidateSummary) are always
+ * English. Raw evidence excerpts in details may remain in their original
+ * language — they are reference data, not the primary search target.
+ * The LLM extraction path (llm-extract.ts) enforces English output.
+ */
 function buildCandidateDetails(
   events: readonly DreamEvidenceEventRecord[],
   previousSummary: string | null
