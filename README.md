@@ -34,20 +34,41 @@ Restart OpenCode and you're ready.
 | 📊 **Structured Audit Logging** | Track activation patterns and quality metrics |
 | 🚀 **Zero Native Dependencies** | SQLite via WASM, runs anywhere Node.js runs |
 | 🧠 **LLM-Based Extraction** | OpenCode SDK integration for intelligent memory extraction |
-| 📈 **Token Efficiency** | 41% savings vs full CLAUDE.md dump |
+| 📈 **Token Efficiency** | 73% savings vs full CLAUDE.md dump |
 
 ## Benchmark Results
 
-Real numbers from our test suite:
+### harness-memory vs CLAUDE.md (Head-to-Head)
 
-| Metric | Result | Improvement |
-|--------|--------|-------------|
-| First-turn hit rate | 90% | +125% vs no vector search (40%) |
-| Cross-language matching | 80% | Korean ↔ English |
-| Token efficiency | 41% savings | vs full CLAUDE.md dump |
-| Stale filtering | 100% accuracy | Prevents outdated info |
-| Embed latency | 2.1ms avg | 362 texts/sec throughput |
-| Long-session F1 | 0.89 | Precision 0.80, Recall 1.00 |
+Deterministic comparison using 30 identical project rules and 12 coding tasks:
+
+| Metric | CLAUDE.md | harness-memory | Winner |
+|--------|-----------|----------------|--------|
+| **Relevance Precision** | 11.4% | 21.5% | harness-memory (**1.9×**) |
+| **Coverage** | 100% | 48.6% | CLAUDE.md |
+| **Tokens per task** | 731 | 197 | harness-memory (**73% savings**) |
+| **Signal-to-Noise** | 0.12 | 0.34 | harness-memory (**2.7×**) |
+
+CLAUDE.md dumps everything every time — 100% coverage but only 11% relevant.
+harness-memory selectively injects — 49% coverage but 22% relevant, at 73% less token cost.
+
+### Internal Benchmark Suite (173 tests, all deterministic)
+
+| Benchmark | Tests | Key Metric |
+|-----------|-------|------------|
+| HM-Activation | 24 | Recall@5: 0.67, MRR: 0.66 |
+| HM-Product | 8 | 2× precision vs CLAUDE.md |
+| HM-Promotion | 20 | All 5 gates correct |
+| HM-Extract | 16 | Parser/action accuracy: 100% |
+| HM-Timeline | 16 | Latest-state: 100%, temporal reasoning: partial |
+| HM-Safety | 20 | Block rate: 100%, 3 known evasion vectors |
+| HM-Scale | 12 | Stable recall 50→500 memories |
+
+### Known Limitations
+
+- **Temporal reasoning**: The system correctly filters superseded memories but cannot yet reconstruct event ordering across sessions. Hierarchical retrieval (Phase 2) is designed to address this.
+- **Cross-session synthesis**: Top-k retrieval tends to grab chunks from one session. Multi-session queries need session-level pre-filtering.
+- **Scale**: Works well for compact projects (≤20 sessions). Larger projects benefit from the hybrid retrieval (dense + BM25 + RRF) but may need session summaries for optimal precision.
 
 ## Architecture
 
