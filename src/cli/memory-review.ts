@@ -1,10 +1,23 @@
 import { openSqlJsDatabase } from "../db/sqlite";
+import type { MemoryType } from "../db/schema/types";
 import { DreamRepository } from "../dream";
 import { MemoryRepository } from "../memory";
+import { getCandidateAgeDays } from "../promotion/auto-promoter";
+
+const VALID_MEMORY_TYPES: readonly MemoryType[] = [
+  "policy",
+  "workflow",
+  "pitfall",
+  "architecture_constraint",
+  "decision",
+];
+const VALID_SORT_OPTIONS = ["confidence", "created"] as const;
 
 interface CliOptions {
   dbPath: string;
   limit?: number;
+  type?: MemoryType;
+  sort: (typeof VALID_SORT_OPTIONS)[number];
   json: boolean;
 }
 
@@ -15,6 +28,8 @@ interface CandidateReviewEntry {
   summary: string;
   confidence: number;
   importance: number;
+  createdAt: string;
+  ageDays: number;
   lastVerifiedAt: string | null;
   evidenceCount: number;
   recentEvidence: {
@@ -27,9 +42,48 @@ interface CandidateReviewEntry {
   }[];
 }
 
+function parseMemoryType(value: string): MemoryType {
+  if (VALID_MEMORY_TYPES.includes(value as MemoryType)) {
+    return value as MemoryType;
+  }
+
+  throw new Error(`Invalid memory type: ${value}. Valid: ${VALID_MEMORY_TYPES.join(", ")}`);
+}
+
+function parseSort(value: string): CliOptions["sort"] {
+  if (VALID_SORT_OPTIONS.includes(value as CliOptions["sort"])) {
+    return value as CliOptions["sort"];
+  }
+
+  throw new Error(`Invalid sort option: ${value}. Valid: ${VALID_SORT_OPTIONS.join(", ")}`);
+}
+
+function compareByCreatedDesc(
+  left: Pick<CandidateReviewEntry, "createdAt" | "id">,
+  right: Pick<CandidateReviewEntry, "createdAt" | "id">,
+): number {
+  const createdAtDelta = Date.parse(right.createdAt) - Date.parse(left.createdAt);
+  if (!Number.isNaN(createdAtDelta) && createdAtDelta !== 0) {
+    return createdAtDelta;
+  }
+
+  return left.id.localeCompare(right.id);
+}
+
+function compareByConfidenceDesc(left: CandidateReviewEntry, right: CandidateReviewEntry): number {
+  const confidenceDelta = right.confidence - left.confidence;
+  if (confidenceDelta !== 0) {
+    return confidenceDelta;
+  }
+
+  return compareByCreatedDesc(left, right);
+}
+
 function parseArgs(argv: string[]): CliOptions {
   let dbPath = ".harness-memory/memory.sqlite";
   let limit: number | undefined;
+  let type: MemoryType | undefined;
+  let sort: CliOptions["sort"] = "created";
   let json = false;
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -47,12 +101,24 @@ function parseArgs(argv: string[]): CliOptions {
       continue;
     }
 
+    if (arg === "--type" && index + 1 < argv.length) {
+      type = parseMemoryType(argv[index + 1]);
+      index += 1;
+      continue;
+    }
+
+    if (arg === "--sort" && index + 1 < argv.length) {
+      sort = parseSort(argv[index + 1]);
+      index += 1;
+      continue;
+    }
+
     if (arg === "--json") {
       json = true;
     }
   }
 
-  return { dbPath, limit, json };
+  return { dbPath, limit, type, sort, json };
 }
 
 async function main(): Promise<void> {
@@ -62,13 +128,18 @@ async function main(): Promise<void> {
   try {
     const memoryRepository = new MemoryRepository(db);
     const dreamRepository = new DreamRepository(db);
-    const candidates = memoryRepository.list({ status: "candidate", limit: options.limit });
+    const candidates = memoryRepository.list({
+      status: "candidate",
+      type: options.type,
+      limit: options.limit,
+    });
     const linkedEvidenceByMemoryId = dreamRepository.listLinkedEvidenceByMemoryIds(
       candidates.map((memory) => memory.id)
     );
 
     const entries: CandidateReviewEntry[] = candidates.map((memory) => {
-      const matchingEvidence = (linkedEvidenceByMemoryId.get(memory.id) ?? [])
+      const linkedEvidence = linkedEvidenceByMemoryId.get(memory.id) ?? [];
+      const recentEvidence = linkedEvidence
         .slice(-5)
         .map((event) => ({
           id: event.id,
@@ -86,18 +157,23 @@ async function main(): Promise<void> {
         summary: memory.summary,
         confidence: memory.confidence,
         importance: memory.importance,
+        createdAt: memory.createdAt,
+        ageDays: getCandidateAgeDays(memory.createdAt),
         lastVerifiedAt: memory.lastVerifiedAt,
-        evidenceCount: matchingEvidence.length,
-        recentEvidence: matchingEvidence,
+        evidenceCount: linkedEvidence.length,
+        recentEvidence,
       };
     });
+    const sortedEntries = [...entries].sort(
+      options.sort === "confidence" ? compareByConfidenceDesc : compareByCreatedDesc
+    );
 
     if (options.json) {
-      console.log(JSON.stringify(entries, null, 2));
+      console.log(JSON.stringify(sortedEntries, null, 2));
       return;
     }
 
-    for (const entry of entries) {
+    for (const entry of sortedEntries) {
       console.log(
         [
           entry.id,
