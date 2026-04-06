@@ -1,4 +1,5 @@
 export { AuditLogger } from "./logger";
+export { FileLogger } from "./file-logger";
 export type {
   AuditEventType,
   AuditActivationDetails,

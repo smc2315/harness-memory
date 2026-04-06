@@ -17,8 +17,8 @@ import { existsSync, readFileSync, writeFileSync } from "fs";
 import { dirname, resolve } from "path";
 import { homedir } from "os";
 
-import { ActivationEngine, EmbeddingService } from "../activation";
-import { AuditLogger } from "../audit/logger";
+import { ActivationEngine, EmbeddingService, type ActivationResult } from "../activation";
+import { AuditLogger, FileLogger } from "../audit";
 import { OpenCodeAdapter } from "../adapters";
 import type { AdapterModelRef } from "../adapters/types";
 import type { MemoryType } from "../db/schema/types";
@@ -36,6 +36,7 @@ import {
 } from "../cli/dream-extract";
 import { MemoryRepository, CompositeMemoryRepository } from "../memory";
 import { PolicyEngine, PolicyRuleRepository } from "../policy";
+import { classifyQueryType } from "../retrieval/query-router";
 import { generateSessionSummary } from "../retrieval/summary-generator";
 import { SummaryRepository } from "../retrieval/summary-repository";
 
@@ -566,6 +567,7 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
   let embeddingService: EmbeddingService | null = null;
   let summaryRepository: SummaryRepository | null = null;
   let auditLog: AuditLogger | null = null;
+  let fileLog: FileLogger | null = null;
   const summaryGenerationSessions = new Set<string>();
   const bufferPersistPath = resolve(dirname(dbPath), ".conversation-buffer.json");
   const conversationBuffer = new ConversationBuffer(DEFAULT_BUFFER_FLUSH_THRESHOLD, bufferPersistPath);
@@ -622,6 +624,12 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
         return Reflect.get(target, prop, receiver);
       },
     }) as MemoryRepository;
+
+    try {
+      fileLog = new FileLogger(dirname(dbPath));
+    } catch {
+      fileLog = null;
+    }
 
     const auditLogger = new AuditLogger(db);
     auditLog = auditLogger;
@@ -697,6 +705,46 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
     }
   }
 
+  function safeFileLog(writeFileEvent: (logger: FileLogger) => void): void {
+    if (fileLog === null) {
+      return;
+    }
+
+    try {
+      writeFileEvent(fileLog);
+    } catch {
+      // File logging is non-critical and should never interrupt the request.
+    }
+  }
+
+  function logActivationEvent(
+    activation: ActivationResult,
+    options: {
+      mode: string;
+      queryType: string;
+      scopeRef: string;
+      query?: string;
+      toolName?: string;
+      summariesUsed?: number;
+    },
+  ): void {
+    safeFileLog((logger) => {
+      logger.logActivation({
+        mode: options.mode,
+        queryType: options.queryType,
+        query: options.query,
+        toolName: options.toolName,
+        scopeRef: options.scopeRef,
+        activatedCount: activation.activated.length,
+        activatedSummaries: activation.activated.map((memory) => memory.summary),
+        suppressedCount: activation.suppressed.length,
+        budgetUsedBytes: activation.budget.usedPayloadBytes,
+        budgetMaxBytes: activation.budget.maxPayloadBytes,
+        summariesUsed: options.summariesUsed,
+      });
+    });
+  }
+
   /**
    * Reload the in-memory database from the file on disk.
    *
@@ -719,6 +767,7 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
     dreamRepo = null;
     summaryRepository = null;
     auditLog = null;
+    fileLog = null;
     log("Reloaded DB from disk after external CLI modification");
   }
 
@@ -763,6 +812,16 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
         }
 
         logger.logSessionSummarySkipped(sessionId, details);
+      });
+
+      safeFileLog((logger) => {
+        logger.logSummary({
+          sessionId,
+          eventCount: eventCount ?? 0,
+          toolCount: 0,
+          generated: false,
+          skipReason: reason,
+        });
       });
 
       if (auditLogged) {
@@ -845,6 +904,15 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
         });
       });
 
+      safeFileLog((logger) => {
+        logger.logSummary({
+          sessionId,
+          eventCount: summary.eventCount,
+          toolCount: summary.toolNames.length,
+          generated: true,
+        });
+      });
+
       saveDb();
     } finally {
       summaryGenerationSessions.delete(sessionId);
@@ -903,6 +971,24 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
       // Execute actions
       const actionResults = await executeExtractionActions(result.facts, {
         memoryRepository: memoryRepo,
+      });
+      const appliedActionResults = actionResults.filter((actionResult) => !actionResult.skipped);
+      const countAppliedActions = (action: "create" | "reinforce" | "supersede" | "stale"): number =>
+        actionResults.filter(
+          (actionResult) => actionResult.action === action && !actionResult.skipped,
+        ).length;
+
+      safeFileLog((logger) => {
+        logger.logDream({
+          trigger: "idle",
+          create: countAppliedActions("create"),
+          reinforce: countAppliedActions("reinforce"),
+          supersede: countAppliedActions("supersede"),
+          stale: countAppliedActions("stale"),
+          latent: 0,
+          skip: actionResults.filter((actionResult) => actionResult.skipped).length,
+          materialized: appliedActionResults.length,
+        });
       });
 
       // Mark batches as consumed
@@ -976,6 +1062,14 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
         });
       });
 
+      safeFileLog((logger) => {
+        logger.logPromotion({
+          promoted: promoResult.promoted.length,
+          expired: promoResult.expired.length,
+          skipped: promoResult.skipped.length,
+        });
+      });
+
       if (promoResult.promoted.length > 0) {
         for (const p of promoResult.promoted) {
           log("Auto-promoted:", `[${p.summary}]`);
@@ -997,7 +1091,7 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
       }
 
       // Show toast notification for review
-      const applied = actionResults.filter((r) => !r.skipped);
+      const applied = appliedActionResults;
 
       if (applied.length > 0) {
         const candidateList = applied
@@ -1170,6 +1264,24 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
           messageText: currentMessageText,
         });
 
+        const queryType = currentMessageText === undefined
+          ? "default"
+          : classifyQueryType(currentMessageText);
+        const activationMode =
+          result.session !== null &&
+          result.session.toolCallCount === 0 &&
+          result.session.beforeModelCount === 1
+            ? "startup"
+            : queryType;
+
+        logActivationEvent(result.activation, {
+          mode: activationMode,
+          queryType,
+          query: currentMessageText,
+          toolName: "model",
+          scopeRef: result.session?.lastBeforeModel?.scopeRef ?? ".",
+        });
+
         if (result.system.length > 0) {
           output.system.push(...result.system);
         }
@@ -1223,11 +1335,18 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
         pendingToolArgs.set(input.callID, output.args);
 
         if (currentSessionID !== undefined) {
-          await adp.beforeTool({
+          const result = await adp.beforeTool({
             sessionID: currentSessionID,
             tool: input.tool,
             callID: input.callID,
             scopeRef: extractScopeFromArgs(output.args),
+          });
+
+          logActivationEvent(result.activation, {
+            mode: "default",
+            queryType: "tool",
+            toolName: input.tool,
+            scopeRef: result.session.lastScopeRef,
           });
         }
       } catch (error) {
