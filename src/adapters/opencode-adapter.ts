@@ -1,6 +1,8 @@
 import { ActivationEngine, type RankedMemory } from "../activation";
+import type { EvidenceMetadata, SignalTag } from "../db/schema/types";
 import { DreamRepository } from "../dream";
 import { PolicyEngine, type PolicyWarning } from "../policy";
+import { classifyQueryType } from "../retrieval/query-router";
 import { scanMemoryContent } from "../security";
 
 import type {
@@ -188,6 +190,47 @@ function estimateDreamNovelty(
   }
 
   return Math.min(1, novelty);
+}
+
+// ---------------------------------------------------------------------------
+// Signal tag extraction — regex is a HINT provider, not a gatekeeper
+// ---------------------------------------------------------------------------
+
+const ADAPTER_SIGNAL_PATTERNS: ReadonlyArray<{
+  tag: SignalTag;
+  pattern: RegExp;
+  field: "excerpt" | "args";
+}> = [
+  { tag: "failure_signal", pattern: /error|failed|exception|timeout|refused/i, field: "excerpt" },
+  { tag: "success_signal", pattern: /passed|resolved|fixed|completed|migrated|created|updated/i, field: "excerpt" },
+  { tag: "decision_signal", pattern: /decided|chose|switched|replaced|deprecated|changed\s.*\sto/i, field: "excerpt" },
+  { tag: "convention_signal", pattern: /always|never|convention|must|should|standard|rule/i, field: "excerpt" },
+  { tag: "architecture_signal", pattern: /architecture|boundary|layer|component|module|structure/i, field: "excerpt" },
+  { tag: "temporal_cue", pattern: /before|after|previously|used to|switched from/i, field: "excerpt" },
+  { tag: "explicit_marker", pattern: /do not|always use|fixed by|known error/i, field: "excerpt" },
+  { tag: "has_file_context", pattern: /path|file|src\//i, field: "args" },
+];
+
+function extractEvidenceSignalTags(excerpt: string, argsJson: string): SignalTag[] {
+  const tags: SignalTag[] = [];
+  for (const { tag, pattern, field } of ADAPTER_SIGNAL_PATTERNS) {
+    const text = field === "excerpt" ? excerpt : argsJson;
+    if (pattern.test(text)) {
+      tags.push(tag);
+    }
+  }
+  return tags;
+}
+
+/**
+ * Structural noise filter — rejects evidence that has no informational content.
+ * NO regex. Only structural checks: length, emptiness.
+ * Returns true if evidence should be DISCARDED as noise.
+ */
+function isEvidenceNoise(excerpt: string): boolean {
+  if (excerpt.length < 20) return true;
+  if (excerpt.trim() === "") return true;
+  return false;
 }
 
 function nowIsoString(): string {
@@ -439,6 +482,7 @@ export class OpenCodeAdapter {
       lastBeforeModel: null,
       toolPolicyChecks: [],
       toolEvidence: [],
+      beforeModelCount: 0,
       toolCallCount: 0,
     };
 
@@ -464,6 +508,12 @@ export class OpenCodeAdapter {
     const session =
       input.sessionID === undefined ? null : this.getOrCreateSession(input.sessionID);
     const scopeRef = this.resolveScopeRef(input.scopeRef, session);
+    const messageText = input.messageText ?? "";
+    const queryMode = classifyQueryType(messageText);
+    const activationMode =
+      session !== null && session.toolCallCount === 0 && session.beforeModelCount === 0
+        ? "startup"
+        : queryMode;
     const activation = await this.activationEngine.activate({
       lifecycleTrigger: "before_model",
       scopeRef,
@@ -472,6 +522,7 @@ export class OpenCodeAdapter {
       repoFingerprint: input.repoFingerprint,
       maxMemories: input.maxMemories,
       maxPayloadBytes: input.maxPayloadBytes,
+      activationMode,
     });
     const advisoryText = formatActivatedMemoryAdvisory(activation.activated);
 
@@ -494,6 +545,7 @@ export class OpenCodeAdapter {
         activation,
         createdAt: nowIsoString(),
       };
+      session.beforeModelCount += 1;
       session.lastUpdatedAt = nowIsoString();
     }
 
@@ -542,6 +594,7 @@ export class OpenCodeAdapter {
       lifecycleTrigger: "before_tool",
       scopeRef,
       toolName: input.tool,
+      activationMode: "default",
     });
     const advisoryText = formatActivatedMemoryAdvisory(activation.activated);
     const policyCheck: AdapterToolPolicyCheck = {
@@ -602,36 +655,59 @@ export class OpenCodeAdapter {
     );
 
     if (this.dreamRepository !== null) {
-      const typeGuess = inferDreamTypeGuess(excerpt, output.title, input.tool);
-      this.dreamRepository.createEvidenceEvent({
-        sessionId: input.sessionID,
-        callId: input.callID,
-        toolName: input.tool,
-        scopeRef,
-        sourceRef,
-        title: output.title,
-        excerpt,
-        args: input.args,
-        metadata: output.metadata,
-        topicGuess: buildDreamTopicGuess(input, scopeRef, excerpt, typeGuess),
-        typeGuess,
-        salience: estimateDreamSalience(
-          typeGuess,
-          output.title,
+      // Structural noise filter — NO regex, only length/emptiness checks
+      if (!isEvidenceNoise(excerpt)) {
+        const typeGuess = inferDreamTypeGuess(excerpt, output.title, input.tool);
+        const topicGuess = buildDreamTopicGuess(input, scopeRef, excerpt, typeGuess);
+
+        // Extract signal tags from evidence — these are HINTS, not gates
+        const signalTags = extractEvidenceSignalTags(
           excerpt,
-          input.tool,
-          activation.activated.length,
-          activation.conflicts.length
-        ),
-        novelty: estimateDreamNovelty(
+          JSON.stringify(input.args).toLowerCase()
+        );
+
+        // Build enriched metadata with signal tags and hint fields
+        const evidenceMetadata: EvidenceMetadata = {
+          ...(output.metadata !== undefined && typeof output.metadata === "object" && output.metadata !== null
+            ? (output.metadata as Record<string, unknown>)
+            : {}),
+          signalTags,
+          hintType: typeGuess,
+          hintTopic: topicGuess,
+        };
+
+        this.dreamRepository.createEvidenceEvent({
+          sessionId: input.sessionID,
+          callId: input.callID,
+          toolName: input.tool,
+          scopeRef,
+          sourceRef,
+          title: output.title,
+          excerpt,
+          args: input.args,
+          metadata: evidenceMetadata,
+          // typeGuess and topicGuess still stored in columns for backward compat,
+          // but the worker no longer uses them for gating or grouping decisions
+          topicGuess,
           typeGuess,
-          activation.activated.length,
-          activation.conflicts.length
-        ),
-        salienceBoost,
-        contradictionSignal: activation.conflicts.length > 0,
-        createdAt,
-      });
+          salience: estimateDreamSalience(
+            typeGuess,
+            output.title,
+            excerpt,
+            input.tool,
+            activation.activated.length,
+            activation.conflicts.length
+          ),
+          novelty: estimateDreamNovelty(
+            typeGuess,
+            activation.activated.length,
+            activation.conflicts.length
+          ),
+          salienceBoost,
+          contradictionSignal: activation.conflicts.length > 0,
+          createdAt,
+        });
+      }
     }
 
     const evidenceCapture: AdapterToolEvidenceCapture = {

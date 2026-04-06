@@ -119,6 +119,7 @@ export interface AdapterSessionContext {
   lastBeforeModel: AdapterBeforeModelRecord | null;
   toolPolicyChecks: AdapterToolPolicyCheck[];
   toolEvidence: AdapterToolEvidenceCapture[];
+  beforeModelCount: number;
   toolCallCount: number;
 }
 

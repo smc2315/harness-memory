@@ -3,6 +3,7 @@ export { createScopeMatcher, matchesScope, normalizeScopeRef } from "./scope";
 export {
   type ActivationConflict,
   type ActivationConflictKind,
+  type ActivationMode,
   DEFAULT_ACTIVE_STATUSES,
   DEFAULT_ACTIVATION_LIMITS,
   type ActivationBudgetSummary,

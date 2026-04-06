@@ -4,6 +4,7 @@ import {
   type ListMemoriesInput,
   type MemoryRecord,
 } from "../memory";
+import type { SummaryRepository, SessionSummaryRecord } from "../retrieval/summary-repository";
 
 import { LexicalIndex } from "./lexical";
 import { matchesScope, normalizeScopeRef } from "./scope";
@@ -173,24 +174,128 @@ function compareRankedMemories(left: RankedMemory, right: RankedMemory): number 
   return compareMemories(left, right);
 }
 
+const HEURISTIC_SESSION_GAP_MS = 6 * 60 * 60 * 1000;
+
+interface PreparedActivation {
+  activationStart: number;
+  scopeRef: string;
+  activeMemories: MemoryRecord[];
+  suppressed: SuppressedMemory[];
+  sharedLexicalIndex: LexicalIndex;
+  maxMemories: number;
+  maxPayloadBytes: number;
+  queryText: string;
+  broadEnglishQuery: boolean;
+}
+
+interface SelectionState {
+  selected: RankedMemory[];
+  selectedIds: Set<string>;
+  usedPayloadBytes: number;
+}
+
+interface QueryEmbeddingCache {
+  raw: Float32Array | null | undefined;
+}
+
+interface SummaryWindow {
+  summary: SessionSummaryRecord;
+  startAtMs: number;
+  endAtMs: number;
+}
+
+interface ScoredMemoryCandidate {
+  memory: MemoryRecord;
+  score: number;
+  sessionKey: string | null;
+}
+
+function compareMemoriesByCreatedAt(left: MemoryRecord, right: MemoryRecord): number {
+  const createdAtDelta = Date.parse(left.createdAt) - Date.parse(right.createdAt);
+  if (createdAtDelta !== 0) {
+    return createdAtDelta;
+  }
+
+  return left.id.localeCompare(right.id);
+}
+
+function compareMemoriesByUpdatedAtDesc(left: MemoryRecord, right: MemoryRecord): number {
+  const updatedAtDelta = Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
+  if (updatedAtDelta !== 0) {
+    return updatedAtDelta;
+  }
+
+  const createdAtDelta = Date.parse(right.createdAt) - Date.parse(left.createdAt);
+  if (createdAtDelta !== 0) {
+    return createdAtDelta;
+  }
+
+  return left.id.localeCompare(right.id);
+}
+
+function compareSessionSummariesByCreatedAt(
+  left: SessionSummaryRecord,
+  right: SessionSummaryRecord,
+): number {
+  const createdAtDelta = Date.parse(left.createdAt) - Date.parse(right.createdAt);
+  if (createdAtDelta !== 0) {
+    return createdAtDelta;
+  }
+
+  return left.id.localeCompare(right.id);
+}
+
 export class ActivationEngine {
   readonly repository: MemoryRepository;
   private embeddingService: EmbeddingService | null;
   private auditLogger: AuditLogger | null;
+  private summaryRepository: SummaryRepository | null;
 
   constructor(repository: MemoryRepository, embeddingService?: EmbeddingService, auditLogger?: AuditLogger) {
     this.repository = repository;
     this.embeddingService = embeddingService ?? null;
     this.auditLogger = auditLogger ?? null;
+    this.summaryRepository = null;
+  }
+
+  /**
+   * Set the summary repository for hierarchical retrieval.
+   * Optional — when not set, temporal/cross-session modes degrade gracefully.
+   */
+  setSummaryRepository(repo: SummaryRepository): void {
+    this.summaryRepository = repo;
   }
 
   async activate(request: ActivationRequest): Promise<ActivationResult> {
+    const mode = request.activationMode ?? "default";
+    const prepared = this.prepareActivation(
+      request,
+      mode === "temporal" ? true : (request.includeSuperseded ?? false),
+    );
+
+    switch (mode) {
+      case "startup":
+        return this.activateStartupMode(request, prepared);
+      case "temporal":
+        return this.activateTemporalMode(request, prepared);
+      case "cross_session":
+        return this.activateCrossSessionMode(request, prepared);
+      case "default":
+      default:
+        return this.activateDefaultMode(request, prepared);
+    }
+  }
+
+  private prepareActivation(
+    request: ActivationRequest,
+    includeSuperseded: boolean,
+  ): PreparedActivation {
     const activationStart = Date.now();
     const scopeRef = normalizeScopeRef(request.scopeRef);
     const allMemories = this.repository.list(buildTypeFilter(request.types));
     const activeMemories: MemoryRecord[] = [];
     const suppressed: SuppressedMemory[] = [];
-    const allowedStatuses = request.includeSuperseded
+    const allowedStatuses = includeSuperseded
       ? [...DEFAULT_ACTIVE_STATUSES, "superseded" as const]
       : DEFAULT_ACTIVE_STATUSES;
 
@@ -229,7 +334,549 @@ export class ActivationEngine {
     const maxPayloadBytes =
       request.maxPayloadBytes ?? DEFAULT_ACTIVATION_LIMITS.maxPayloadBytes;
     const queryText = (request.queryTokens ?? []).join(" ").trim();
-    const broadEnglishQuery = isBroadScopeRef(scopeRef) && isEnglishLikeQuery(queryText);
+
+    return {
+      activationStart,
+      scopeRef,
+      activeMemories,
+      suppressed,
+      sharedLexicalIndex,
+      maxMemories,
+      maxPayloadBytes,
+      queryText,
+      broadEnglishQuery: isBroadScopeRef(scopeRef) && isEnglishLikeQuery(queryText),
+    };
+  }
+
+  private tryAddSelection(
+    selection: SelectionState,
+    memory: MemoryRecord,
+    maxMemories: number,
+    maxPayloadBytes: number,
+    scoreOverride?: number,
+  ): "ok" | "duplicate" | "memory_budget" | "payload_budget" {
+    if (selection.selectedIds.has(memory.id)) {
+      return "duplicate";
+    }
+
+    if (selection.selected.length >= maxMemories) {
+      return "memory_budget";
+    }
+
+    const payloadBytes = getPayloadBytes(memory);
+    if (selection.usedPayloadBytes + payloadBytes > maxPayloadBytes) {
+      return "payload_budget";
+    }
+
+    selection.usedPayloadBytes += payloadBytes;
+    selection.selectedIds.add(memory.id);
+    selection.selected.push({
+      ...memory,
+      score: scoreOverride ?? calculateMemoryScore(memory),
+      payloadBytes,
+      rank: selection.selected.length + 1,
+    });
+    return "ok";
+  }
+
+  private pushBudgetSuppression(
+    suppressed: SuppressedMemory[],
+    memory: MemoryRecord,
+    outcome: "ok" | "duplicate" | "memory_budget" | "payload_budget",
+    maxMemories: number,
+    maxPayloadBytes: number,
+  ): void {
+    if (outcome === "memory_budget") {
+      suppressed.push({
+        memory,
+        kind: "budget_limit",
+        reason: `Activation memory budget exceeded at ${maxMemories} memories`,
+      });
+    } else if (outcome === "payload_budget") {
+      suppressed.push({
+        memory,
+        kind: "budget_limit",
+        reason: `Activation payload budget exceeded at ${maxPayloadBytes} bytes`,
+      });
+    }
+  }
+
+  private async getQueryEmbedding(
+    queryText: string,
+    cache: QueryEmbeddingCache,
+  ): Promise<Float32Array | null> {
+    if (cache.raw !== undefined) {
+      return cache.raw;
+    }
+
+    if (!this.embeddingService?.isReady || queryText.length === 0) {
+      cache.raw = null;
+      return cache.raw;
+    }
+
+    try {
+      cache.raw = await this.embeddingService.embedQuery(queryText);
+    } catch {
+      cache.raw = null;
+    }
+
+    return cache.raw;
+  }
+
+  private getRetrievedMemoryScore(memory: MemoryRecord, match: RetrievalMatch): number {
+    return calculateStartupActivationScore(memory, match.score, match.source);
+  }
+
+  private async retrieveMatches(
+    prepared: PreparedActivation,
+    candidates: readonly MemoryRecord[],
+    limit: number,
+    queryEmbeddingCache: QueryEmbeddingCache,
+  ): Promise<RetrievalMatch[]> {
+    if (limit <= 0 || candidates.length === 0 || prepared.queryText.length === 0) {
+      return [];
+    }
+
+    const expandedQueryText = isBroadScopeRef(prepared.scopeRef)
+      ? prepared.queryText
+      : `${prepared.scopeRef.replace(/[/\\]/g, " ").replace(/\.[^.]+$/, "")}: ${prepared.queryText}`;
+    const candidateIdSet = new Set(candidates.map((memory) => memory.id));
+    const memoryById = new Map(candidates.map((memory) => [memory.id, memory]));
+    const widerLimit = Math.min(candidates.length, limit * 2);
+
+    const denseResults: FusionCandidate[] = [];
+    const denseQueryEmbedding = isBroadScopeRef(prepared.scopeRef)
+      ? await this.getQueryEmbedding(prepared.queryText, queryEmbeddingCache)
+      : (this.embeddingService?.isReady && expandedQueryText.length > 0
+        ? await this.embeddingService.embedQuery(expandedQueryText).catch(() => null)
+        : null);
+    if (denseQueryEmbedding !== null) {
+      const memoriesWithEmbeddings = candidates.filter(
+        (memory) => memory.embedding !== null || memory.embeddingSummary !== null,
+      );
+      if (memoriesWithEmbeddings.length > 0) {
+        const fullEmbeddings = memoriesWithEmbeddings
+          .filter((memory) => memory.embedding !== null)
+          .map((memory) => ({
+            id: memory.id,
+            embedding: memory.embedding as Float32Array,
+          }));
+        const fullResults = fullEmbeddings.length > 0
+          ? findTopK(denseQueryEmbedding, fullEmbeddings, widerLimit)
+          : [];
+
+        const summaryEmbeddings = memoriesWithEmbeddings
+          .filter((memory) => memory.embeddingSummary !== null)
+          .map((memory) => ({
+            id: memory.id,
+            embedding: memory.embeddingSummary as Float32Array,
+          }));
+        const summaryResults = summaryEmbeddings.length > 0
+          ? findTopK(denseQueryEmbedding, summaryEmbeddings, widerLimit)
+          : [];
+
+        const scoreById = new Map<string, number>();
+        for (const result of fullResults) {
+          scoreById.set(result.id, result.score);
+        }
+        for (const result of summaryResults) {
+          const existingScore = scoreById.get(result.id);
+          scoreById.set(
+            result.id,
+            existingScore === undefined ? result.score : Math.max(existingScore, result.score),
+          );
+        }
+
+        const mergedResults = [...scoreById.entries()]
+          .sort((left, right) => right[1] - left[1])
+          .slice(0, widerLimit);
+
+        for (const [id, score] of mergedResults) {
+          denseResults.push({
+            id,
+            score,
+            source: "vector",
+          });
+        }
+      }
+    }
+
+    const lexicalResults: FusionCandidate[] = prepared.sharedLexicalIndex
+      .search(prepared.queryText, widerLimit, candidateIdSet)
+      .map((result) => ({
+        id: result.id,
+        score: result.score,
+        source: "lexical" as const,
+      }));
+
+    if (denseResults.length === 0 && lexicalResults.length === 0) {
+      return [];
+    }
+
+    if (denseResults.length === 0) {
+      return lexicalResults.slice(0, limit).map((result) => ({
+        id: result.id,
+        score: result.score,
+        source: "lexical" as const,
+      }));
+    }
+
+    if (lexicalResults.length === 0) {
+      return denseResults.slice(0, limit).map((result) => ({
+        id: result.id,
+        score: result.score,
+        source: "vector" as const,
+      }));
+    }
+
+    const denseById = new Map(denseResults.map((result) => [result.id, result]));
+    const lexicalById = new Map(lexicalResults.map((result) => [result.id, result]));
+
+    const fusedResults = rrfFusion([denseResults, lexicalResults], limit).map((result) => {
+      const denseResult = denseById.get(result.id);
+      const lexicalResult = lexicalById.get(result.id);
+
+      if (denseResult !== undefined && lexicalResult !== undefined) {
+        return {
+          id: result.id,
+          score: result.score,
+          source: "hybrid" as const,
+        };
+      }
+
+      if (denseResult !== undefined) {
+        return {
+          id: result.id,
+          score: denseResult.score,
+          source: "vector" as const,
+        };
+      }
+
+      return {
+        id: result.id,
+        score: lexicalResult?.score ?? 0,
+        source: "lexical" as const,
+      };
+    });
+
+    const boostedResults = fusedResults
+      .map((result) => {
+        const memory = memoryById.get(result.id);
+        if (memory === undefined || !matchesScope(memory.scopeGlob, prepared.scopeRef)) {
+          return result;
+        }
+
+        return {
+          ...result,
+          score: result.score + SCOPE_BOOST,
+        };
+      })
+      .sort((left, right) => {
+        const scoreDelta = right.score - left.score;
+        if (scoreDelta !== 0) {
+          return scoreDelta;
+        }
+
+        return left.id.localeCompare(right.id);
+      });
+
+    return boostedResults.slice(0, limit);
+  }
+
+  private listSessionSummaryWindows(): SummaryWindow[] {
+    if (this.summaryRepository === null) {
+      return [];
+    }
+
+    const summaries = this.summaryRepository
+      .listSessionSummaries({ orderBy: "created_at" })
+      .sort(compareSessionSummariesByCreatedAt);
+    let previousEndAtMs = Number.NEGATIVE_INFINITY;
+
+    return summaries.map((summary) => {
+      const window: SummaryWindow = {
+        summary,
+        startAtMs: previousEndAtMs,
+        endAtMs: Date.parse(summary.createdAt),
+      };
+      previousEndAtMs = window.endAtMs;
+      return window;
+    });
+  }
+
+  private getMemoriesForSummaryWindow(
+    summary: SessionSummaryRecord,
+    windows: readonly SummaryWindow[],
+    memories: readonly MemoryRecord[],
+  ): MemoryRecord[] {
+    const window = windows.find((candidate) => candidate.summary.id === summary.id);
+    if (window === undefined) {
+      return [];
+    }
+
+    return memories.filter((memory) => {
+      const createdAtMs = Date.parse(memory.createdAt);
+      return createdAtMs > window.startAtMs && createdAtMs <= window.endAtMs;
+    });
+  }
+
+  private async searchSessionSummaries(
+    queryText: string,
+    limit: number,
+  ): Promise<SessionSummaryRecord[]> {
+    if (this.summaryRepository === null || limit <= 0 || queryText.length === 0) {
+      return [];
+    }
+
+    if (!this.embeddingService?.isReady) {
+      return [];
+    }
+
+    const summaries = this.summaryRepository.listSessionSummaries({ orderBy: "created_at" });
+    if (summaries.length === 0) {
+      return [];
+    }
+
+    const queryEmbedding = await this.embeddingService.embedQuery(queryText).catch(() => null);
+    if (queryEmbedding === null) {
+      return [];
+    }
+
+    const summariesWithEmbeddings = summaries
+      .filter((summary) => summary.embedding !== null)
+      .map((summary) => ({
+        id: summary.id,
+        embedding: summary.embedding as Float32Array,
+      }));
+    if (summariesWithEmbeddings.length === 0) {
+      return [];
+    }
+
+    const summaryById = new Map(summaries.map((summary) => [summary.id, summary]));
+    return findTopK(
+      queryEmbedding,
+      summariesWithEmbeddings,
+      Math.min(limit, summariesWithEmbeddings.length),
+    )
+      .map((match) => summaryById.get(match.id))
+      .filter((summary): summary is SessionSummaryRecord => summary !== undefined);
+  }
+
+  private ensureMinimumSessionSummaries(
+    selected: readonly SessionSummaryRecord[],
+    allSummaries: readonly SessionSummaryRecord[],
+    minimumCount: number,
+  ): SessionSummaryRecord[] {
+    const ensured = [...selected];
+    const seenSessionIds = new Set(ensured.map((summary) => summary.sessionId));
+    const recencySorted = [...allSummaries].sort((left, right) => {
+      const updatedAtDelta = Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
+      if (updatedAtDelta !== 0) {
+        return updatedAtDelta;
+      }
+
+      return left.id.localeCompare(right.id);
+    });
+
+    for (const summary of recencySorted) {
+      if (ensured.length >= minimumCount) {
+        break;
+      }
+
+      if (seenSessionIds.has(summary.sessionId)) {
+        continue;
+      }
+
+      ensured.push(summary);
+      seenSessionIds.add(summary.sessionId);
+    }
+
+    return ensured;
+  }
+
+  private buildHeuristicSessionKeys(
+    memories: readonly MemoryRecord[],
+  ): Map<string, string> {
+    const sorted = [...memories].sort(compareMemoriesByCreatedAt);
+    const sessionKeyById = new Map<string, string>();
+    let previousCreatedAtMs: number | null = null;
+    let sessionIndex = 0;
+
+    for (const memory of sorted) {
+      const createdAtMs = Date.parse(memory.createdAt);
+      if (
+        previousCreatedAtMs !== null &&
+        createdAtMs - previousCreatedAtMs > HEURISTIC_SESSION_GAP_MS
+      ) {
+        sessionIndex += 1;
+      }
+
+      sessionKeyById.set(memory.id, `heuristic:${sessionIndex}`);
+      previousCreatedAtMs = createdAtMs;
+    }
+
+    return sessionKeyById;
+  }
+
+  private interleaveCandidateGroups(
+    groups: readonly ScoredMemoryCandidate[][],
+  ): ScoredMemoryCandidate[] {
+    const queues = groups.map((group) => [...group]);
+    const interleaved: ScoredMemoryCandidate[] = [];
+    let added = true;
+
+    while (added) {
+      added = false;
+
+      for (const queue of queues) {
+        const next = queue.shift();
+        if (next === undefined) {
+          continue;
+        }
+
+        interleaved.push(next);
+        added = true;
+      }
+    }
+
+    return interleaved;
+  }
+
+  private diversifyBySession<T extends { id: string }>(
+    candidates: readonly T[],
+    sessionKeyById: Map<string, string>,
+    maxPerSession: number,
+  ): T[] {
+    const grouped = new Map<string, T[]>();
+    const groupOrder: string[] = [];
+
+    for (const candidate of candidates) {
+      const sessionKey = sessionKeyById.get(candidate.id) ?? `memory:${candidate.id}`;
+      const existing = grouped.get(sessionKey);
+      if (existing === undefined) {
+        grouped.set(sessionKey, [candidate]);
+        groupOrder.push(sessionKey);
+        continue;
+      }
+
+      existing.push(candidate);
+    }
+
+    const result: T[] = [];
+    const counts = new Map<string, number>();
+    let added = true;
+
+    while (added) {
+      added = false;
+
+      for (const sessionKey of groupOrder) {
+        const usedCount = counts.get(sessionKey) ?? 0;
+        if (usedCount >= maxPerSession) {
+          continue;
+        }
+
+        const group = grouped.get(sessionKey);
+        const next = group?.shift();
+        if (next === undefined) {
+          continue;
+        }
+
+        result.push(next);
+        counts.set(sessionKey, usedCount + 1);
+        added = true;
+      }
+    }
+
+    return result;
+  }
+
+  private finalizeActivationResult(
+    request: ActivationRequest,
+    prepared: PreparedActivation,
+    activated: RankedMemory[],
+    suppressed: SuppressedMemory[],
+    usedPayloadBytes: number,
+    audit = true,
+  ): ActivationResult {
+    activated.forEach((memory, index) => {
+      memory.rank = index + 1;
+    });
+
+    const conflicts: ActivationConflict[] = this.repository
+      .listLineageConflicts(activated.map((memory) => memory.id))
+      .map((conflict): ActivationConflict => {
+        const activationConflict: ActivationConflict = {
+          kind: "lineage_conflict",
+          root: conflict.root,
+          memories: conflict.memories,
+          reason: "",
+        };
+
+        return {
+          ...activationConflict,
+          reason: buildConflictReason(activationConflict),
+        };
+      });
+
+    const result: ActivationResult = {
+      activated,
+      suppressed,
+      conflicts,
+      budget: {
+        maxMemories: prepared.maxMemories,
+        maxPayloadBytes: prepared.maxPayloadBytes,
+        usedMemories: activated.length,
+        usedPayloadBytes,
+      },
+    };
+
+    if (audit && this.auditLogger !== null) {
+      this.auditLogger.logActivation(
+        undefined,
+        prepared.scopeRef,
+        {
+          trigger: request.lifecycleTrigger,
+          scopeRef: prepared.scopeRef,
+          queryTokens: request.queryTokens ?? [],
+          candidateCount: prepared.activeMemories.length,
+          activatedCount: activated.length,
+          suppressedCount: suppressed.length,
+          activated: activated.map((memory) => ({
+            id: memory.id,
+            type: memory.type,
+            summary: memory.summary,
+            score: memory.score,
+          })),
+          suppressed: suppressed.map((entry) => ({
+            id: entry.memory.id,
+            kind: entry.kind,
+            reason: entry.reason,
+          })),
+          budgetUsedBytes: usedPayloadBytes,
+          budgetMaxBytes: prepared.maxPayloadBytes,
+          durationMs: Date.now() - prepared.activationStart,
+        },
+      );
+    }
+
+    return result;
+  }
+
+  private async activateDefaultMode(
+    request: ActivationRequest,
+    prepared: PreparedActivation,
+    options: { audit?: boolean } = {},
+  ): Promise<ActivationResult> {
+    const {
+      scopeRef,
+      activeMemories,
+      suppressed,
+      sharedLexicalIndex,
+      maxMemories,
+      maxPayloadBytes,
+      queryText,
+      broadEnglishQuery,
+    } = prepared;
     const selected: RankedMemory[] = [];
     const selectedIds = new Set<string>();
     let usedPayloadBytes = 0;
@@ -310,7 +957,7 @@ export class ActivationEngine {
           : null);
       if (denseQueryEmbedding !== null) {
         const memoriesWithEmbeddings = candidates.filter(
-          (memory) => memory.embedding !== null || memory.embeddingSummary !== null
+          (memory) => memory.embedding !== null || memory.embeddingSummary !== null,
         );
         if (memoriesWithEmbeddings.length > 0) {
           const fullEmbeddings = memoriesWithEmbeddings
@@ -502,7 +1149,7 @@ export class ActivationEngine {
         (memory) =>
           memory.activationClass !== "baseline" &&
           !selectedIds.has(memory.id) &&
-          (isBroadScopeRef(scopeRef) || matchesScope(memory.scopeGlob, scopeRef))
+          (isBroadScopeRef(scopeRef) || matchesScope(memory.scopeGlob, scopeRef)),
       );
       const alternateScriptSlot = broadEnglishQuery ? 1 : 0;
       const startupResults = await retrieveMatches(
@@ -574,7 +1221,30 @@ export class ActivationEngine {
         continue;
       }
 
-      if (
+      let scoreOverride: number | undefined;
+
+      if (request.lifecycleTrigger === "before_tool") {
+        if (
+          request.toolName !== undefined &&
+          memory.relevantTools !== null &&
+          !memory.relevantTools.includes(request.toolName)
+        ) {
+          suppressed.push({
+            memory,
+            kind: "tool_mismatch",
+            reason: `Memory relevant tools [${memory.relevantTools.join(",")}] do not include ${request.toolName}`,
+          });
+          continue;
+        }
+
+        if (
+          request.toolName !== undefined &&
+          memory.relevantTools !== null &&
+          memory.relevantTools.includes(request.toolName)
+        ) {
+          scoreOverride = calculateMemoryScore(memory) + 0.15;
+        }
+      } else if (
         request.toolName !== undefined &&
         memory.relevantTools !== null &&
         !memory.relevantTools.includes(request.toolName)
@@ -587,7 +1257,7 @@ export class ActivationEngine {
         continue;
       }
 
-      const added = tryAdd(memory);
+      const added = tryAdd(memory, scoreOverride);
       if (added === "memory_budget") {
         suppressed.push({
           memory,
@@ -645,8 +1315,6 @@ export class ActivationEngine {
         break;
       }
 
-      // Baseline memories are NEVER removed by type quotas.
-      // They still count toward the quota so scoped memories don't flood.
       const isBaseline = memory.activationClass === "baseline";
 
       if (!isBaseline) {
@@ -682,17 +1350,17 @@ export class ActivationEngine {
       const explorationCandidate = activeMemories
         .filter((memory) => !finalIds.has(memory.id))
         .filter((memory) =>
-          memory.lifecycleTriggers.includes(request.lifecycleTrigger)
+          memory.lifecycleTriggers.includes(request.lifecycleTrigger),
         )
         .filter((memory) => matchesScope(memory.scopeGlob, scopeRef))
         .filter((memory) =>
           request.toolName === undefined ||
           memory.relevantTools === null ||
-          memory.relevantTools.includes(request.toolName)
+          memory.relevantTools.includes(request.toolName),
         )
         .sort(
           (left, right) =>
-            Date.parse(right.updatedAt) - Date.parse(left.updatedAt)
+            Date.parse(right.updatedAt) - Date.parse(left.updatedAt),
         )[0];
 
       if (explorationCandidate !== undefined) {
@@ -728,68 +1396,395 @@ export class ActivationEngine {
       }
     }
 
-    finalSelected.forEach((memory, index) => {
-      memory.rank = index + 1;
-    });
-
-    const conflicts: ActivationConflict[] = this.repository
-      .listLineageConflicts(finalSelected.map((memory) => memory.id))
-      .map((conflict): ActivationConflict => {
-        const activationConflict: ActivationConflict = {
-          kind: "lineage_conflict",
-          root: conflict.root,
-          memories: conflict.memories,
-          reason: "",
-        };
-
-        return {
-          ...activationConflict,
-          reason: buildConflictReason(activationConflict),
-        };
-      });
-
-    const result: ActivationResult = {
-      activated: finalSelected,
+    return this.finalizeActivationResult(
+      request,
+      prepared,
+      finalSelected,
       suppressed,
-      conflicts,
-      budget: {
-        maxMemories,
-        maxPayloadBytes,
-        usedMemories: finalSelected.length,
-        usedPayloadBytes: finalPayloadBytes,
-      },
-    };
+      finalPayloadBytes,
+      options.audit ?? true,
+    );
+  }
 
-    // Audit log: record the full activation decision for later analysis.
-    if (this.auditLogger !== null) {
-      this.auditLogger.logActivation(
-        undefined,
-        scopeRef,
-        {
-          trigger: request.lifecycleTrigger,
-          scopeRef,
-          queryTokens: request.queryTokens ?? [],
-          candidateCount: activeMemories.length,
-          activatedCount: finalSelected.length,
-          suppressedCount: suppressed.length,
-          activated: finalSelected.map((m) => ({
-            id: m.id,
-            type: m.type,
-            summary: m.summary,
-            score: m.score,
-          })),
-          suppressed: suppressed.map((s) => ({
-            id: s.memory.id,
-            kind: s.kind,
-            reason: s.reason,
-          })),
-          budgetUsedBytes: finalPayloadBytes,
-          budgetMaxBytes: maxPayloadBytes,
-          durationMs: Date.now() - activationStart,
-        },
+  private async activateStartupMode(
+    request: ActivationRequest,
+    prepared: PreparedActivation,
+  ): Promise<ActivationResult> {
+    const { scopeRef, activeMemories, suppressed, maxMemories, maxPayloadBytes, broadEnglishQuery } = prepared;
+    const selection: SelectionState = {
+      selected: [],
+      selectedIds: new Set<string>(),
+      usedPayloadBytes: 0,
+    };
+    const queryEmbeddingCache: QueryEmbeddingCache = { raw: undefined };
+
+    const baselineClasses: readonly ActivationClass[] = ["baseline"];
+    const baselineMemories = activeMemories
+      .filter((memory) => baselineClasses.includes(memory.activationClass))
+      .sort(compareMemories);
+    const baselineCap = 2;
+    const baselinePayloadCap = 2_048;
+    let baselineUsedBytes = 0;
+    let baselineCount = 0;
+
+    if (broadEnglishQuery) {
+      const alternateScriptBaseline = await this.retrieveMatches(
+        prepared,
+        baselineMemories.filter(containsHangulMemory),
+        1,
+        queryEmbeddingCache,
       );
+
+      for (const match of alternateScriptBaseline) {
+        const memory = baselineMemories.find((candidate) => candidate.id === match.id);
+        if (memory === undefined) {
+          continue;
+        }
+
+        const payloadBytes = getPayloadBytes(memory);
+        if (baselineUsedBytes + payloadBytes > baselinePayloadCap) {
+          continue;
+        }
+
+        const added = this.tryAddSelection(
+          selection,
+          memory,
+          maxMemories,
+          maxPayloadBytes,
+          this.getRetrievedMemoryScore(memory, match),
+        );
+        if (added === "ok") {
+          baselineUsedBytes += payloadBytes;
+          baselineCount += 1;
+        }
+      }
     }
 
-    return result;
+    for (const memory of baselineMemories) {
+      if (baselineCount >= baselineCap) {
+        break;
+      }
+
+      const payloadBytes = getPayloadBytes(memory);
+      if (baselineUsedBytes + payloadBytes > baselinePayloadCap) {
+        continue;
+      }
+
+      const added = this.tryAddSelection(selection, memory, maxMemories, maxPayloadBytes);
+      if (added === "ok") {
+        baselineUsedBytes += payloadBytes;
+        baselineCount += 1;
+      }
+    }
+
+    const recentSessionMemoryIds = new Set<string>();
+    if (this.summaryRepository !== null) {
+      const recentSummaryIds = new Set(
+        this.summaryRepository.listSessionSummaries({ limit: 3 }).map((summary) => summary.id),
+      );
+
+      if (recentSummaryIds.size > 0) {
+        for (const window of this.listSessionSummaryWindows()) {
+          if (!recentSummaryIds.has(window.summary.id)) {
+            continue;
+          }
+
+          for (const memory of activeMemories) {
+            const createdAtMs = Date.parse(memory.createdAt);
+            if (createdAtMs > window.startAtMs && createdAtMs <= window.endAtMs) {
+              recentSessionMemoryIds.add(memory.id);
+            }
+          }
+        }
+      }
+    }
+
+    const startupCandidates = activeMemories
+      .filter(
+        (memory) =>
+          memory.activationClass !== "baseline" &&
+          !selection.selectedIds.has(memory.id) &&
+          (isBroadScopeRef(scopeRef) || matchesScope(memory.scopeGlob, scopeRef)),
+      )
+      .sort((left, right) => {
+        const startupDelta =
+          Number(right.activationClass === "startup") -
+          Number(left.activationClass === "startup");
+        if (startupDelta !== 0) {
+          return startupDelta;
+        }
+
+        const scoreDelta =
+          (calculateMemoryScore(right) + (recentSessionMemoryIds.has(right.id) ? 0.15 : 0)) -
+          (calculateMemoryScore(left) + (recentSessionMemoryIds.has(left.id) ? 0.15 : 0));
+        if (scoreDelta !== 0) {
+          return scoreDelta;
+        }
+
+        return compareMemories(left, right);
+      });
+
+    for (const memory of startupCandidates) {
+      const added = this.tryAddSelection(
+        selection,
+        memory,
+        maxMemories,
+        maxPayloadBytes,
+        calculateMemoryScore(memory) + (recentSessionMemoryIds.has(memory.id) ? 0.15 : 0),
+      );
+      this.pushBudgetSuppression(suppressed, memory, added, maxMemories, maxPayloadBytes);
+    }
+
+    return this.finalizeActivationResult(
+      request,
+      prepared,
+      selection.selected,
+      suppressed,
+      selection.usedPayloadBytes,
+    );
+  }
+
+  private async activateTemporalMode(
+    request: ActivationRequest,
+    prepared: PreparedActivation,
+  ): Promise<ActivationResult> {
+    const { activeMemories, suppressed, maxMemories, maxPayloadBytes } = prepared;
+    const queryEmbeddingCache: QueryEmbeddingCache = { raw: undefined };
+    const summaryWindows = this.listSessionSummaryWindows();
+    const matchedSummaries = await this.searchSessionSummaries(prepared.queryText, 5);
+
+    if (summaryWindows.length === 0 || matchedSummaries.length === 0) {
+      return this.activateTemporalFallback(request, prepared);
+    }
+
+    const perSessionLimit = Math.max(1, Math.ceil(maxMemories / matchedSummaries.length) + 1);
+    const combined: ScoredMemoryCandidate[] = [];
+
+    for (const summary of [...matchedSummaries].sort(compareSessionSummariesByCreatedAt)) {
+      const sessionMemories = this.getMemoriesForSummaryWindow(summary, summaryWindows, activeMemories)
+        .sort(compareMemoriesByCreatedAt);
+      if (sessionMemories.length === 0) {
+        continue;
+      }
+
+      const sessionMatches = await this.retrieveMatches(
+        prepared,
+        sessionMemories,
+        perSessionLimit,
+        queryEmbeddingCache,
+      );
+      if (sessionMatches.length === 0) {
+        combined.push(
+          ...sessionMemories.slice(0, perSessionLimit).map((memory) => ({
+            memory,
+            score: calculateMemoryScore(memory),
+            sessionKey: summary.sessionId,
+          })),
+        );
+        continue;
+      }
+
+      const memoryById = new Map(sessionMemories.map((memory) => [memory.id, memory]));
+      for (const match of sessionMatches) {
+        const memory = memoryById.get(match.id);
+        if (memory === undefined) {
+          continue;
+        }
+
+        combined.push({
+          memory,
+          score: this.getRetrievedMemoryScore(memory, match),
+          sessionKey: summary.sessionId,
+        });
+      }
+    }
+
+    if (combined.length === 0) {
+      return this.activateTemporalFallback(request, prepared);
+    }
+
+    const selection: SelectionState = {
+      selected: [],
+      selectedIds: new Set<string>(),
+      usedPayloadBytes: 0,
+    };
+    const chronological = combined.sort((left, right) => {
+      const createdAtDelta = Date.parse(left.memory.createdAt) - Date.parse(right.memory.createdAt);
+      if (createdAtDelta !== 0) {
+        return createdAtDelta;
+      }
+
+      return left.memory.id.localeCompare(right.memory.id);
+    });
+
+    for (const candidate of chronological) {
+      const added = this.tryAddSelection(
+        selection,
+        candidate.memory,
+        maxMemories,
+        maxPayloadBytes,
+        candidate.score,
+      );
+      this.pushBudgetSuppression(suppressed, candidate.memory, added, maxMemories, maxPayloadBytes);
+    }
+
+    return this.finalizeActivationResult(
+      request,
+      prepared,
+      selection.selected,
+      suppressed,
+      selection.usedPayloadBytes,
+    );
+  }
+
+  private activateTemporalFallback(
+    request: ActivationRequest,
+    prepared: PreparedActivation,
+  ): ActivationResult {
+    const { activeMemories, suppressed, maxMemories, maxPayloadBytes } = prepared;
+    const selection: SelectionState = {
+      selected: [],
+      selectedIds: new Set<string>(),
+      usedPayloadBytes: 0,
+    };
+
+    for (const memory of [...activeMemories].sort(compareMemoriesByUpdatedAtDesc)) {
+      const added = this.tryAddSelection(selection, memory, maxMemories, maxPayloadBytes);
+      this.pushBudgetSuppression(suppressed, memory, added, maxMemories, maxPayloadBytes);
+    }
+
+    return this.finalizeActivationResult(
+      request,
+      prepared,
+      selection.selected,
+      suppressed,
+      selection.usedPayloadBytes,
+    );
+  }
+
+  private async activateCrossSessionMode(
+    request: ActivationRequest,
+    prepared: PreparedActivation,
+  ): Promise<ActivationResult> {
+    const summaryWindows = this.listSessionSummaryWindows();
+    const allSummaries = summaryWindows.map((window) => window.summary);
+
+    if (allSummaries.length === 0) {
+      return this.activateCrossSessionFallback(request, prepared);
+    }
+
+    const matchedSummaries = await this.searchSessionSummaries(prepared.queryText, 8);
+    const selectedSummaries = this.ensureMinimumSessionSummaries(
+      matchedSummaries,
+      allSummaries,
+      3,
+    );
+    if (selectedSummaries.length === 0) {
+      return this.activateCrossSessionFallback(request, prepared);
+    }
+
+    const { activeMemories, suppressed, maxMemories, maxPayloadBytes } = prepared;
+    const queryEmbeddingCache: QueryEmbeddingCache = { raw: undefined };
+    const perSessionLimit = Math.max(1, Math.ceil(maxMemories / selectedSummaries.length));
+    const candidateGroups: ScoredMemoryCandidate[][] = [];
+
+    for (const summary of selectedSummaries) {
+      const sessionMemories = this.getMemoriesForSummaryWindow(summary, summaryWindows, activeMemories);
+      if (sessionMemories.length === 0) {
+        continue;
+      }
+
+      const sessionMatches = await this.retrieveMatches(
+        prepared,
+        sessionMemories,
+        perSessionLimit,
+        queryEmbeddingCache,
+      );
+      if (sessionMatches.length === 0) {
+        candidateGroups.push(
+          [...sessionMemories]
+            .sort(compareMemories)
+            .slice(0, perSessionLimit)
+            .map((memory) => ({
+              memory,
+              score: calculateMemoryScore(memory),
+              sessionKey: summary.sessionId,
+            })),
+        );
+        continue;
+      }
+
+      const memoryById = new Map(sessionMemories.map((memory) => [memory.id, memory]));
+      const sessionCandidates: ScoredMemoryCandidate[] = [];
+
+      for (const match of sessionMatches) {
+        const memory = memoryById.get(match.id);
+        if (memory === undefined) {
+          continue;
+        }
+
+        sessionCandidates.push({
+          memory,
+          score: this.getRetrievedMemoryScore(memory, match),
+          sessionKey: summary.sessionId,
+        });
+      }
+
+      if (sessionCandidates.length > 0) {
+        candidateGroups.push(sessionCandidates);
+      }
+    }
+
+    if (candidateGroups.length === 0) {
+      return this.activateCrossSessionFallback(request, prepared);
+    }
+
+    const selection: SelectionState = {
+      selected: [],
+      selectedIds: new Set<string>(),
+      usedPayloadBytes: 0,
+    };
+    const interleaved = this.interleaveCandidateGroups(candidateGroups);
+
+    for (const candidate of interleaved) {
+      const added = this.tryAddSelection(
+        selection,
+        candidate.memory,
+        maxMemories,
+        maxPayloadBytes,
+        candidate.score,
+      );
+      this.pushBudgetSuppression(suppressed, candidate.memory, added, maxMemories, maxPayloadBytes);
+    }
+
+    return this.finalizeActivationResult(
+      request,
+      prepared,
+      selection.selected,
+      suppressed,
+      selection.usedPayloadBytes,
+    );
+  }
+
+  private async activateCrossSessionFallback(
+    request: ActivationRequest,
+    prepared: PreparedActivation,
+  ): Promise<ActivationResult> {
+    const defaultResult = await this.activateDefaultMode(request, prepared, { audit: false });
+    const sessionKeyById = this.buildHeuristicSessionKeys(defaultResult.activated);
+    const diversified = this.diversifyBySession(defaultResult.activated, sessionKeyById, 2)
+      .map((memory) => ({ ...memory }));
+    const usedPayloadBytes = diversified.reduce(
+      (total, memory) => total + memory.payloadBytes,
+      0,
+    );
+
+    return this.finalizeActivationResult(
+      request,
+      prepared,
+      diversified,
+      [...defaultResult.suppressed],
+      usedPayloadBytes,
+    );
   }
 }

@@ -21,6 +21,7 @@ import { ActivationEngine, EmbeddingService } from "../activation";
 import { AuditLogger } from "../audit/logger";
 import { OpenCodeAdapter } from "../adapters";
 import type { AdapterModelRef } from "../adapters/types";
+import type { MemoryType } from "../db/schema/types";
 import { openSqlJsDatabase, saveSqlJsDatabase, runMigrations } from "../db";
 import { DreamRepository } from "../dream";
 import {
@@ -35,6 +36,8 @@ import {
 } from "../cli/dream-extract";
 import { MemoryRepository, CompositeMemoryRepository } from "../memory";
 import { PolicyEngine, PolicyRuleRepository } from "../policy";
+import { generateSessionSummary } from "../retrieval/summary-generator";
+import { SummaryRepository } from "../retrieval/summary-repository";
 
 // ---------------------------------------------------------------------------
 // OpenCode-compatible type stubs (avoids coupling to @opencode-ai/plugin)
@@ -126,6 +129,23 @@ interface PluginExport {
 
 const DEFAULT_DB_RELATIVE_PATH = ".harness-memory/memory.sqlite";
 const PLUGIN_LOG_PREFIX = "[harness-memory]";
+const SESSION_SUMMARY_MIN_EVENTS = 3;
+const SESSION_SUMMARY_REGEN_INTERVAL_MS = 30 * 60 * 1000;
+const RECENT_AUTO_PROMOTION_WINDOW_MS = 24 * 60 * 60 * 1000;
+const REVIEW_DIGEST_TYPE_ORDER: readonly MemoryType[] = [
+  "workflow",
+  "pitfall",
+  "policy",
+  "decision",
+  "architecture_constraint",
+];
+const REVIEW_DIGEST_TYPE_LABEL: Record<MemoryType, string> = {
+  workflow: "Workflow",
+  pitfall: "Pitfall",
+  policy: "Policy",
+  decision: "Decision",
+  architecture_constraint: "Architecture Constraint",
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -173,6 +193,128 @@ function tokenizeForQuery(text: string): string[] {
     .split(/[\s\p{P}]+/u)
     .map((token) => token.toLowerCase())
     .filter((token) => token.length > 2 && token.length < 50);
+}
+
+function wasUpdatedRecently(updatedAt: string, windowMs: number): boolean {
+  const updatedAtMs = Date.parse(updatedAt);
+  if (Number.isNaN(updatedAtMs)) {
+    return false;
+  }
+
+  return Date.now() - updatedAtMs < windowMs;
+}
+
+function compareByConfidenceDesc(
+  left: { confidence: number; createdAt: string; id: string },
+  right: { confidence: number; createdAt: string; id: string },
+): number {
+  const confidenceDelta = right.confidence - left.confidence;
+  if (confidenceDelta !== 0) {
+    return confidenceDelta;
+  }
+
+  const createdAtDelta = Date.parse(right.createdAt) - Date.parse(left.createdAt);
+  if (!Number.isNaN(createdAtDelta) && createdAtDelta !== 0) {
+    return createdAtDelta;
+  }
+
+  return left.id.localeCompare(right.id);
+}
+
+function compareByUpdatedAtDesc(
+  left: { updatedAt: string; id: string },
+  right: { updatedAt: string; id: string },
+): number {
+  const leftUpdatedAt = Date.parse(left.updatedAt);
+  const rightUpdatedAt = Date.parse(right.updatedAt);
+  const leftTime = Number.isNaN(leftUpdatedAt) ? 0 : leftUpdatedAt;
+  const rightTime = Number.isNaN(rightUpdatedAt) ? 0 : rightUpdatedAt;
+  const updatedAtDelta = rightTime - leftTime;
+
+  if (updatedAtDelta !== 0) {
+    return updatedAtDelta;
+  }
+
+  return left.id.localeCompare(right.id);
+}
+
+function buildCandidateDigest(
+  memoryRepository: MemoryRepository,
+  dreamRepository: DreamRepository,
+): string | null {
+  const candidates = memoryRepository.list({ status: "candidate" });
+  const recentAutoPromotions = memoryRepository
+    .list({ status: "active" })
+    .filter(
+      (memory) =>
+        memory.promotionSource === "auto" &&
+        memory.validationCount === 0 &&
+        wasUpdatedRecently(memory.updatedAt, RECENT_AUTO_PROMOTION_WINDOW_MS),
+    )
+    .sort(compareByUpdatedAtDesc);
+
+  if (candidates.length === 0 && recentAutoPromotions.length === 0) {
+    return null;
+  }
+
+  const lines = [
+    "## Memory Review Inbox",
+    "",
+    "Mention this inbox once after finishing the user's current request. Keep it brief, do not interrupt active work, and do not bring it up again this session if the user ignores it.",
+    "",
+  ];
+
+  if (candidates.length > 0) {
+    const linkedEvidenceByMemoryId = dreamRepository.listLinkedEvidenceByMemoryIds(
+      candidates.map((candidate) => candidate.id),
+    );
+    const sections = REVIEW_DIGEST_TYPE_ORDER.map((type) => {
+      const groupedCandidates = candidates
+        .filter((candidate) => candidate.type === type)
+        .map((candidate) => ({
+          id: candidate.id,
+          createdAt: candidate.createdAt,
+          confidence: candidate.confidence,
+          evidenceCount: (linkedEvidenceByMemoryId.get(candidate.id) ?? []).length,
+          summary: candidate.summary,
+        }))
+        .sort(compareByConfidenceDesc);
+
+      if (groupedCandidates.length === 0) {
+        return null;
+      }
+
+      return [
+        `### ${REVIEW_DIGEST_TYPE_LABEL[type]} (${String(groupedCandidates.length)})`,
+        ...groupedCandidates.map(
+          (candidate) =>
+            `- confidence ${candidate.confidence.toFixed(2)} | evidence ${String(candidate.evidenceCount)} | ${candidate.summary}`,
+        ),
+      ].join("\n");
+    }).filter((section): section is string => section !== null);
+
+    lines.push(`Pending candidates: ${String(candidates.length)} total`, "");
+    for (const section of sections) {
+      lines.push(section, "");
+    }
+    lines.push(
+      "Quick actions:",
+      "- To approve high-confidence candidates: use `memory:promote --all --min-confidence 0.85`",
+      "- To review individually: use `memory:review`",
+      "- To dismiss until next session: no action needed",
+      "",
+    );
+  }
+
+  if (recentAutoPromotions.length > 0) {
+    lines.push(`### Recently Auto-Promoted (${String(recentAutoPromotions.length)})`);
+    for (const memory of recentAutoPromotions) {
+      lines.push(`- [${memory.type}] ${memory.summary}`);
+    }
+    lines.push("");
+  }
+
+  return lines.join("\n").trimEnd();
 }
 
 // ---------------------------------------------------------------------------
@@ -405,7 +547,10 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
   let embedMissingMemoriesTask: Promise<void> | null = null;
   let embedMissingMemoriesRunner: (() => Promise<void>) | null = null;
   let dreamRepo: DreamRepository | null = null;
+  let embeddingService: EmbeddingService | null = null;
+  let summaryRepository: SummaryRepository | null = null;
   let auditLog: AuditLogger | null = null;
+  const summaryGenerationSessions = new Set<string>();
   const bufferPersistPath = resolve(dirname(dbPath), ".conversation-buffer.json");
   const conversationBuffer = new ConversationBuffer(DEFAULT_BUFFER_FLUSH_THRESHOLD, bufferPersistPath);
 
@@ -421,9 +566,10 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
 
     const memoryRepository = new MemoryRepository(db);
     const embeddingCacheDir = resolve(ctx.directory, ".harness-memory", "models");
-    const embeddingService = new EmbeddingService({ cacheDir: embeddingCacheDir });
+    const nextEmbeddingService = new EmbeddingService({ cacheDir: embeddingCacheDir });
+    embeddingService = nextEmbeddingService;
 
-    embeddingService.warmup().catch((error: unknown) => {
+    nextEmbeddingService.warmup().catch((error: unknown) => {
       warn("Embedding warmup failed, falling back to lexical search:", error);
     });
 
@@ -463,14 +609,17 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
 
     const auditLogger = new AuditLogger(db);
     auditLog = auditLogger;
-    const activationEngine = new ActivationEngine(mergedRepoForEngine, embeddingService, auditLogger);
+    const activationEngine = new ActivationEngine(mergedRepoForEngine, nextEmbeddingService, auditLogger);
     const policyRuleRepository = new PolicyRuleRepository(db);
     const policyEngine = new PolicyEngine(policyRuleRepository);
     const dreamRepository = new DreamRepository(db);
+    const sessionSummaryRepository = new SummaryRepository(db);
     dreamRepo = dreamRepository;
+    summaryRepository = sessionSummaryRepository;
+    activationEngine.setSummaryRepository(sessionSummaryRepository);
 
     async function embedMissingMemories(): Promise<void> {
-      if (!embeddingService.isReady) {
+      if (!nextEmbeddingService.isReady) {
         return;
       }
 
@@ -484,7 +633,7 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
 
         try {
           const text = `${memory.summary} ${memory.details}`;
-          const embedding = await embeddingService.embedPassage(text);
+          const embedding = await nextEmbeddingService.embedPassage(text);
           memoryRepository.updateEmbedding(memory.id, embedding);
           updated = true;
         } catch {
@@ -538,6 +687,7 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
     // The adapter and its sub-components need reconstruction.
     adapter = null;
     dreamRepo = null;
+    summaryRepository = null;
     auditLog = null;
     log("Reloaded DB from disk after external CLI modification");
   }
@@ -560,11 +710,75 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
   /** Track whether we already ran dream extraction in this plugin lifecycle. */
   let dreamExtractRunning = false;
 
-  /** Track whether the review notice has been shown this session. */
-  let reviewNoticeShown = false;
+  /** Track which sessions already received the review inbox digest. */
+  const reviewDigestShownSessions = new Set<string>();
 
   /** Increment session count on initialization for gate tracking. */
   incrementSessionCount(dbPath);
+
+  async function tryGenerateSessionSummary(sessionId: string): Promise<void> {
+    if (
+      summaryRepository === null ||
+      dreamRepo === null ||
+      summaryGenerationSessions.has(sessionId)
+    ) {
+      return;
+    }
+
+    summaryGenerationSessions.add(sessionId);
+
+    try {
+      const existingSummary = summaryRepository.getSessionSummaryBySessionId(sessionId);
+      if (
+        existingSummary !== null &&
+        wasUpdatedRecently(existingSummary.updatedAt, SESSION_SUMMARY_REGEN_INTERVAL_MS)
+      ) {
+        return;
+      }
+
+      const events = dreamRepo.listEvidenceEvents({ sessionId });
+      if (events.length < SESSION_SUMMARY_MIN_EVENTS) {
+        return;
+      }
+
+      const summary = generateSessionSummary({
+        sessionId,
+        events,
+      });
+
+      summaryRepository.upsertSessionSummary({
+        sessionId,
+        summaryShort: summary.summaryShort,
+        summaryMedium: summary.summaryMedium,
+        sourceEventIds: summary.sourceEventIds,
+        toolNames: summary.toolNames,
+        typeDistribution: summary.typeDistribution,
+        eventCount: summary.eventCount,
+      });
+
+      if (embeddingService?.isReady) {
+        try {
+          const embedding = await embeddingService.embedPassage(summary.summaryMedium);
+          summaryRepository.upsertSessionSummary({
+            sessionId,
+            summaryShort: summary.summaryShort,
+            summaryMedium: summary.summaryMedium,
+            embedding,
+            sourceEventIds: summary.sourceEventIds,
+            toolNames: summary.toolNames,
+            typeDistribution: summary.typeDistribution,
+            eventCount: summary.eventCount,
+          });
+        } catch (error) {
+          warn("Session summary embedding failed:", error);
+        }
+      }
+
+      saveDb();
+    } finally {
+      summaryGenerationSessions.delete(sessionId);
+    }
+  }
 
   /**
    * Attempt background dream extraction if gates pass.
@@ -645,7 +859,19 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
         for (const p of promoResult.promoted) {
           log("Auto-promoted:", `[${p.summary}]`);
         }
+      }
 
+      if (promoResult.expired.length > 0) {
+        for (const expired of promoResult.expired) {
+          log(
+            "Auto-rejected stale candidate:",
+            `[${expired.summary}]`,
+            `age=${String(expired.ageDays)}d`,
+          );
+        }
+      }
+
+      if (promoResult.promoted.length > 0 || promoResult.expired.length > 0) {
         saveDb();
       }
 
@@ -827,25 +1053,16 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
           output.system.push(...result.system);
         }
 
-        // Inject pending candidate review notice (lightweight, one-time per session).
-        if (dreamRepo !== null && !reviewNoticeShown) {
-          const candidates = new MemoryRepository(dbInstance!).list({ status: "candidate" });
+        if (
+          dreamRepo !== null &&
+          currentSessionID !== undefined &&
+          !reviewDigestShownSessions.has(currentSessionID)
+        ) {
+          const digest = buildCandidateDigest(new MemoryRepository(dbInstance!), dreamRepo);
 
-          if (candidates.length > 0) {
-            reviewNoticeShown = true;
-
-            const candidateList = candidates
-              .map((c) => `- [${c.type}] ${c.summary}`)
-              .join("\n");
-
-            output.system.push(
-              `\n## Pending Memory Review\n\n` +
-              `${candidates.length} memory candidate(s) are waiting for your approval.\n` +
-              `After completing the user's current request, present this list and ask for approval.\n\n` +
-              `${candidateList}\n\n` +
-              `Approve: \`npx harness-memory memory:promote --memory <id>\`\n` +
-              `If the user says "later" or "나중에", do not ask again this session.`,
-            );
+          if (digest !== null) {
+            reviewDigestShownSessions.add(currentSessionID);
+            output.system.push(`\n${digest}`);
           }
         }
       } catch (error) {
@@ -939,9 +1156,17 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
      * This is the ideal time for background dream extraction:
      * the user isn't waiting for a response, so LLM work won't block.
      */
-    "session.idle": async () => {
+    "session.idle": async (input) => {
       try {
+        currentSessionID = input.sessionID;
         saveDb();
+
+        if (summaryRepository !== null && currentSessionID !== undefined) {
+          void tryGenerateSessionSummary(currentSessionID).catch((error) => {
+            warn("session.idle summary generation error:", error);
+          });
+        }
+
         await tryBackgroundDreamExtract();
       } catch (error) {
         warn("session.idle hook error:", error);
@@ -952,9 +1177,17 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
      * `session.compacted` — fires when the session context is compacted.
      * Another good moment for background extraction.
      */
-    "session.compacted": async () => {
+    "session.compacted": async (input) => {
       try {
+        currentSessionID = input.sessionID;
         saveDb();
+
+        if (summaryRepository !== null && currentSessionID !== undefined) {
+          void tryGenerateSessionSummary(currentSessionID).catch((error) => {
+            warn("session.compacted summary generation error:", error);
+          });
+        }
+
         await tryBackgroundDreamExtract();
       } catch (error) {
         warn("session.compacted hook error:", error);

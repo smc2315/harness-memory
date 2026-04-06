@@ -17,6 +17,16 @@ export type ActivationSuppressionKind =
 
 export type ActivationConflictKind = "lineage_conflict";
 
+/**
+ * Activation mode determines the retrieval strategy used.
+ *
+ * - startup: First turn, no query context. Uses startup_pack + session summaries.
+ * - default: Standard hybrid retrieval (dense + BM25 + RRF). Unchanged from current behavior.
+ * - temporal: Time-ordered retrieval via session summaries. Includes superseded memories.
+ * - cross_session: Diverse session retrieval via session summaries. Enforces session diversity.
+ */
+export type ActivationMode = "startup" | "default" | "temporal" | "cross_session";
+
 export interface ActivationRequest {
   lifecycleTrigger: LifecycleTrigger;
   scopeRef: string;
@@ -28,6 +38,8 @@ export interface ActivationRequest {
   maxPayloadBytes?: number;
   /** When true, include superseded memories for temporal context (e.g., showing what changed) */
   includeSuperseded?: boolean;
+  /** Activation mode determines retrieval strategy. Defaults to 'default'. */
+  activationMode?: ActivationMode;
 }
 
 export interface RankedMemory extends MemoryRecord {
