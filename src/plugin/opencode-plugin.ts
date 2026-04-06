@@ -238,12 +238,8 @@ function compareByUpdatedAtDesc(
   return left.id.localeCompare(right.id);
 }
 
-function buildCandidateDigest(
-  memoryRepository: MemoryRepository,
-  dreamRepository: DreamRepository,
-): string | null {
-  const candidates = memoryRepository.list({ status: "candidate" });
-  const recentAutoPromotions = memoryRepository
+function listRecentAutoPromotions(memoryRepository: MemoryRepository) {
+  return memoryRepository
     .list({ status: "active" })
     .filter(
       (memory) =>
@@ -252,6 +248,26 @@ function buildCandidateDigest(
         wasUpdatedRecently(memory.updatedAt, RECENT_AUTO_PROMOTION_WINDOW_MS),
     )
     .sort(compareByUpdatedAtDesc);
+}
+
+function buildReviewDigestTypeBreakdown(
+  memories: ReadonlyArray<{ type: MemoryType }>,
+): Record<string, number> {
+  const typeBreakdown: Record<string, number> = {};
+
+  for (const memory of memories) {
+    typeBreakdown[memory.type] = (typeBreakdown[memory.type] ?? 0) + 1;
+  }
+
+  return typeBreakdown;
+}
+
+function buildCandidateDigest(
+  memoryRepository: MemoryRepository,
+  dreamRepository: DreamRepository,
+): string | null {
+  const candidates = memoryRepository.list({ status: "candidate" });
+  const recentAutoPromotions = listRecentAutoPromotions(memoryRepository);
 
   if (candidates.length === 0 && recentAutoPromotions.length === 0) {
     return null;
@@ -667,6 +683,20 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
     }
   }
 
+  function safeAuditLog(writeAuditEvent: (logger: AuditLogger) => void): boolean {
+    if (auditLog === null) {
+      return false;
+    }
+
+    try {
+      writeAuditEvent(auditLog);
+      return true;
+    } catch (error) {
+      warn("Audit logging failed:", error);
+      return false;
+    }
+  }
+
   /**
    * Reload the in-memory database from the file on disk.
    *
@@ -717,11 +747,36 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
   incrementSessionCount(dbPath);
 
   async function tryGenerateSessionSummary(sessionId: string): Promise<void> {
-    if (
-      summaryRepository === null ||
-      dreamRepo === null ||
-      summaryGenerationSessions.has(sessionId)
-    ) {
+    const logSummarySkipped = (reason: string, eventCount?: number): void => {
+      const auditLogged = safeAuditLog((logger) => {
+        const details: {
+          sessionId: string;
+          reason: string;
+          eventCount?: number;
+        } = {
+          sessionId,
+          reason,
+        };
+
+        if (eventCount !== undefined) {
+          details.eventCount = eventCount;
+        }
+
+        logger.logSessionSummarySkipped(sessionId, details);
+      });
+
+      if (auditLogged) {
+        saveDb();
+      }
+    };
+
+    if (summaryRepository === null || dreamRepo === null) {
+      logSummarySkipped("summary_repository_not_available");
+      return;
+    }
+
+    if (summaryGenerationSessions.has(sessionId)) {
+      logSummarySkipped("already_generating");
       return;
     }
 
@@ -733,11 +788,13 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
         existingSummary !== null &&
         wasUpdatedRecently(existingSummary.updatedAt, SESSION_SUMMARY_REGEN_INTERVAL_MS)
       ) {
+        logSummarySkipped("recently_updated", existingSummary.eventCount);
         return;
       }
 
       const events = dreamRepo.listEvidenceEvents({ sessionId });
       if (events.length < SESSION_SUMMARY_MIN_EVENTS) {
+        logSummarySkipped("insufficient_events", events.length);
         return;
       }
 
@@ -756,9 +813,11 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
         eventCount: summary.eventCount,
       });
 
+      let embedding: Float32Array | null = null;
+
       if (embeddingService?.isReady) {
         try {
-          const embedding = await embeddingService.embedPassage(summary.summaryMedium);
+          embedding = await embeddingService.embedPassage(summary.summaryMedium);
           summaryRepository.upsertSessionSummary({
             sessionId,
             summaryShort: summary.summaryShort,
@@ -773,6 +832,18 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
           warn("Session summary embedding failed:", error);
         }
       }
+
+      safeAuditLog((logger) => {
+        logger.logSessionSummaryGenerated(sessionId, {
+          sessionId,
+          eventCount: summary.eventCount,
+          toolNames: summary.toolNames,
+          typeDistribution: summary.typeDistribution,
+          summaryShortLength: summary.summaryShort.length,
+          summaryMediumLength: summary.summaryMedium.length,
+          embeddingGenerated: embedding !== null,
+        });
+      });
 
       saveDb();
     } finally {
@@ -852,8 +923,58 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
 
       // Run auto-promotion cycle after extraction
       const promoRepo = new MemoryRepository(dbInstance!);
+      const autoPromotionCandidates = promoRepo.list({ status: "candidate" });
+      const autoPromotionCandidateById = new Map(
+        autoPromotionCandidates.map((candidate) => [candidate.id, candidate]),
+      );
       const { runAutoPromotionCycle } = await import("../promotion/auto-promoter");
       const promoResult = await runAutoPromotionCycle(promoRepo);
+      const promotedForAudit: Array<{
+        id: string;
+        type: string;
+        summary: string;
+        confidence: number;
+      }> = [];
+      const expiredForAudit: Array<{
+        id: string;
+        type: string;
+        summary: string;
+        ageDays: number;
+      }> = [];
+
+      for (const promoted of promoResult.promoted) {
+        const candidate = autoPromotionCandidateById.get(promoted.memoryId);
+        if (candidate !== undefined) {
+          promotedForAudit.push({
+            id: candidate.id,
+            type: candidate.type,
+            summary: candidate.summary,
+            confidence: candidate.confidence,
+          });
+        }
+      }
+
+      for (const expired of promoResult.expired) {
+        const candidate = autoPromotionCandidateById.get(expired.memoryId);
+        if (candidate !== undefined) {
+          expiredForAudit.push({
+            id: candidate.id,
+            type: candidate.type,
+            summary: candidate.summary,
+            ageDays: expired.ageDays,
+          });
+        }
+      }
+
+      const autoPromotionLogged = safeAuditLog((logger) => {
+        logger.logAutoPromotionCycle({
+          promotedCount: promoResult.promoted.length,
+          expiredCount: promoResult.expired.length,
+          skippedCount: promoResult.skipped.length,
+          promoted: promotedForAudit,
+          expired: expiredForAudit,
+        });
+      });
 
       if (promoResult.promoted.length > 0) {
         for (const p of promoResult.promoted) {
@@ -871,7 +992,7 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
         }
       }
 
-      if (promoResult.promoted.length > 0 || promoResult.expired.length > 0) {
+      if (promoResult.promoted.length > 0 || promoResult.expired.length > 0 || autoPromotionLogged) {
         saveDb();
       }
 
@@ -1058,11 +1179,31 @@ async function createPluginHooks(ctx: PluginInput): Promise<PluginHooks> {
           currentSessionID !== undefined &&
           !reviewDigestShownSessions.has(currentSessionID)
         ) {
-          const digest = buildCandidateDigest(new MemoryRepository(dbInstance!), dreamRepo);
+          const memoryRepository = new MemoryRepository(dbInstance!);
+          const digest = buildCandidateDigest(memoryRepository, dreamRepo);
 
           if (digest !== null) {
-            reviewDigestShownSessions.add(currentSessionID);
+            const sessionId = currentSessionID;
+
+            reviewDigestShownSessions.add(sessionId);
             output.system.push(`\n${digest}`);
+
+            const candidates = memoryRepository.list({ status: "candidate" });
+            const recentAutoPromotions = listRecentAutoPromotions(memoryRepository);
+            const reviewDigestLogged = safeAuditLog((logger) => {
+              logger.logReviewDigestShown(sessionId, {
+                candidateCount: candidates.length,
+                recentAutoPromotionCount: recentAutoPromotions.length,
+                typeBreakdown: buildReviewDigestTypeBreakdown([
+                  ...candidates,
+                  ...recentAutoPromotions,
+                ]),
+              });
+            });
+
+            if (reviewDigestLogged) {
+              saveDb();
+            }
           }
         }
       } catch (error) {
