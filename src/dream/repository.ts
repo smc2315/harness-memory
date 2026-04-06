@@ -98,6 +98,10 @@ function nowIsoString(): string {
   return new Date().toISOString();
 }
 
+function subtractDays(isoString: string, days: number): string {
+  return new Date(Date.parse(isoString) - days * 24 * 60 * 60 * 1000).toISOString();
+}
+
 function parseDreamEvidenceRow(values: readonly unknown[]): DreamEvidenceEventRecord {
   return {
     id: String(values[0]),
@@ -288,7 +292,7 @@ export class DreamRepository {
     input: Omit<ListDreamEvidenceEventsInput, "status"> = {}
   ): DreamEvidenceEventRecord[] {
     const clauses: string[] = [
-      "(status = 'pending' OR (status = 'deferred' AND next_review_at IS NOT NULL AND next_review_at <= $now))",
+      "(status IN ('pending', 'retained') OR (status = 'latent' AND next_review_at IS NOT NULL AND next_review_at <= $now))",
     ];
     const params: SqlParameters = { $now: now };
 
@@ -315,6 +319,98 @@ export class DreamRepository {
     return result[0].values.map((row) => parseDreamEvidenceRow(row));
   }
 
+  markEvidenceEventsRetained(
+    ids: readonly string[],
+    dreamRunId: string,
+    retainedAt: string = nowIsoString()
+  ): void {
+    for (const id of ids) {
+      this.db.run(
+        `UPDATE dream_evidence_events
+         SET status = 'retained',
+             retry_count = retry_count + 1,
+             next_review_at = NULL,
+             last_reviewed_at = $retainedAt,
+             dream_run_id = $dreamRunId
+         WHERE id = $id`,
+        {
+          $id: id,
+          $retainedAt: retainedAt,
+          $dreamRunId: dreamRunId,
+        } satisfies SqlParameters
+      );
+    }
+  }
+
+  markEvidenceEventsGrouped(
+    ids: readonly string[],
+    dreamRunId: string,
+    groupedAt: string = nowIsoString()
+  ): void {
+    for (const id of ids) {
+      this.db.run(
+        `UPDATE dream_evidence_events
+         SET status = 'grouped',
+             retry_count = retry_count + 1,
+             last_reviewed_at = $groupedAt,
+             dream_run_id = $dreamRunId
+         WHERE id = $id`,
+        {
+          $id: id,
+          $groupedAt: groupedAt,
+          $dreamRunId: dreamRunId,
+        } satisfies SqlParameters
+      );
+    }
+  }
+
+  markEvidenceEventsMaterialized(
+    ids: readonly string[],
+    dreamRunId: string,
+    materializedAt: string = nowIsoString()
+  ): void {
+    for (const id of ids) {
+      this.db.run(
+        `UPDATE dream_evidence_events
+         SET status = 'materialized',
+             retry_count = retry_count + 1,
+             next_review_at = NULL,
+             last_reviewed_at = $materializedAt,
+             dream_run_id = $dreamRunId,
+             consumed_at = $materializedAt
+         WHERE id = $id`,
+        {
+          $id: id,
+          $materializedAt: materializedAt,
+          $dreamRunId: dreamRunId,
+        } satisfies SqlParameters
+      );
+    }
+  }
+
+  markEvidenceEventsLatent(
+    ids: readonly string[],
+    dreamRunId: string,
+    latentAt: string = nowIsoString()
+  ): void {
+    for (const id of ids) {
+      this.db.run(
+        `UPDATE dream_evidence_events
+         SET status = 'latent',
+             retry_count = retry_count + 1,
+             next_review_at = NULL,
+             last_reviewed_at = $latentAt,
+             dream_run_id = $dreamRunId
+         WHERE id = $id`,
+        {
+          $id: id,
+          $latentAt: latentAt,
+          $dreamRunId: dreamRunId,
+        } satisfies SqlParameters
+      );
+    }
+  }
+
   markEvidenceEventsConsumed(
     ids: readonly string[],
     dreamRunId: string,
@@ -337,6 +433,38 @@ export class DreamRepository {
         } satisfies SqlParameters
       );
     }
+  }
+
+  cleanupExpiredLatentEvidence(ttlDays: number, now: string = nowIsoString()): string[] {
+    const cutoff = subtractDays(now, ttlDays);
+    const result = this.db.exec(
+      `SELECT id
+       FROM dream_evidence_events
+       WHERE status = 'latent'
+         AND created_at < $cutoff
+       ORDER BY created_at ASC`,
+      { $cutoff: cutoff } satisfies SqlParameters
+    );
+
+    if (result.length === 0) {
+      return [];
+    }
+
+    const ids = result[0].values.map((row) => String(row[0]));
+    for (const id of ids) {
+      this.db.run(
+        `UPDATE dream_evidence_events
+         SET status = 'discarded',
+             discarded_at = $now
+         WHERE id = $id`,
+        {
+          $id: id,
+          $now: now,
+        } satisfies SqlParameters
+      );
+    }
+
+    return ids;
   }
 
   markEvidenceEventsDeferred(
@@ -483,6 +611,49 @@ export class DreamRepository {
     }
 
     return result[0].values.map((row) => parseDreamEvidenceRow(row));
+  }
+
+  listAtRiskMemories(opts: {
+    staleAfterDays?: number;
+    minConfidence?: number;
+  } = {}): Array<{
+    id: string;
+    type: string;
+    summary: string;
+    confidence: number;
+    lastVerifiedAt: string | null;
+  }> {
+    const staleAfterDays = opts.staleAfterDays ?? 7;
+    const minConfidence = opts.minConfidence ?? 0.7;
+    const now = nowIsoString();
+    const staleThreshold = subtractDays(now, staleAfterDays);
+    const result = this.db.exec(
+      `SELECT id, type, summary, confidence, last_verified_at
+       FROM memories
+       WHERE status = 'active'
+         AND (
+           last_verified_at IS NULL
+           OR last_verified_at < $staleThreshold
+           OR confidence < $minConfidence
+         )
+       ORDER BY last_verified_at ASC, confidence ASC, id ASC`,
+      {
+        $staleThreshold: staleThreshold,
+        $minConfidence: minConfidence,
+      } satisfies SqlParameters
+    );
+
+    if (result.length === 0) {
+      return [];
+    }
+
+    return result[0].values.map((row) => ({
+      id: String(row[0]),
+      type: String(row[1]),
+      summary: String(row[2]),
+      confidence: Number(row[3]),
+      lastVerifiedAt: row[4] === null ? null : String(row[4]),
+    }));
   }
 
   listDreamRuns(input: ListDreamRunsInput = {}): DreamRunRecord[] {

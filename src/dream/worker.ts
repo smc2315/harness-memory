@@ -1,6 +1,12 @@
 import { basename, extname } from "path";
 
-import type { DreamEvidenceTypeGuess, LifecycleTrigger } from "../db/schema/types";
+import type {
+  ActionDistribution,
+  DreamEvidenceTypeGuess,
+  LifecycleTrigger,
+  SignalTag,
+} from "../db/schema/types";
+import type { MemoryRecord } from "../memory";
 import { MemoryRepository, createDeterministicId } from "../memory";
 
 import { DreamRepository } from "./repository";
@@ -13,7 +19,47 @@ import type {
 
 const DEFAULT_EVIDENCE_LIMIT = 50;
 const DEFAULT_WINDOW_HOURS = 24;
-const MAX_DEFER_RETRIES = 2;
+const LATENT_TTL_DAYS = 14;
+const TIME_ADJACENCY_WINDOW_MS = 5 * 60 * 1000;
+
+const SIGNAL_PATTERNS: ReadonlyArray<{
+  tag: SignalTag;
+  pattern: RegExp;
+  field: "excerpt" | "args";
+}> = [
+  { tag: "failure_signal", pattern: /error|failed|exception|timeout|refused/i, field: "excerpt" },
+  {
+    tag: "success_signal",
+    pattern: /passed|resolved|fixed|completed|migrated|created|updated/i,
+    field: "excerpt",
+  },
+  {
+    tag: "decision_signal",
+    pattern: /decided|chose|switched|replaced|deprecated|changed\s.*\sto/i,
+    field: "excerpt",
+  },
+  {
+    tag: "convention_signal",
+    pattern: /always|never|convention|must|should|standard|rule/i,
+    field: "excerpt",
+  },
+  {
+    tag: "architecture_signal",
+    pattern: /architecture|boundary|layer|component|module|structure/i,
+    field: "excerpt",
+  },
+  {
+    tag: "temporal_cue",
+    pattern: /before|after|previously|used to|switched from/i,
+    field: "excerpt",
+  },
+  {
+    tag: "explicit_marker",
+    pattern: /do not|always use|fixed by|known error/i,
+    field: "excerpt",
+  },
+  { tag: "has_file_context", pattern: /path|file|src\//i, field: "args" },
+];
 
 function nowIsoString(): string {
   return new Date().toISOString();
@@ -23,8 +69,12 @@ function isoHoursAgo(hours: number, reference: string): string {
   return new Date(Date.parse(reference) - hours * 60 * 60 * 1000).toISOString();
 }
 
+function normalizePathLike(value: string): string {
+  return value.replace(/\\/g, "/");
+}
+
 function deriveScopeGlob(scopeRef: string): string {
-  const normalized = scopeRef.replace(/\\/g, "/");
+  const normalized = normalizePathLike(scopeRef);
   if (extname(normalized).length > 0) {
     return normalized;
   }
@@ -47,8 +97,9 @@ function lifecycleForType(typeGuess: DreamEvidenceTypeGuess): LifecycleTrigger[]
   }
 }
 
-function buildGroupKey(event: DreamEvidenceEventRecord): string {
-  return [event.typeGuess, event.scopeRef, event.topicGuess].join("|");
+function buildStructuralGroupKey(event: DreamEvidenceEventRecord): string {
+  // Stage 1 groups structurally; stage 2 can add lexical/embedding batch merges.
+  return [event.sessionId, event.scopeRef, event.toolName].join("|");
 }
 
 function buildCandidateSummary(
@@ -80,7 +131,7 @@ function buildCandidateSummary(
  *
  * Convention: synthesized summaries (from buildCandidateSummary) are always
  * English. Raw evidence excerpts in details may remain in their original
- * language — they are reference data, not the primary search target.
+ * language - they are reference data, not the primary search target.
  * The LLM extraction path (llm-extract.ts) enforces English output.
  */
 function buildCandidateDetails(
@@ -124,88 +175,85 @@ function parseArgsJson(event: DreamEvidenceEventRecord): string {
   }
 }
 
-function scoreEvents(events: readonly DreamEvidenceEventRecord[]): {
-  aggregate: number;
-  confidence: number;
-  importance: number;
-} {
-  const count = events.length;
-  const salienceAverage = events.reduce((acc, event) => acc + event.salience, 0) / count;
-  const noveltyAverage = events.reduce((acc, event) => acc + event.novelty, 0) / count;
-  const salienceBoostMax = Math.max(...events.map((event) => event.salienceBoost));
-  const contradictionBoost = events.some((event) => event.contradictionSignal) ? 0.15 : 0;
-  const recurrenceBoost = Math.max(0, count - 1) * 0.25;
-  const failureBoost = events.some((event) => /error|failed|exception|timeout|refused/i.test(event.excerpt))
-    ? 0.15
-    : 0;
-  const successBoost = events.some((event) => /passed|resolved|fixed|completed|migrated/i.test(event.excerpt))
-    ? 0.1
-    : 0;
-  const breadthBoost = events.some((event) => /path|file|src\//i.test(parseArgsJson(event)))
-    ? 0.05
-    : 0;
-  const aggregate =
-    salienceAverage +
-    noveltyAverage +
-    salienceBoostMax +
-    contradictionBoost +
-    recurrenceBoost +
-    failureBoost +
-    successBoost +
-    breadthBoost;
-
-  return {
-    aggregate,
-      confidence: Math.min(0.95, 0.45 + aggregate / 3),
-      importance: Math.min(
-        0.95,
-        0.4 + recurrenceBoost + contradictionBoost + failureBoost + successBoost + salienceAverage * 0.2
-      ),
-    };
-}
-
-function hoursFromNow(reference: string, hours: number): string {
-  return new Date(Date.parse(reference) + hours * 60 * 60 * 1000).toISOString();
-}
-
-function computeBackoffHours(retryCount: number): number {
-  return Math.min(24, 2 ** retryCount * 6);
-}
-
-function shouldDiscardDeferred(
-  events: readonly DreamEvidenceEventRecord[],
-  aggregateScore: number,
-  now: string
-): boolean {
-  if (events.every((event) => event.retryCount >= MAX_DEFER_RETRIES)) {
-    return true;
+function extractSignalTags(events: readonly DreamEvidenceEventRecord[]): SignalTag[] {
+  const tags = new Set<SignalTag>();
+  for (const event of events) {
+    for (const { tag, pattern, field } of SIGNAL_PATTERNS) {
+      const text = field === "excerpt" ? event.excerpt : parseArgsJson(event);
+      if (pattern.test(text)) {
+        tags.add(tag);
+      }
+    }
   }
 
-  const oldestEvent = events[0];
-  if (oldestEvent === undefined) {
-    return false;
-  }
-
-  const ageHours = (Date.parse(now) - Date.parse(oldestEvent.createdAt)) / (1000 * 60 * 60);
-  return ageHours >= 72 && aggregateScore < 1.1;
+  return [...tags];
 }
 
-function shouldMaterializeCandidate(
-  events: readonly DreamEvidenceEventRecord[],
-  aggregateScore: number
-): boolean {
+function deriveConfidenceFromTier(tier: 1 | 2 | 3, eventCount: number): number {
+  if (tier === 1) {
+    return Math.min(0.95, 0.8 + eventCount * 0.02);
+  }
+
+  if (tier === 2) {
+    return Math.min(0.85, 0.6 + eventCount * 0.05);
+  }
+
+  return 0.4;
+}
+
+function deriveImportanceFromTags(tags: readonly SignalTag[], eventCount: number): number {
+  let importance = 0.4;
+  if (tags.includes("failure_signal")) {
+    importance += 0.15;
+  }
+  if (tags.includes("decision_signal")) {
+    importance += 0.1;
+  }
+  if (tags.includes("architecture_signal")) {
+    importance += 0.1;
+  }
+  if (tags.includes("convention_signal")) {
+    importance += 0.05;
+  }
+  importance += Math.min(0.2, (eventCount - 1) * 0.1);
+  return Math.min(0.95, importance);
+}
+
+function classifyTier(events: readonly DreamEvidenceEventRecord[], tags: readonly SignalTag[]): 1 | 2 | 3 {
+  if (events.length >= 3) {
+    return 1;
+  }
+  if (tags.includes("failure_signal") && tags.includes("has_file_context")) {
+    return 1;
+  }
   if (events.length >= 2) {
-    return true;
+    return 2;
   }
-
-  return aggregateScore >= 1.55;
+  if (tags.length > 0) {
+    return 2;
+  }
+  return 3;
 }
 
-function groupEvents(events: readonly DreamEvidenceEventRecord[]): Map<string, DreamEvidenceEventRecord[]> {
+function compareEventsByCreatedAt(
+  left: DreamEvidenceEventRecord,
+  right: DreamEvidenceEventRecord
+): number {
+  const createdAtDelta = Date.parse(left.createdAt) - Date.parse(right.createdAt);
+  if (createdAtDelta !== 0) {
+    return createdAtDelta;
+  }
+
+  return left.id.localeCompare(right.id);
+}
+
+function groupEventsStructurally(
+  events: readonly DreamEvidenceEventRecord[]
+): Map<string, DreamEvidenceEventRecord[]> {
   const groups = new Map<string, DreamEvidenceEventRecord[]>();
 
   for (const event of events) {
-    const key = buildGroupKey(event);
+    const key = buildStructuralGroupKey(event);
     const existing = groups.get(key);
     if (existing === undefined) {
       groups.set(key, [event]);
@@ -215,7 +263,133 @@ function groupEvents(events: readonly DreamEvidenceEventRecord[]): Map<string, D
     existing.push(event);
   }
 
+  for (const [key, groupedEvents] of groups) {
+    groups.set(key, [...groupedEvents].sort(compareEventsByCreatedAt));
+  }
+
   return groups;
+}
+
+function mergeTimeAdjacentGroups(
+  groups: Map<string, DreamEvidenceEventRecord[]>
+): Map<string, DreamEvidenceEventRecord[]> {
+  type GroupEntry = {
+    key: string;
+    events: DreamEvidenceEventRecord[];
+  };
+
+  const buckets = new Map<string, GroupEntry[]>();
+  for (const [key, events] of groups) {
+    const firstEvent = events[0];
+    if (firstEvent === undefined) {
+      continue;
+    }
+
+    const bucketKey = [firstEvent.sessionId, firstEvent.scopeRef].join("|");
+    const bucket = buckets.get(bucketKey) ?? [];
+    bucket.push({ key, events: [...events].sort(compareEventsByCreatedAt) });
+    buckets.set(bucketKey, bucket);
+  }
+
+  const merged = new Map<string, DreamEvidenceEventRecord[]>();
+
+  for (const entries of buckets.values()) {
+    entries.sort((left, right) => compareEventsByCreatedAt(left.events[0]!, right.events[0]!));
+
+    let current = entries[0];
+    if (current === undefined) {
+      continue;
+    }
+
+    for (const next of entries.slice(1)) {
+      const currentLatest = current.events[current.events.length - 1];
+      const nextEarliest = next.events[0];
+      if (currentLatest === undefined || nextEarliest === undefined) {
+        continue;
+      }
+
+      const gap = Date.parse(nextEarliest.createdAt) - Date.parse(currentLatest.createdAt);
+      if (gap < TIME_ADJACENCY_WINDOW_MS) {
+        const mergedEvents = [...current.events, ...next.events].sort(compareEventsByCreatedAt);
+        const preferredKey = next.events.length > current.events.length ? next.key : current.key;
+        current = {
+          key: preferredKey,
+          events: mergedEvents,
+        };
+        continue;
+      }
+
+      merged.set(current.key, current.events);
+      current = next;
+    }
+
+    merged.set(current.key, current.events);
+  }
+
+  return merged;
+}
+
+function createActionDistribution(): ActionDistribution {
+  return {
+    create: 0,
+    reinforce: 0,
+    supersede: 0,
+    stale: 0,
+    latent: 0,
+    skip: 0,
+  };
+}
+
+function isNoiseEvent(event: DreamEvidenceEventRecord): boolean {
+  return (
+    event.title.trim().length === 0 &&
+    event.excerpt.trim().length === 0 &&
+    parseArgsJson(event).trim().length === 0
+  );
+}
+
+function latestEventTimestamp(events: readonly DreamEvidenceEventRecord[], fallback: string): string {
+  const latestEvent = [...events].sort(compareEventsByCreatedAt)[events.length - 1];
+  return latestEvent?.createdAt ?? fallback;
+}
+
+function isOlderThanDays(reference: string, now: string, days: number): boolean {
+  return Date.parse(now) - Date.parse(reference) > days * 24 * 60 * 60 * 1000;
+}
+
+function matchesMemoryScope(event: DreamEvidenceEventRecord, memory: MemoryRecord): boolean {
+  const normalizedScopeRef = normalizePathLike(event.scopeRef);
+  const derivedScopeGlob = deriveScopeGlob(normalizedScopeRef);
+  const memoryScopeGlob = normalizePathLike(memory.scopeGlob);
+
+  if (
+    memoryScopeGlob === normalizedScopeRef ||
+    memoryScopeGlob === derivedScopeGlob ||
+    memoryScopeGlob === "**/*"
+  ) {
+    return true;
+  }
+
+  if (memoryScopeGlob.endsWith("/**/*")) {
+    const prefix = memoryScopeGlob.slice(0, -5);
+    return normalizedScopeRef === prefix || normalizedScopeRef.startsWith(`${prefix}/`);
+  }
+
+  return false;
+}
+
+function hasContradictingEvidence(
+  events: readonly DreamEvidenceEventRecord[],
+  tags: readonly SignalTag[]
+): boolean {
+  if (events.some((event) => event.contradictionSignal)) {
+    return true;
+  }
+
+  return (
+    (tags.includes("decision_signal") && tags.includes("temporal_cue")) ||
+    (tags.includes("explicit_marker") && tags.includes("temporal_cue"))
+  );
 }
 
 export class DreamWorker {
@@ -239,33 +413,139 @@ export class DreamWorker {
       windowStart: createdAfter,
       windowEnd: now,
       evidenceCount: evidence.length,
-      summary: `Dream run queued with ${evidence.length} pending evidence events`,
+      summary: `Dream run queued with ${evidence.length} processable evidence events`,
     });
 
     const suggestions: DreamCandidateSuggestion[] = [];
-    const consumedEvidenceIds: string[] = [];
-    const deferredEvidenceIds: string[] = [];
-    const discardedEvidenceIds: string[] = [];
+    const actionDistribution = createActionDistribution();
+    const materializedEvidenceIds = new Set<string>();
+    const latentEvidenceIds = new Set<string>();
+    const discardedEvidenceIds = new Set<string>();
     const skippedEvidenceIds: string[] = [];
-    const deferredItems: Array<{ id: string; nextReviewAt: string }> = [];
+    const retainedEvidence: DreamEvidenceEventRecord[] = [];
+    const groupedEvidenceIds = new Set<string>();
+    const supersedeTargetIdsByEvidenceId = new Map<string, string[]>();
+    const claimedEvidenceIds = new Set<string>();
 
-    for (const events of groupEvents(evidence).values()) {
-      const { aggregate, confidence, importance } = scoreEvents(events);
-      if (!shouldMaterializeCandidate(events, aggregate)) {
-        skippedEvidenceIds.push(...events.map((event) => event.id));
-        if (shouldDiscardDeferred(events, aggregate, now)) {
-          discardedEvidenceIds.push(...events.map((event) => event.id));
-        } else {
-          for (const event of events) {
-            const nextReviewAt = hoursFromNow(now, computeBackoffHours(event.retryCount));
-            deferredItems.push({ id: event.id, nextReviewAt });
-            deferredEvidenceIds.push(event.id);
+    for (const event of evidence) {
+      if (isNoiseEvent(event)) {
+        skippedEvidenceIds.push(event.id);
+        discardedEvidenceIds.add(event.id);
+        actionDistribution.skip += 1;
+        continue;
+      }
+
+      retainedEvidence.push(event);
+    }
+
+    if (retainedEvidence.length > 0) {
+      this.dreamRepository.markEvidenceEventsRetained(
+        retainedEvidence.map((event) => event.id),
+        run.id,
+        now
+      );
+    }
+
+    const atRiskMemories = this.dreamRepository.listAtRiskMemories({
+      staleAfterDays: 7,
+      minConfidence: 0.7,
+    });
+
+    for (const atRiskMemory of atRiskMemories) {
+      const memory = this.memoryRepository.getById(atRiskMemory.id);
+      if (memory === null) {
+        continue;
+      }
+
+      const matchingEvidence = retainedEvidence.filter(
+        (event) =>
+          !claimedEvidenceIds.has(event.id) &&
+          event.typeGuess === memory.type &&
+          matchesMemoryScope(event, memory)
+      );
+
+      if (matchingEvidence.length > 0) {
+        const tags = extractSignalTags(matchingEvidence);
+        if (hasContradictingEvidence(matchingEvidence, tags)) {
+          for (const event of matchingEvidence) {
+            claimedEvidenceIds.add(event.id);
+            const existingTargets = supersedeTargetIdsByEvidenceId.get(event.id) ?? [];
+            existingTargets.push(memory.id);
+            supersedeTargetIdsByEvidenceId.set(event.id, existingTargets);
           }
+        } else {
+          const verifiedAt = latestEventTimestamp(matchingEvidence, now);
+          const newConfidence = Math.min(0.99, memory.confidence + 0.05);
+          this.memoryRepository.update(memory.id, {
+            confidence: newConfidence,
+            lastVerifiedAt: verifiedAt,
+            updatedAt: now,
+          });
+          this.dreamRepository.createEvidenceLinks(
+            memory.id,
+            matchingEvidence.map((event) => event.id),
+            run.id,
+            now
+          );
+
+          for (const event of matchingEvidence) {
+            claimedEvidenceIds.add(event.id);
+            materializedEvidenceIds.add(event.id);
+          }
+
+          actionDistribution.reinforce += matchingEvidence.length;
         }
+
+        continue;
+      }
+
+      const verificationReference = memory.lastVerifiedAt ?? memory.updatedAt ?? memory.createdAt;
+      if (isOlderThanDays(verificationReference, now, LATENT_TTL_DAYS)) {
+        this.memoryRepository.update(memory.id, {
+          status: "stale",
+          updatedAt: now,
+        });
+        actionDistribution.stale += 1;
+      }
+    }
+
+    const groupableEvidence = retainedEvidence.filter(
+      (event) => supersedeTargetIdsByEvidenceId.has(event.id) || !claimedEvidenceIds.has(event.id)
+    );
+    const mergedGroups = mergeTimeAdjacentGroups(groupEventsStructurally(groupableEvidence));
+
+    for (const events of mergedGroups.values()) {
+      for (const event of events) {
+        groupedEvidenceIds.add(event.id);
+      }
+    }
+
+    if (groupedEvidenceIds.size > 0) {
+      this.dreamRepository.markEvidenceEventsGrouped([...groupedEvidenceIds], run.id, now);
+    }
+
+    const appliedSupersedeTargets = new Set<string>();
+
+    for (const events of mergedGroups.values()) {
+      const tags = extractSignalTags(events);
+      const supersedeTargetIds = [...new Set(
+        events.flatMap((event) => supersedeTargetIdsByEvidenceId.get(event.id) ?? [])
+      )];
+      const classifiedTier = classifyTier(events, tags);
+      const tier: 1 | 2 | 3 =
+        supersedeTargetIds.length > 0 && classifiedTier === 3 ? 2 : classifiedTier;
+
+      if (tier === 3) {
+        for (const event of events) {
+          latentEvidenceIds.add(event.id);
+        }
+        actionDistribution.latent += events.length;
         continue;
       }
 
       const lead = events[0]!;
+      const confidence = deriveConfidenceFromTier(tier, events.length);
+      const importance = deriveImportanceFromTags(tags, events.length);
       const memoryId = buildSuggestionId(lead.typeGuess, lead.scopeRef, lead.topicGuess);
       const summary = buildCandidateSummary(lead.typeGuess, lead.scopeRef, lead.topicGuess);
       const scopeGlob = deriveScopeGlob(lead.scopeRef);
@@ -300,7 +580,7 @@ export class DreamWorker {
               confidence,
               importance,
               relevantTools:
-                existing !== null && existing.relevantTools !== null
+                existing.relevantTools !== null
                   ? [...new Set([...existing.relevantTools, ...inferredTools])].sort()
                   : inferredTools,
               updatedAt: now,
@@ -320,29 +600,59 @@ export class DreamWorker {
         memory,
         previousSummary,
       });
+
       this.dreamRepository.createEvidenceLinks(
         memory.id,
         events.map((event) => event.id),
         run.id,
         now
       );
-      consumedEvidenceIds.push(...events.map((event) => event.id));
+
+      for (const event of events) {
+        materializedEvidenceIds.add(event.id);
+      }
+
+      if (supersedeTargetIds.length > 0) {
+        for (const targetMemoryId of supersedeTargetIds) {
+          if (appliedSupersedeTargets.has(targetMemoryId)) {
+            continue;
+          }
+
+          this.memoryRepository.update(targetMemoryId, {
+            status: "stale",
+            updatedAt: now,
+          });
+          appliedSupersedeTargets.add(targetMemoryId);
+        }
+        actionDistribution.supersede += events.length;
+      } else {
+        actionDistribution.create += events.length;
+      }
     }
 
-    if (consumedEvidenceIds.length > 0) {
-      this.dreamRepository.markEvidenceEventsConsumed(consumedEvidenceIds, run.id, now);
+    if (skippedEvidenceIds.length > 0) {
+      this.dreamRepository.markEvidenceEventsDiscarded(skippedEvidenceIds, run.id, now);
     }
-    if (deferredItems.length > 0) {
-      this.dreamRepository.markEvidenceEventsDeferred(deferredItems, run.id, now);
+    if (materializedEvidenceIds.size > 0) {
+      this.dreamRepository.markEvidenceEventsMaterialized([...materializedEvidenceIds], run.id, now);
     }
-    if (discardedEvidenceIds.length > 0) {
-      this.dreamRepository.markEvidenceEventsDiscarded(discardedEvidenceIds, run.id, now);
+    if (latentEvidenceIds.size > 0) {
+      this.dreamRepository.markEvidenceEventsLatent([...latentEvidenceIds], run.id, now);
+    }
+
+    const expiredLatentEvidenceIds = this.dreamRepository.cleanupExpiredLatentEvidence(LATENT_TTL_DAYS, now);
+    for (const evidenceId of expiredLatentEvidenceIds) {
+      discardedEvidenceIds.add(evidenceId);
     }
 
     const summary =
-      suggestions.length === 0
-        ? `No candidate memories created from ${evidence.length} recent evidence events; deferred ${deferredEvidenceIds.length}, discarded ${discardedEvidenceIds.length}`
-        : `Created or refreshed ${suggestions.length} candidate memories from ${consumedEvidenceIds.length} evidence events; deferred ${deferredEvidenceIds.length}, discarded ${discardedEvidenceIds.length}`;
+      `Dream run processed ${evidence.length} evidence events: ` +
+      `create ${actionDistribution.create}, ` +
+      `reinforce ${actionDistribution.reinforce}, ` +
+      `supersede ${actionDistribution.supersede}, ` +
+      `stale ${actionDistribution.stale}, ` +
+      `latent ${actionDistribution.latent}, ` +
+      `skip ${actionDistribution.skip}`;
     const completedRun = this.dreamRepository.completeDreamRun(run.id, {
       status: "completed",
       summary,
@@ -350,14 +660,21 @@ export class DreamWorker {
       completedAt: now,
     });
 
+    const orderedMaterializedEvidenceIds = [...materializedEvidenceIds].sort();
+    const orderedLatentEvidenceIds = [...latentEvidenceIds].sort();
+    const orderedDiscardedEvidenceIds = [...discardedEvidenceIds].sort();
+
     return {
       run: completedRun,
       processedEvidenceCount: evidence.length,
-      consumedEvidenceIds,
-      deferredEvidenceIds,
-      discardedEvidenceIds,
+      consumedEvidenceIds: orderedMaterializedEvidenceIds,
+      materializedEvidenceIds: orderedMaterializedEvidenceIds,
+      latentEvidenceIds: orderedLatentEvidenceIds,
+      deferredEvidenceIds: [],
+      discardedEvidenceIds: orderedDiscardedEvidenceIds,
       suggestions,
       skippedEvidenceIds,
+      actionDistribution,
     };
   }
 }

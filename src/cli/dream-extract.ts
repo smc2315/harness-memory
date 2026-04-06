@@ -34,9 +34,9 @@ export interface GateState {
   lockPid: number | null;
 }
 
-export const DEFAULT_MIN_EVIDENCE = 3;
-export const DEFAULT_MIN_HOURS = 1;
-export const DEFAULT_MIN_SESSIONS = 2;
+export const DEFAULT_MIN_EVIDENCE = 2;
+export const DEFAULT_MIN_HOURS = 0.5;
+export const DEFAULT_MIN_SESSIONS = 1;
 
 export function getGateStatePath(dbPath: string): string {
   return resolve(dirname(dbPath), ".dream-extract-state.json");
