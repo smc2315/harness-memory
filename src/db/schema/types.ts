@@ -181,8 +181,73 @@ export type DreamEvidenceTypeGuess = 'policy' | 'workflow' | 'pitfall' | 'archit
 
 /**
  * Dream evidence event lifecycle
+ *
+ * State machine:
+ *   pending → retained (noise filter passed)
+ *   retained → grouped (structural grouping assigned)
+ *   grouped → materialized (Tier 1/2 candidate created)
+ *   grouped → latent (Tier 3, no candidate, 14-day TTL)
+ *   materialized ≈ consumed (backward compat: both mean "used to create candidate")
+ *   latent → discarded (TTL expired or manual cleanup)
+ *   any → discarded (noise, TTL, or explicit discard)
+ *
+ * Legacy states preserved for backward compatibility:
+ *   consumed — historical rows from pre-v15; equivalent to materialized
+ *   deferred — no longer written; migrated to latent in migration 015
  */
-export type DreamEvidenceStatus = 'pending' | 'deferred' | 'consumed' | 'discarded';
+export type DreamEvidenceStatus =
+  | 'pending'
+  | 'retained'
+  | 'grouped'
+  | 'materialized'
+  | 'latent'
+  | 'consumed'       // legacy: equivalent to materialized
+  | 'discarded';
+
+/**
+ * Signal tags attached to evidence metadata.
+ * These are HINTS for dream consolidation, NOT entry criteria.
+ * Regex extracts these tags; they never gate evidence.
+ */
+export type SignalTag =
+  | 'failure_signal'
+  | 'success_signal'
+  | 'decision_signal'
+  | 'convention_signal'
+  | 'architecture_signal'
+  | 'temporal_cue'
+  | 'explicit_marker'
+  | 'has_file_context';
+
+/**
+ * Structured metadata stored in dream_evidence_events.metadata_json.
+ * Extends any existing metadata with signal tags and hints.
+ */
+export interface EvidenceMetadata {
+  /** Signal tags derived from regex patterns (hints, not gates). */
+  signalTags?: SignalTag[];
+  /** SHA-256 hash of excerpt for same-session dedup. */
+  excerptHash?: string;
+  /** Original type guess from adapter (hint only, not used for grouping). */
+  hintType?: string;
+  /** Original topic guess from adapter (hint only, not used for grouping). */
+  hintTopic?: string;
+  /** Pass-through for any other metadata from the adapter. */
+  [key: string]: unknown;
+}
+
+/**
+ * Action distribution telemetry for a dream run.
+ * Tracks how many evidence events resulted in each action.
+ */
+export interface ActionDistribution {
+  create: number;
+  reinforce: number;
+  supersede: number;
+  stale: number;
+  latent: number;
+  skip: number;
+}
 
 /**
  * Dream run lifecycle

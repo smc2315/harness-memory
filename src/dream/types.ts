@@ -1,10 +1,12 @@
 import type {
+  ActionDistribution,
   DreamEvidenceStatus,
   DreamEvidenceTypeGuess,
   DreamRunStatus,
   DreamTrigger,
   LifecycleTrigger,
   MemoryType,
+  SignalTag,
 } from "../db/schema/types";
 import type { MemoryRecord } from "../memory";
 
@@ -125,10 +127,13 @@ export interface DreamRunResult {
   run: DreamRunRecord;
   processedEvidenceCount: number;
   consumedEvidenceIds: string[];
+  materializedEvidenceIds: string[];
+  latentEvidenceIds: string[];
   deferredEvidenceIds: string[];
   discardedEvidenceIds: string[];
   suggestions: DreamCandidateSuggestion[];
   skippedEvidenceIds: string[];
+  actionDistribution: ActionDistribution;
 }
 
 export interface ListDreamRunsInput {
