@@ -186,6 +186,8 @@ interface PreparedActivation {
   maxPayloadBytes: number;
   queryText: string;
   broadEnglishQuery: boolean;
+  /** Activation mode for audit logging. Set by activate() after preparation. */
+  activationMode: string;
 }
 
 interface SelectionState {
@@ -273,6 +275,9 @@ export class ActivationEngine {
       mode === "temporal" ? true : (request.includeSuperseded ?? false),
     );
 
+    // Store mode in prepared for audit logging
+    prepared.activationMode = mode;
+
     switch (mode) {
       case "startup":
         return this.activateStartupMode(request, prepared);
@@ -345,6 +350,7 @@ export class ActivationEngine {
       maxPayloadBytes,
       queryText,
       broadEnglishQuery: isBroadScopeRef(scopeRef) && isEnglishLikeQuery(queryText),
+      activationMode: "default", // overwritten by activate() after dispatch
     };
   }
 
@@ -838,6 +844,9 @@ export class ActivationEngine {
           trigger: request.lifecycleTrigger,
           scopeRef: prepared.scopeRef,
           queryTokens: request.queryTokens ?? [],
+          activationMode: prepared.activationMode,
+          queryType: request.activationMode ?? "default",
+          startupPackInjected: prepared.activationMode === "startup",
           candidateCount: prepared.activeMemories.length,
           activatedCount: activated.length,
           suppressedCount: suppressed.length,

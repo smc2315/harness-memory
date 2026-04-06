@@ -26,12 +26,22 @@ export type AuditEventType =
   | "extraction"
   | "extraction_action"
   | "dedup"
-  | "gate_check";
+  | "gate_check"
+  | "session_summary_generated"
+  | "session_summary_skipped"
+  | "auto_promotion_cycle"
+  | "review_digest_shown";
 
 export interface AuditActivationDetails {
   trigger: string;
   scopeRef: string;
   queryTokens: string[];
+  /** Activation mode used (startup/default/temporal/cross_session). */
+  activationMode: string;
+  /** Query classification from classifyQueryType() (default/temporal/cross_session). */
+  queryType: string;
+  /** Whether startup pack memories were injected (first turn of session). */
+  startupPackInjected: boolean;
   candidateCount: number;
   activatedCount: number;
   suppressedCount: number;
@@ -92,6 +102,40 @@ export interface AuditGateCheckDetails {
   reason?: string;
   pendingCount?: number;
   hoursSinceLastExtract?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Shadow validation detail types (observability layer)
+// ---------------------------------------------------------------------------
+
+export interface AuditSessionSummaryGeneratedDetails {
+  sessionId: string;
+  eventCount: number;
+  toolNames: string[];
+  typeDistribution: Record<string, number>;
+  summaryShortLength: number;
+  summaryMediumLength: number;
+  embeddingGenerated: boolean;
+}
+
+export interface AuditSessionSummarySkippedDetails {
+  sessionId: string;
+  reason: string;
+  eventCount?: number;
+}
+
+export interface AuditAutoPromotionCycleDetails {
+  promotedCount: number;
+  expiredCount: number;
+  skippedCount: number;
+  promoted: Array<{ id: string; type: string; summary: string; confidence: number }>;
+  expired: Array<{ id: string; type: string; summary: string; ageDays: number }>;
+}
+
+export interface AuditReviewDigestShownDetails {
+  candidateCount: number;
+  recentAutoPromotionCount: number;
+  typeBreakdown: Record<string, number>;
 }
 
 // ---------------------------------------------------------------------------
@@ -208,6 +252,61 @@ export class AuditLogger {
       undefined,
       undefined,
       `Gate [${details.gate}]: ${status}`,
+      details,
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Shadow validation methods (observability layer)
+  // -------------------------------------------------------------------------
+
+  logSessionSummaryGenerated(
+    sessionId: string,
+    details: AuditSessionSummaryGeneratedDetails,
+  ): void {
+    this.write(
+      "session_summary_generated",
+      sessionId,
+      undefined,
+      `Session summary generated: ${details.eventCount} events, ${details.toolNames.length} tools, embedding=${details.embeddingGenerated}`,
+      details,
+    );
+  }
+
+  logSessionSummarySkipped(
+    sessionId: string,
+    details: AuditSessionSummarySkippedDetails,
+  ): void {
+    this.write(
+      "session_summary_skipped",
+      sessionId,
+      undefined,
+      `Session summary skipped: ${details.reason}`,
+      details,
+    );
+  }
+
+  logAutoPromotionCycle(
+    details: AuditAutoPromotionCycleDetails,
+  ): void {
+    this.write(
+      "auto_promotion_cycle",
+      undefined,
+      undefined,
+      `Auto-promotion: ${details.promotedCount} promoted, ${details.expiredCount} expired, ${details.skippedCount} skipped`,
+      details,
+    );
+  }
+
+  logReviewDigestShown(
+    sessionId: string,
+    details: AuditReviewDigestShownDetails,
+  ): void {
+    this.write(
+      "review_digest_shown",
+      sessionId,
+      undefined,
+      `Review digest shown: ${details.candidateCount} candidates, ${details.recentAutoPromotionCount} recent auto-promotions`,
       details,
     );
   }

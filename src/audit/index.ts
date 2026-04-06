@@ -9,4 +9,8 @@ export type {
   AuditExtractionActionDetails,
   AuditDedupDetails,
   AuditGateCheckDetails,
+  AuditSessionSummaryGeneratedDetails,
+  AuditSessionSummarySkippedDetails,
+  AuditAutoPromotionCycleDetails,
+  AuditReviewDigestShownDetails,
 } from "./logger";
