@@ -884,3 +884,77 @@ export function printBenchmarkReport(
 
   console.log(`└${border}┘\n`);
 }
+
+// ---------------------------------------------------------------------------
+// 3-run median helpers — run a benchmark function N times, report median ± variance
+// ---------------------------------------------------------------------------
+
+export interface MedianResult<T> {
+  /** The median value from N runs. */
+  median: T;
+  /** All individual run results (sorted by the sort key). */
+  runs: T[];
+  /** Standard deviation of the sort key across runs (0 for deterministic). */
+  stdev: number;
+  /** Number of runs executed. */
+  runCount: number;
+}
+
+/**
+ * Run an async benchmark function N times and return the median result.
+ *
+ * The `sortKey` function extracts a numeric value from each result for
+ * sorting and variance calculation. The median result (by sort key) is
+ * returned along with stdev across runs.
+ *
+ * Typical usage:
+ * ```typescript
+ * const { median, stdev, runCount } = await runNMedian(3, async () => {
+ *   const result = await engine.activate({ ... });
+ *   return result.activated.length;
+ * }, (count) => count);
+ * ```
+ */
+export async function runNMedian<T>(
+  n: number,
+  fn: () => Promise<T>,
+  sortKey: (result: T) => number,
+): Promise<MedianResult<T>> {
+  const results: T[] = [];
+
+  for (let i = 0; i < n; i++) {
+    const result = await fn();
+    results.push(result);
+  }
+
+  // Sort by the numeric key
+  const sorted = [...results].sort((a, b) => sortKey(a) - sortKey(b));
+
+  // Median: middle element (for even N, take lower-middle)
+  const medianIndex = Math.floor(sorted.length / 2);
+  const median = sorted[medianIndex];
+
+  // Standard deviation
+  const values = sorted.map(sortKey);
+  const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
+  const variance = values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / values.length;
+  const stdev = Math.sqrt(variance);
+
+  return {
+    median,
+    runs: sorted,
+    stdev,
+    runCount: n,
+  };
+}
+
+/**
+ * Format a median ± stdev string for benchmark reporting.
+ */
+export function formatMedianResult(value: number, stdev: number): string {
+  if (stdev === 0) {
+    return value.toFixed(4);
+  }
+
+  return `${value.toFixed(4)} ± ${stdev.toFixed(4)}`;
+}

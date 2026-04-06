@@ -68,6 +68,7 @@ describe("HM-PromotionBench", () => {
     details: string;
     confidence?: number;
     evidenceCount?: number;
+    createdAt?: string;
   }) {
     const memory = repository.create({
       type: input.type,
@@ -78,6 +79,7 @@ describe("HM-PromotionBench", () => {
       status: "candidate",
       confidence: input.confidence ?? 0.9,
       importance: 0.8,
+      createdAt: input.createdAt,
     });
 
     const evidenceCount = input.evidenceCount ?? 3;
@@ -216,6 +218,23 @@ describe("HM-PromotionBench", () => {
       const skipped = result.skipped.find((s) => s.memoryId === candidate.id);
       expect(skipped).toBeDefined();
       expect(skipped!.reason).toContain("insufficient evidence");
+      markGate(true);
+    });
+
+    test("candidate older than 30 days -> auto-rejected", async () => {
+      const candidate = createCandidateMemory({
+        type: "workflow",
+        summary: "Expired review candidate",
+        details: "Should age out of the review queue",
+        createdAt: new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString(),
+      });
+
+      const result = await runAutoPromotionCycle(repository);
+      const expired = result.expired.find((item) => item.memoryId === candidate.id);
+
+      expect(expired).toBeDefined();
+      expect(expired!.ageDays).toBeGreaterThanOrEqual(31);
+      expect(repository.getById(candidate.id)!.status).toBe("rejected");
       markGate(true);
     });
 

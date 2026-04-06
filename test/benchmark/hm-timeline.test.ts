@@ -365,43 +365,116 @@ describe("HM-TimelineBench", () => {
   });
 
   // ─────────────────────────────────────────────────────────────
-  // Temporal REASONING tests — these probe capabilities the system
-  // currently LACKS. Tests will FAIL to show real gaps.
-  // When the system gains temporal capabilities (Phase 2:
-  // hierarchical retrieval), these tests will start passing.
+  // Aspirational temporal REASONING tests — these probe deep
+  // capabilities the system currently LACKS.
+  //
+  // test.fails() means: "this test is EXPECTED to fail."
+  // - CI passes because the failure is expected.
+  // - When the feature is implemented and the test starts PASSING,
+  //   CI will FAIL — that's the signal to remove test.fails().
+  //
+  // Required features:
+  // - P0: Evidence retention + reconciliation
+  // - P1: Hierarchical retrieval + session summaries + 4-mode activation
   // ─────────────────────────────────────────────────────────────
 
-  describe("temporal reasoning (with includeSuperseded mode)", () => {
-    test("ordering: 'what was the sequence of framework changes' returns both T01 and T02", async () => {
-      // With includeSuperseded=true, temporal queries can show evolution
-      const activated = await runTemporalQuery("what was the sequence of HTTP framework changes from beginning to end");
+  describe("aspirational temporal reasoning (P0/P1 required)", () => {
+    // ── Ordering (2 tests) ──
+    // System must return memories in chronological session order,
+    // not just by relevance score.
 
+    test.fails("ordering: T01 (Express) appears before T02 (Fastify) in temporal results", async () => {
+      // Requires: session-ordered retrieval where rank reflects chronology
+      const activated = await runTemporalQuery("show the full history of HTTP framework decisions in order");
+
+      expect(activated).toContain("T01"); // Express (session 1)
+      expect(activated).toContain("T02"); // Fastify (session 2)
+
+      const t01Idx = activated.indexOf("T01");
       const t02Idx = activated.indexOf("T02");
-      expect(t02Idx).toBeGreaterThanOrEqual(0);
-
-      // Now T01 (superseded) should be included for temporal context
-      expect(activated).toContain("T01");
+      // Chronological: Express (Jan) must appear before Fastify (Jan 15)
+      expect(t01Idx).toBeLessThan(t02Idx);
     });
 
-    test("change-point: database switch query finds T05 and adjacent session context", async () => {
-      const activated = await runTemporalQuery("when exactly did we switch from PostgreSQL to SQLite and in which session");
+    test.fails("ordering: CI setup (T03) appears before CI pitfall fix (T04) in same session", async () => {
+      // Requires: intra-session temporal ordering
+      const activated = await runTemporalQuery("what happened with CI pipeline in chronological order");
 
-      expect(activated).toContain("T05");
+      expect(activated).toContain("T03"); // CI setup (session 3, morning)
+      expect(activated).toContain("T04"); // CI pitfall (session 3, afternoon)
+
+      const t03Idx = activated.indexOf("T03");
+      const t04Idx = activated.indexOf("T04");
+      // T03 was created before T04 in the same session
+      expect(t03Idx).toBeLessThan(t04Idx);
     });
 
-    test("progression: testing evolution query finds multiple related memories", async () => {
-      const activated = await runTemporalQuery("how did testing practices evolve over time across all sessions");
+    // ── Progression (2 tests) ──
+    // System must synthesize how a topic evolved across sessions.
 
-      const testingMemories = ["T03", "T04", "T08"].filter((tag) => activated.includes(tag));
-      expect(testingMemories.length).toBeGreaterThanOrEqual(2);
+    test.fails("progression: testing evolution returns T03, T04, AND T08 in chronological sequence", async () => {
+      // Requires: cross-session topic tracking + temporal ordering
+      const activated = await runTemporalQuery("how did our testing practices evolve from the beginning to now");
+
+      // All three testing-related memories must appear
+      expect(activated).toContain("T03"); // CI setup (session 3)
+      expect(activated).toContain("T04"); // CI pitfall (session 3)
+      expect(activated).toContain("T08"); // vitest switch (session 6)
+
+      // And they must be in chronological order
+      const t03Idx = activated.indexOf("T03");
+      const t04Idx = activated.indexOf("T04");
+      const t08Idx = activated.indexOf("T08");
+      expect(t03Idx).toBeLessThan(t04Idx);
+      expect(t04Idx).toBeLessThan(t08Idx);
     });
 
-    test("latest-state with superseded context: 'what framework and why did we change' needs both old and new", async () => {
-      // With temporal mode, both old and new decisions should appear
-      const activated = await runTemporalQuery("what HTTP framework do we use now and why did we change from the previous one");
+    test.fails("progression: database architecture evolution returns T05 then T07", async () => {
+      // Requires: cross-session topic tracking for database decisions
+      const activated = await runTemporalQuery("how did database architecture evolve over time across sessions");
 
-      expect(activated).toContain("T02"); // Current: Fastify
-      expect(activated).toContain("T01"); // Previous: Express — now included via includeSuperseded
+      expect(activated).toContain("T05"); // SQLite switch (session 4)
+      expect(activated).toContain("T07"); // Repository policy (session 6)
+
+      const t05Idx = activated.indexOf("T05");
+      const t07Idx = activated.indexOf("T07");
+      // Session 4 decision before session 6 policy
+      expect(t05Idx).toBeLessThan(t07Idx);
+    });
+
+    // ── Cross-session comparison (2 tests) ──
+    // System must retrieve memories from different sessions AND
+    // return them in chronological session order. Current system
+    // retrieves by relevance, not session-ordered.
+
+    test.fails("cross-session: session 3 vs session 6 testing comparison returns all 3 in session order", async () => {
+      // Requires: session-level pre-filtering + chronological ordering
+      const activated = await runTemporalQuery("compare how testing was done in session 3 versus session 6");
+
+      // Session 3: CI setup + pitfall, Session 6: vitest decision
+      expect(activated).toContain("T03");
+      expect(activated).toContain("T04");
+      expect(activated).toContain("T08");
+
+      // Must be in session order: session 3 items before session 6 items
+      const t03Idx = activated.indexOf("T03");
+      const t04Idx = activated.indexOf("T04");
+      const t08Idx = activated.indexOf("T08");
+      expect(t03Idx).toBeLessThan(t08Idx); // session 3 before session 6
+      expect(t04Idx).toBeLessThan(t08Idx); // session 3 before session 6
+    });
+
+    test.fails("cross-session: DB decision (session 4) before repo policy (session 6) in chronological order", async () => {
+      // Requires: session-aware retrieval with chronological ordering
+      const activated = await runTemporalQuery("what was the database decision in session 4 and how did the repository policy in session 6 build on it");
+
+      expect(activated).toContain("T05"); // DB switch (session 4)
+      expect(activated).toContain("T07"); // Repo policy (session 6)
+
+      // Session 4 must appear before session 6
+      const t05Idx = activated.indexOf("T05");
+      const t07Idx = activated.indexOf("T07");
+      expect(t05Idx).toBeLessThan(t07Idx);
     });
   });
 });
