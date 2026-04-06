@@ -26,6 +26,8 @@ export interface ActivationRequest {
   toolName?: string;
   maxMemories?: number;
   maxPayloadBytes?: number;
+  /** When true, include superseded memories for temporal context (e.g., showing what changed) */
+  includeSuperseded?: boolean;
 }
 
 export interface RankedMemory extends MemoryRecord {

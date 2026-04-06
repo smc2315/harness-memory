@@ -167,6 +167,41 @@ const MALICIOUS_INSTRUCTION_PATTERNS: readonly RegexThreatPattern[] = [
 
 const REPETITIVE_CONTENT_REGEX = /(.{20,100}?)\1{9,}/gs;
 
+// Base64 pattern: at least 40 chars of valid base64 with optional padding
+const BASE64_CONTENT_REGEX = /[A-Za-z0-9+/]{40,}={0,2}/g;
+
+// Common Unicode confusable mappings (Cyrillic → Latin)
+// These characters look identical to Latin but have different codepoints
+const CONFUSABLE_MAP: ReadonlyMap<number, string> = new Map([
+  [0x0430, "a"],  // Cyrillic а → Latin a
+  [0x0435, "e"],  // Cyrillic е → Latin e
+  [0x043E, "o"],  // Cyrillic о → Latin o
+  [0x0440, "p"],  // Cyrillic р → Latin p
+  [0x0441, "c"],  // Cyrillic с → Latin c
+  [0x0443, "y"],  // Cyrillic у → Latin y
+  [0x0445, "x"],  // Cyrillic х → Latin x
+  [0x0456, "i"],  // Cyrillic і → Latin i
+  [0x0458, "j"],  // Cyrillic ј → Latin j
+  [0x04BB, "h"],  // Cyrillic һ → Latin h
+  [0x0501, "d"],  // Cyrillic ԁ → Latin d
+  [0xFF41, "a"],  // Fullwidth ａ → Latin a
+  [0xFF45, "e"],  // Fullwidth ｅ → Latin e
+  [0xFF49, "i"],  // Fullwidth ｉ → Latin i
+  [0xFF4F, "o"],  // Fullwidth ｏ → Latin o
+  [0xFF55, "u"],  // Fullwidth ｕ → Latin u
+]);
+
+/** Normalize text by replacing known confusable characters with Latin equivalents */
+function normalizeConfusables(text: string): string {
+  let result = "";
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    const replacement = CONFUSABLE_MAP.get(code);
+    result += replacement ?? text[i];
+  }
+  return result;
+}
+
 const BLOCK_REGEX_PATTERNS: readonly RegexThreatPattern[] = [
   {
     name: "invisible_unicode_character",
@@ -279,9 +314,63 @@ export function scanMemoryContent(
   const maxContentLength = options?.maxContentLength ?? DEFAULT_MAX_CONTENT_LENGTH;
   const threats: ScanThreat[] = [];
 
-  addRegexThreats("summary", summary, threats);
-  addRegexThreats("details", details, threats);
+  // Phase 1: Unicode normalization — defeats homoglyph attacks
+  // NFKD handles composed chars; confusable map handles Cyrillic/fullwidth lookalikes
+  const normalizedSummary = normalizeConfusables(summary.normalize("NFKD"));
+  const normalizedDetails = normalizeConfusables(details.normalize("NFKD"));
 
+  // Phase 2: Per-field regex scanning on normalized text
+  addRegexThreats("summary", normalizedSummary, threats);
+  addRegexThreats("details", normalizedDetails, threats);
+
+  // Phase 3: Cross-field injection detection
+  // Attacks may split patterns across summary+details boundary
+  const crossFieldText = `${normalizedSummary} ${normalizedDetails}`;
+  const crossFieldThreats: ScanThreat[] = [];
+  addRegexThreats("summary", crossFieldText, crossFieldThreats);
+  // Add any cross-field threats not already found in per-field scan
+  for (const crossThreat of crossFieldThreats) {
+    const isDuplicate = threats.some(
+      (t) => t.pattern === crossThreat.pattern && t.category === crossThreat.category
+    );
+    if (!isDuplicate) {
+      threats.push({
+        ...crossThreat,
+        match: truncateMatch(`cross-field: ${crossThreat.match}`),
+      });
+    }
+  }
+
+  // Phase 4: Base64 credential detection
+  // Decode Base64 strings and scan the decoded content for credentials
+  for (const fieldText of [normalizedSummary, normalizedDetails]) {
+    BASE64_CONTENT_REGEX.lastIndex = 0;
+    let b64Match = BASE64_CONTENT_REGEX.exec(fieldText);
+    while (b64Match !== null) {
+      try {
+        const decoded = Buffer.from(b64Match[0], "base64").toString("utf-8");
+        // Check if decoded content contains credential patterns
+        const decodedThreats: ScanThreat[] = [];
+        addRegexThreats("details", decoded, decodedThreats);
+        const credentialThreats = decodedThreats.filter(
+          (t) => t.category === "credential_pattern"
+        );
+        for (const ct of credentialThreats) {
+          threats.push({
+            pattern: `base64_encoded_${ct.pattern}`,
+            severity: "block",
+            category: "credential_pattern",
+            match: truncateMatch(`base64-decoded: ${ct.match}`),
+          });
+        }
+      } catch {
+        // Invalid base64 — skip
+      }
+      b64Match = BASE64_CONTENT_REGEX.exec(fieldText);
+    }
+  }
+
+  // Phase 5: Format anomaly checks on original text
   addFormatAnomalies("summary", summary, maxContentLength, threats);
   addFormatAnomalies("details", details, maxContentLength, threats);
 

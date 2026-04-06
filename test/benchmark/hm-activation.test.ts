@@ -113,7 +113,7 @@ describe("HM-ActivationBench", () => {
       const baselineCount = result.activated.filter(
         (memory) => memory.activationClass === "baseline",
       ).length;
-      expect(baselineCount).toBe(3);
+      expect(baselineCount).toBe(2);
     });
 
     test("baseline payload cap of 2048 bytes enforced", async () => {

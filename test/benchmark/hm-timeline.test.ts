@@ -221,6 +221,20 @@ describe("HM-TimelineBench", () => {
     return result.activated.map((memory) => idToTag.get(memory.id) ?? memory.id);
   }
 
+  /** Temporal query: includes superseded memories for evolution context */
+  async function runTemporalQuery(text: string): Promise<string[]> {
+    const result = await engine.activate({
+      lifecycleTrigger: "before_model",
+      scopeRef: ".",
+      queryTokens: tokenizeQuery(text),
+      maxMemories: 10,
+      maxPayloadBytes: 8192,
+      includeSuperseded: true,
+    });
+
+    return result.activated.map((memory) => idToTag.get(memory.id) ?? memory.id);
+  }
+
   describe("session ordering", () => {
     test("query 'what HTTP framework' returns latest Fastify decision", async () => {
       const activated = await runQuery("what HTTP framework");
@@ -357,50 +371,37 @@ describe("HM-TimelineBench", () => {
   // hierarchical retrieval), these tests will start passing.
   // ─────────────────────────────────────────────────────────────
 
-  describe("temporal reasoning (system gaps — expected failures)", () => {
-    test("ordering: 'what was the sequence of framework changes' should return T01→T02 in order", async () => {
-      // This requires understanding that T01 came before T02 and returning them in chronological order
-      // Current system: returns T02 (active) but NOT T01 (superseded) — can't show the progression
-      const activated = await runQuery("what was the sequence of HTTP framework changes from beginning to end");
+  describe("temporal reasoning (with includeSuperseded mode)", () => {
+    test("ordering: 'what was the sequence of framework changes' returns both T01 and T02", async () => {
+      // With includeSuperseded=true, temporal queries can show evolution
+      const activated = await runTemporalQuery("what was the sequence of HTTP framework changes from beginning to end");
 
-      // For temporal ordering, we'd need BOTH the old and new decision
-      // But T01 is superseded and correctly excluded — temporal reasoning needs a different retrieval mode
       const t02Idx = activated.indexOf("T02");
       expect(t02Idx).toBeGreaterThanOrEqual(0);
 
-      // The system would need to INCLUDE superseded T01 for temporal context
-      // This contradicts the status-filtering contract — hence the fundamental limitation
-      expect(activated).toContain("T01"); // WILL FAIL: T01 is superseded
+      // Now T01 (superseded) should be included for temporal context
+      expect(activated).toContain("T01");
     });
 
     test("change-point: database switch query finds T05 and adjacent session context", async () => {
-      // The system actually finds T05 (the change) AND related memories from adjacent sessions
-      // This is better than expected — the dense+lexical hybrid retrieval catches related context
-      const activated = await runQuery("when exactly did we switch from PostgreSQL to SQLite and in which session");
+      const activated = await runTemporalQuery("when exactly did we switch from PostgreSQL to SQLite and in which session");
 
       expect(activated).toContain("T05");
-      // Note: we don't require T03/T06 because the system doesn't guarantee session-window retrieval
-      // But we document that it finds the primary change point correctly
     });
 
     test("progression: testing evolution query finds multiple related memories", async () => {
-      // The system successfully finds testing-related memories across sessions
-      // This shows that concept-based retrieval can do basic cross-session synthesis
-      const activated = await runQuery("how did testing practices evolve over time across all sessions");
+      const activated = await runTemporalQuery("how did testing practices evolve over time across all sessions");
 
-      // At least 2 of the 3 testing-related memories should appear
       const testingMemories = ["T03", "T04", "T08"].filter((tag) => activated.includes(tag));
       expect(testingMemories.length).toBeGreaterThanOrEqual(2);
     });
 
     test("latest-state with superseded context: 'what framework and why did we change' needs both old and new", async () => {
-      // This requires showing BOTH the superseded T01 (old choice) AND T02 (new choice)
-      // to explain WHY the change happened
-      const activated = await runQuery("what HTTP framework do we use now and why did we change from the previous one");
+      // With temporal mode, both old and new decisions should appear
+      const activated = await runTemporalQuery("what HTTP framework do we use now and why did we change from the previous one");
 
-      // Need T02 (current) AND T01 (previous) to explain the change
       expect(activated).toContain("T02"); // Current: Fastify
-      expect(activated).toContain("T01"); // Previous: Express — WILL FAIL (superseded)
+      expect(activated).toContain("T01"); // Previous: Express — now included via includeSuperseded
     });
   });
 });

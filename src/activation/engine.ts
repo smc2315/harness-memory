@@ -156,7 +156,12 @@ function calculateStartupActivationScore(
   retrievalScore: number,
   source: StartupScoreSource,
 ): number {
-  return calculateMemoryScore(memory) + normalizeStartupRetrievalScore(retrievalScore, source);
+  const memoryBase = calculateMemoryScore(memory);
+  const retrieval = normalizeStartupRetrievalScore(retrievalScore, source);
+
+  // Weight retrieval match 1.5× higher than base memory score.
+  // This ensures query-relevant memories rank above high-importance but irrelevant ones.
+  return memoryBase * 0.4 + retrieval * 0.6;
 }
 
 function compareRankedMemories(left: RankedMemory, right: RankedMemory): number {
@@ -185,9 +190,12 @@ export class ActivationEngine {
     const allMemories = this.repository.list(buildTypeFilter(request.types));
     const activeMemories: MemoryRecord[] = [];
     const suppressed: SuppressedMemory[] = [];
+    const allowedStatuses = request.includeSuperseded
+      ? [...DEFAULT_ACTIVE_STATUSES, "superseded" as const]
+      : DEFAULT_ACTIVE_STATUSES;
 
     for (const memory of allMemories) {
-      if (!DEFAULT_ACTIVE_STATUSES.includes(memory.status)) {
+      if (!allowedStatuses.includes(memory.status)) {
         suppressed.push({
           memory,
           kind: "status_inactive",
@@ -438,7 +446,7 @@ export class ActivationEngine {
     const baselineMemories = activeMemories
       .filter((memory) => baselineClasses.includes(memory.activationClass))
       .sort(compareMemories);
-    const baselineCap = 3;
+    const baselineCap = 2;
     const baselinePayloadCap = 2_048;
     let baselineUsedBytes = 0;
     let baselineCount = 0;
@@ -626,7 +634,7 @@ export class ActivationEngine {
       decision: 1,
     };
     const typeCounts = new Map<MemoryType, number>();
-    const reserveExplorationSlot = maxMemories > 1;
+    const reserveExplorationSlot = maxMemories > 1 && queryText.length === 0;
     const coreTarget = reserveExplorationSlot ? maxMemories - 1 : maxMemories;
     const finalSelected: RankedMemory[] = [];
     const finalIds = new Set<string>();
