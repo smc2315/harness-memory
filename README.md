@@ -4,11 +4,11 @@
 [![license](https://img.shields.io/npm/l/harness-memory.svg)](https://github.com/smc2315/harness-memory/blob/master/LICENSE)
 [![downloads](https://img.shields.io/npm/dm/harness-memory.svg)](https://www.npmjs.com/package/harness-memory)
 
-**High-precision project memory for AI coding assistants**
+**Local-first, evidence-backed project memory for AI coding assistants**
 
-harness-memory is an OpenCode plugin that gives AI coding assistants persistent, high-precision project memory. Instead of dumping everything into CLAUDE.md, it compiles project knowledge into small, targeted prompt packs that are injected automatically based on context.
+harness-memory is an OpenCode plugin that gives AI coding assistants persistent, reviewable project memory. It auto-captures evidence signals from every tool interaction, but only materializes memories through a multi-gate pipeline with human review.
 
-**Not an auto-collector** — a system that compiles project knowledge into small, high-precision prompt packs.
+**Evidence is not memory.** The system captures conversation signals automatically, but memories are curated through a deliberate lifecycle: Evidence → Signal Tags → Tier Classification → Dream Consolidation → Candidate → Human Review → Active Memory. This prevents the "auto-save everything" problem while maintaining traceability from every memory back to its source evidence.
 
 ## Quick Start
 
@@ -24,23 +24,31 @@ This single command:
 
 Restart OpenCode and you're ready.
 
-## Features
+## Why harness-memory?
 
-| Feature | Description |
-|---------|-------------|
-| 🎯 **4-Layer Activation** | Baseline → Startup → Scoped → Diversity engine for context-aware injection |
-| 🌐 **Cross-Language Search** | Korean ↔ English vector matching via multilingual-e5-small |
-| 🔄 **Memory Lifecycle** | Evidence → Dream → Candidate → Human Review → Active |
-| 📊 **Structured Audit Logging** | Track activation patterns and quality metrics |
-| 🚀 **Zero Native Dependencies** | SQLite via WASM, runs anywhere Node.js runs |
-| 🧠 **LLM-Based Extraction** | OpenCode SDK integration for intelligent memory extraction |
-| 📈 **Token Efficiency** | 73% savings vs full CLAUDE.md dump |
+### 1. Local-First
+sql.js WASM database. No cloud dependency. Your project knowledge stays on your machine. Zero native dependencies, runs anywhere Node.js runs.
+
+### 2. Evidence-Backed
+Every memory is traceable to conversation evidence with signal tags. You can audit why a memory exists and what evidence supports it.
+
+### 3. Small Prompt Packs
+10 memories max per turn, 8KB budget. 73% token savings vs dumping all context. The 4-layer activation engine (Baseline → Startup → Scoped → Diversity) ensures the right memories are injected at the right time.
+
+### 4. Reviewable
+Human-in-the-loop lifecycle: Evidence → Dream → Candidate → Review → Active. Not auto-save-everything. You approve what becomes memory.
+
+### 5. Cross-Language
+Korean ↔ English query/memory matching via multilingual-e5-small embeddings. Korean queries match English memories and vice versa.
+
+### Best For
+Compact-to-mid projects (≤20 sessions). Scaling to larger projects via hierarchical retrieval (session summaries, topic evolution) is in progress.
 
 ## Benchmark Results
 
 ### harness-memory vs CLAUDE.md (Head-to-Head)
 
-Deterministic comparison using 30 identical project rules and 12 coding tasks:
+Internal benchmarks using mock embeddings and 30 identical project rules across 12 coding tasks. Results indicate relative improvement direction, not absolute production performance:
 
 | Metric | CLAUDE.md | harness-memory | Winner |
 |--------|-----------|----------------|--------|
@@ -49,10 +57,11 @@ Deterministic comparison using 30 identical project rules and 12 coding tasks:
 | **Tokens per task** | 731 | 197 | harness-memory (**73% savings**) |
 | **Signal-to-Noise** | 0.12 | 0.34 | harness-memory (**2.7×**) |
 
-CLAUDE.md dumps everything every time — 100% coverage but only 11% relevant.
-harness-memory selectively injects — 49% coverage but 22% relevant, at 73% less token cost.
+CLAUDE.md dumps everything every time (100% coverage, 11% relevant). harness-memory selectively injects (49% coverage, 22% relevant, 73% less token cost).
 
-### Internal Benchmark Suite (173 tests, all deterministic)
+### Internal Benchmark Suite (304+ tests, deterministic)
+
+7 benchmark layers covering retrieval, extraction, promotion, safety, product, temporal, and scale:
 
 | Benchmark | Tests | Key Metric |
 |-----------|-------|------------|
@@ -60,15 +69,20 @@ harness-memory selectively injects — 49% coverage but 22% relevant, at 73% les
 | HM-Product | 8 | 2× precision vs CLAUDE.md |
 | HM-Promotion | 20 | All 5 gates correct |
 | HM-Extract | 16 | Parser/action accuracy: 100% |
-| HM-Timeline | 16 | Latest-state: 100%, temporal reasoning: partial |
+| HM-Timeline | 16 | Latest-state: 100%, temporal reasoning: improved |
 | HM-Safety | 20 | Block rate: 100%, 3 known evasion vectors |
 | HM-Scale | 12 | Stable recall 50→500 memories |
 
+**Note:** These benchmarks use mock embeddings for deterministic testing. Real embeddings (multilingual-e5-small) are expected to improve retrieval metrics significantly in production.
+
 ### Known Limitations
 
-- **Temporal reasoning**: The system correctly filters superseded memories but cannot yet reconstruct event ordering across sessions. Hierarchical retrieval (Phase 2) is designed to address this.
-- **Cross-session synthesis**: Top-k retrieval tends to grab chunks from one session. Multi-session queries need session-level pre-filtering.
-- **Scale**: Works well for compact projects (≤20 sessions). Larger projects benefit from the hybrid retrieval (dense + BM25 + RRF) but may need session summaries for optimal precision.
+After P0+P1 structural improvements:
+
+- **Temporal reasoning**: Improved via session summaries and 4-mode activation (was 14.3%, targeting 40-60%). The system correctly filters superseded memories and can now reconstruct event ordering within sessions. Cross-session temporal reasoning is in progress.
+- **Cross-session synthesis**: Improved via session diversity enforcement (was 0-43%, targeting 30-50%). Top-k retrieval now balances session diversity, but multi-session queries still benefit from session-level pre-filtering.
+- **Scale**: Hierarchical retrieval foundation in place. Works well for compact-to-mid projects (≤20 sessions). Larger projects benefit from hybrid retrieval (dense + BM25 + RRF), with full topic evolution coming in P2.
+- **Mock embeddings**: Current benchmarks use mock embeddings for deterministic testing. Real embeddings (multilingual-e5-small) are expected to improve IR metrics significantly in production.
 
 ## Architecture
 
@@ -98,21 +112,31 @@ harness-memory selectively injects — 49% coverage but 22% relevant, at 73% les
 
 ### Dream Pipeline
 
+Evidence lifecycle (7 states):
+
 ```
-Conversation → Buffer (5 entries) → Evidence (auto)
-                                        ↓
-                        session.idle / session.compacted
-                                        ↓
-                        4-gate check:
-                          evidence ≥ 3
-                          hours since last ≥ 1
-                          sessions since last ≥ 2
-                          lock acquired
-                                        ↓
-                        LLM extraction via OpenCode SDK
-                        (create/reinforce/supersede/stale)
-                                        ↓
-                        Candidate → Human Review → Active
+Conversation → Buffer (5 entries) → Evidence (pending)
+                                         ↓
+                         Tool interactions → Signal Tags
+                                         ↓
+                         Tier Classification (retained/latent)
+                                         ↓
+                         session.idle / session.compacted
+                                         ↓
+                         4-gate check:
+                           evidence ≥ 3 batches
+                           hours since last ≥ 1
+                           sessions since last ≥ 2
+                           lock acquired
+                                         ↓
+                         LLM extraction via OpenCode SDK
+                         (create/reinforce/supersede/stale)
+                                         ↓
+                         Evidence: grouped → materialized
+                                         ↓
+                         Candidate → Human Review → Active
+                                         ↓
+                         Evidence: consumed / discarded
 ```
 
 ## Memory Lifecycle
@@ -188,29 +212,50 @@ No additional configuration needed. The plugin auto-detects the database at `.ha
 | **Activation** | Dump everything every turn | 4-layer engine: right memory, right time |
 | **Search** | None | Vector + lexical (multilingual) |
 | **Cross-Language** | ❌ | ✅ Korean ↔ English |
-| **Lifecycle** | Edit the file yourself | Evidence → Dream → Human Review |
-| **Token Cost** | Full dump every turn | 41% savings via selective injection |
+| **Lifecycle** | Edit the file yourself | Evidence → Dream → Human Review (7-state pipeline) |
+| **Token Cost** | Full dump every turn | 73% savings via selective injection |
 | **Quality** | Whatever you wrote | Curated, evidence-backed, auditable |
 | **Scaling** | Gets messy past 50 lines | Structured DB, handles hundreds |
 
-## Development
+## Contributing
+
+Contributions are welcome! Here's how to get started:
+
+### Running Tests
 
 ```bash
-# Install dependencies
-npm install
+# Run all tests (304+ tests)
+npx vitest run
 
-# Build
-npm run build
+# Run specific benchmark layers
+npx vitest run test/benchmark/hm-activation.test.ts
+npx vitest run test/benchmark/hm-product.test.ts
+npx vitest run test/benchmark/hm-timeline.test.ts
 
-# Run tests
-npm test
-
-# Test embedding performance
-npm run test:embedding
+# Run all benchmarks
+npx vitest run test/benchmark/hm-*.test.ts
 
 # Watch mode
 npm run dev
 ```
+
+### Architecture Overview
+
+Three core systems:
+
+1. **Activation Engine** (`src/activation/`): 4-layer memory injection (Baseline → Startup → Scoped → Diversity). Handles vector + lexical search, session diversity, and token budgeting.
+
+2. **Dream Pipeline** (`src/dream/`): Evidence lifecycle management. Captures signals, classifies tiers, triggers LLM extraction, manages candidate review.
+
+3. **Evidence Lifecycle** (`src/evidence/`): 7-state evidence tracking (pending → retained → grouped → materialized/latent → consumed → discarded). Signal tagging and tier classification.
+
+### Reporting Issues
+
+Open an issue on [GitHub](https://github.com/smc2315/harness-memory) with:
+- Steps to reproduce
+- Expected vs actual behavior
+- Relevant logs from `.harness-memory/audit.log`
+- Output of `npx harness-memory memory:stats`
 
 ## Tech Stack
 
@@ -233,14 +278,17 @@ Creates DB, registers plugin, installs slash commands. Done.
 
 ### 2. Use Normally
 
-Just code with OpenCode as usual. The plugin silently:
-- Injects relevant memories into the system prompt (4-layer activation)
-- Buffers your conversation (user messages + tool outputs)
-- Flushes to evidence every 5 entries
+Just code with OpenCode as usual. The plugin silently injects relevant memories into the system prompt via the 4-layer activation engine (Baseline → Startup → Scoped → Diversity).
 
 You don't do anything different.
 
-### 3. Automatic Extraction
+### 3. Evidence Capture (Automatic)
+
+The plugin silently captures evidence from every tool interaction:
+- Buffers conversation (user messages + tool outputs)
+- Flushes to evidence storage every 5 entries
+- Tags signals (file paths, actions, entities)
+- Classifies tiers (retained vs latent)
 
 When the session becomes idle or compacted, the plugin checks 4 gates:
 - Enough evidence accumulated (≥ 3 batches)
@@ -285,23 +333,23 @@ AI: "Vitest를 사용해야 합니다. 프로젝트 정책에 따르면 jest 사
 
 Before harness-memory, the same question got "Vitest or Jest, your choice."
 
-## Why harness-memory?
+## How It Works: Evidence vs Memory
 
-### Problem: CLAUDE.md Gets Messy
+### Evidence Capture (Automatic)
+Every tool interaction generates evidence signals:
+- User messages and tool outputs are buffered (5 entries)
+- Flushed to evidence storage with signal tags (file paths, actions, entities)
+- Tier classification: retained (high signal) or latent (low signal)
+- Evidence states: pending → retained → grouped → materialized/latent → consumed → discarded
 
-You start with a clean CLAUDE.md. Six months later, it's 10,000 lines of conflicting information. Your AI assistant gets confused. You spend hours manually pruning.
+### Memory Materialization (Curated)
+Evidence becomes memory through a multi-gate pipeline:
+1. **Dream trigger**: 4 gates (evidence ≥ 3 batches, time ≥ 1 hour, sessions ≥ 2, lock acquired)
+2. **LLM extraction**: OpenCode SDK analyzes evidence, proposes create/reinforce/supersede/stale actions
+3. **Candidate review**: You approve or reject proposed memories
+4. **Active memory**: Approved memories are injected via 4-layer activation engine
 
-### Problem: Auto-Collectors Are Noisy
-
-Tools that auto-save everything create noise. Your AI assistant sees outdated decisions, abandoned experiments, and irrelevant context.
-
-### Solution: High-Precision Memory
-
-harness-memory uses a human-in-loop lifecycle. Evidence is collected, dreams are extracted, candidates are reviewed. Only high-quality, relevant memories make it to production.
-
-The 4-layer activation engine ensures the right memories are injected at the right time. Cross-language vector search means Korean queries match English memories (and vice versa).
-
-Result: 90% first-turn hit rate, 41% token savings, zero manual pruning.
+This separation ensures traceability (every memory links to source evidence) while preventing noise (not every evidence becomes memory).
 
 ## Examples
 
@@ -419,6 +467,31 @@ import { DreamRepository } from "harness-memory/dream";
 ## Contributing
 
 Contributions are welcome! Please open an issue or PR on [GitHub](https://github.com/smc2315/harness-memory).
+
+### Running Tests
+
+```bash
+# Full test suite (304+ tests)
+npx vitest run
+
+# Benchmark suite only (7 HM layers)
+npx vitest run test/benchmark/hm-*.test.ts
+
+# Specific benchmark
+npx vitest run test/benchmark/hm-activation.test.ts
+```
+
+### Architecture for Contributors
+
+- `src/activation/` — 4-layer activation engine with 4-mode routing (startup/default/temporal/cross-session)
+- `src/dream/` — Evidence pipeline: signal tags, tier classification, structural grouping, reconciliation
+- `src/retrieval/` — Session summaries, query routing, hierarchical retrieval infrastructure
+- `src/promotion/` — 5-gate auto-promoter with TTL, contradiction demotion, candidate expiry
+- `src/security/` — Security scanner (Base64, Unicode confusable, cross-field injection)
+- `src/adapters/` — OpenCode adapter with progressive disclosure
+- `src/plugin/` — OpenCode plugin lifecycle hooks
+
+Evidence lifecycle: `pending → retained → grouped → materialized/latent → consumed → discarded`
 
 ## License
 

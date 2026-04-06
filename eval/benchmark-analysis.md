@@ -1,10 +1,56 @@
 # HM Benchmark Suite — Analysis Report
 
 **Date**: 2026-04-06
-**Suite Version**: v1.1 (Hardened)
-**Total Tests**: 116 across 7 benchmarks (+ 57 legacy = 173 total)
-**Result**: 116/116 PASS (173/173 with legacy)
-**Runtime**: 3.03s
+**Suite Version**: v2.0 (P2-A Dashboard)
+**Total Tests**: 299 across 7 HM benchmarks + legacy + aspirational
+**Result**: 299/299 PASS (including 10 aspirational via test.fails())
+**Runtime**: ~3.6s
+
+---
+
+## Per-Layer Diagnostic Dashboard
+
+| Layer | Benchmark | Key Metric | Value | Status |
+|-------|-----------|------------|-------|--------|
+| **Retrieval** | HM-Activation | P@5 | 0.3000 | aspirational (target: 0.35) |
+| **Retrieval** | HM-Activation | R@5 | 0.7667 | pass (threshold: 0.75) |
+| **Retrieval** | HM-Activation | MRR | 0.6708 | aspirational (target: 0.70) |
+| **Retrieval** | HM-Activation | NDCG@5 | 0.6275 | pass (threshold: 0.20) |
+| **Retrieval** | Canary Set | MRR | 0.3950 | pass (baseline: 0.3954) |
+| **Extraction** | HM-Extract | Parser accuracy | 1.0000 | pass |
+| **Extraction** | HM-Extract | Action accuracy | 1.0000 | pass |
+| **Extraction** | HM-Extract | Type accuracy | 1.0000 | pass |
+| **Promotion** | HM-Promotion | Auto-promote rate | 1.0000 | pass |
+| **Promotion** | HM-Promotion | Gate block accuracy | 1.0000 | pass |
+| **Safety** | HM-Safety | Block rate | 1.0000 | pass |
+| **Safety** | HM-Safety | False positive rate | 0.0000 | pass |
+| **Safety** | HM-Safety | Category accuracy | 1.0000 | pass |
+| **Product** | HM-Product | Precision vs CLAUDE.md | 2.2× | pass |
+| **Product** | HM-Product | Token savings | 73.6% | pass |
+| **Product** | HM-Product | Coverage | 0.5764 | aspirational (target: 0.60) |
+| **Product** | HM-Product | SNR multiplier | 3.24× | aspirational (target: 3.5×) |
+| **Temporal** | HM-Timeline | Latest-state accuracy | 1.0000 | pass |
+| **Temporal** | HM-Timeline | Ordering (aspirational) | — | 6 test.fails() |
+| **Scale** | HM-Scale | Recall degradation 50→500 | 0.0000 | pass |
+
+## Aspirational Test Tracking
+
+Tests using `test.fails()` — expected to fail now, will pass when P0/P1 features land:
+
+| Test | Benchmark | Required Feature | Current State |
+|------|-----------|-----------------|---------------|
+| P@5 ≥ 0.35 | HM-Activation | P1: Hierarchical retrieval | 0.30 (need +0.05) |
+| MRR ≥ 0.70 | HM-Activation | P0/P1: Scoring refinement | 0.67 (need +0.03) |
+| Coverage ≥ 0.60 | HM-Product | P1: Hierarchical retrieval | 0.576 (need +0.024) |
+| SNR ≥ 3.5× | HM-Product | P0: Evidence retention | 3.24× (need +0.26×) |
+| T01→T02 ordering | HM-Timeline | P1: Session-ordered retrieval | fails (no chronological order) |
+| T03→T04 ordering | HM-Timeline | P1: Intra-session ordering | fails (no chronological order) |
+| T03→T04→T08 progression | HM-Timeline | P1: Cross-session topic tracking | fails (no progression) |
+| T05→T07 progression | HM-Timeline | P1: Cross-session topic tracking | fails (no progression) |
+| Session 3 vs 6 comparison | HM-Timeline | P1: Session diversity + ordering | fails (no session order) |
+| Session 4 vs 6 comparison | HM-Timeline | P1: Session diversity + ordering | fails (no session order) |
+
+When any aspirational test starts PASSING, CI will FAIL — that's the signal to remove `test.fails()` and promote it to a regular test.
 
 ---
 
