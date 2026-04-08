@@ -73,7 +73,7 @@ Approved memories are injected into every AI turn. The 4-layer activation engine
 |--|-----------|----------------|
 | **Storage** | Single file, manual edit | SQLite (WASM, zero native deps) |
 | **Activation** | Dump everything every turn | 4-layer engine: right memory, right time |
-| **Search** | None | Vector + lexical (multilingual) |
+| **Search** | None | Vector + lexical hybrid |
 | **Lifecycle** | Edit the file yourself | Evidence → Dream → Human Review |
 | **Token Cost** | Full dump every turn | 73% savings via selective injection |
 | **Scaling** | Gets messy past 50 lines | Structured DB, handles hundreds |
@@ -156,7 +156,7 @@ No additional configuration needed. Database auto-created at `.harness-memory/me
 
 - **TypeScript** (strict mode, ESM only)
 - **sql.js** (SQLite via WASM, zero native dependencies)
-- **@xenova/transformers** + multilingual-e5-small (384d embeddings)
+- **@xenova/transformers** + e5-small (384d embeddings)
 - **MiniSearch** (BM25 lexical search)
 - **@opencode-ai/sdk** (LLM extraction)
 - **vitest** (316 tests)
