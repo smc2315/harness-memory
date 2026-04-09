@@ -215,6 +215,56 @@ async function main(): Promise<void> {
     commandsCreated += 1;
   }
 
+  // Ensure harness-memory is installed as a dependency in .opencode/
+  // so OpenCode can resolve "harness-memory/plugin" at runtime.
+  const opencodePkgDir = resolve(projectDir, ".opencode");
+  const opencodePkgPath = resolve(opencodePkgDir, "package.json");
+  let needsNpmInstall = false;
+
+  mkdirSync(opencodePkgDir, { recursive: true });
+
+  if (existsSync(opencodePkgPath)) {
+    try {
+      const pkg = JSON.parse(readFileSync(opencodePkgPath, "utf-8")) as Record<string, unknown>;
+      const deps = (pkg.dependencies ?? {}) as Record<string, string>;
+      if (!deps["harness-memory"]) {
+        deps["harness-memory"] = "latest";
+        pkg.dependencies = deps;
+        writeFileSync(opencodePkgPath, JSON.stringify(pkg, null, 2) + "\n", "utf-8");
+        needsNpmInstall = true;
+      }
+    } catch {
+      // Malformed package.json — recreate
+      writeFileSync(
+        opencodePkgPath,
+        JSON.stringify({ dependencies: { "harness-memory": "latest" } }, null, 2) + "\n",
+        "utf-8"
+      );
+      needsNpmInstall = true;
+    }
+  } else {
+    writeFileSync(
+      opencodePkgPath,
+      JSON.stringify({ dependencies: { "harness-memory": "latest" } }, null, 2) + "\n",
+      "utf-8"
+    );
+    needsNpmInstall = true;
+  }
+
+  if (needsNpmInstall) {
+    const { execSync } = await import("child_process");
+    try {
+      execSync("npm install", { cwd: opencodePkgDir, stdio: "pipe" });
+      createdFiles.push(opencodePkgPath);
+    } catch {
+      // npm install failed — inform user
+      console.error(
+        "[harness-memory] Warning: Could not run 'npm install' in .opencode/. " +
+        "Please run it manually: cd .opencode && npm install"
+      );
+    }
+  }
+
   const output = {
     projectDir,
     dbPath,
@@ -232,6 +282,7 @@ async function main(): Promise<void> {
   console.log("[harness-memory] Installed successfully!");
   console.log(`  Database:  ${dbPath}`);
   console.log(`  Config:    ${configPath}`);
+  console.log(`  Plugin:    harness-memory/plugin (installed in .opencode/)`);
   console.log(`  Commands:  ${commandsCreated} OpenCode slash commands`);
   if (importedMemories > 0) {
     console.log(`  Imported:  ${importedMemories} memories from existing rules`);
