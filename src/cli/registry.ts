@@ -10,6 +10,8 @@ import type { CommandRunner } from "./context";
 import { dbMigrateOptions, runDbMigrate } from "./commands/db-migrate";
 import { dbRollbackOptions, runDbRollback } from "./commands/db-rollback";
 import { doctorOptions, runDoctor } from "./commands/doctor";
+import { evalLatencyOptions, runEvalLatency } from "./commands/eval-latency";
+import { evalReplayOptions, runEvalReplay } from "./commands/eval-replay";
 import { installOptions, runInstall } from "./commands/install";
 import { runSnapshotRebuild, snapshotRebuildOptions } from "./commands/snapshot-rebuild";
 import { runStatus, statusOptions } from "./commands/status";
@@ -75,8 +77,8 @@ export const COMMANDS: readonly CommandDefinition[] = [
   // import
   { name: "import", group: "import", summary: "Import bullets from a file as human memories", usage: "[--from <file>] [--yes] [--sync]" },
   // eval
-  { name: "eval:latency", group: "eval", summary: "Hook latency against a 300-memory fixture", usage: "[--local]" },
-  { name: "eval:replay", group: "eval", summary: "Replay the recorded extraction fixtures", usage: "" },
+  { name: "eval:latency", group: "eval", summary: "Hook latency against a 300-memory fixture", usage: "[--local]", options: evalLatencyOptions, run: runEvalLatency },
+  { name: "eval:replay", group: "eval", summary: "Replay the recorded extraction fixtures", usage: "", options: evalReplayOptions, run: runEvalReplay },
   { name: "eval:live", group: "eval", summary: "Live extraction evaluation (later release)", usage: "" },
 ];
 
