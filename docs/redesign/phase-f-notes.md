@@ -170,8 +170,22 @@ caught something real, recorded below, and the fourth's remaining nits are liste
   2-character literal sits on the line; `sudo .* apt(-get)? .* install` — two `.*` before a literal the sparse sample
   lacks — is ≈ 2.7× and flips, which is why it is measured but not a fixture.
 
-    The per-runner ratios against this reference come from the `calibrate.yml` run on this commit and are recorded here in
-  the follow-up commit.
+    On the CI matrix (`calibrate.yml` run 42510808939 on 21b9b0c; 4 KB, min of five sweeps, ratio to the reference,
+  native / `--regexp-interpret-all`; the `.*\.env.*` interpreter cell is skipped where its 512 B sweep is already over
+  5 ms) every verdict came out as expected, and the CI run 42510808824 on the same commit was green on all five jobs:
+
+  | runner | reference | `curl .* \| (ba)?sh` | `cat .*\.env` | `curl .*\|.*sh` | `[a-z]+\s+[0-9]+`, `[a-z]+[0-9]*\s+x` | `.*\.env.*` | `echo .* > .*\.env` | `docker .* run .* -v .* /var/run/docker\.sock` | `sudo .* apt(-get)? .* install` (border) |
+  |---|---|---|---|---|---|---|---|---|---|
+  | ubuntu x64 (EPYC 7763) | 4.10 / 16.5 ms | 0.49 / 0.76 | 0.80 / 0.90 | 0.74 / 0.97 | 6.8–7.7 / 10–11 | 25 / — | 46 / 51 | 171 / 207 | 2.37 / 4.24 |
+  | Windows x64 (EPYC 9V45) | 2.26 / 10.5 ms | 0.49 / 0.64 | 0.80 / 0.70 | 0.56 / 0.76 | 5.1–6.5 / 11 | 22 / 22 | 37 / 47 | 160 / 171 | 2.47 / 3.74 |
+  | macOS x64 (i7-8700B) | 4.82 / 15.2 ms | 0.55 / 0.81 | 0.90 / 0.75 | 0.84 / 0.67 | 6.5–6.8 / 8.6–8.9 | 26 / — | 57 / 41 | 170 / 169 | 2.37 / 2.55 |
+  | macOS arm64 (M1) | 8.23 / 12.6 ms | 0.47 / 0.68 | 0.81 / 0.83 | 0.91 / 0.83 | 7.5–7.6 / 11–12 | 26 / — | 59 / 65 | 155 / 265 | 2.55 / 4.51 |
+  | author's desktop x64 (7800X3D) | 2.36 ms | 0.48 | 0.88 | 0.77 | 7.2–7.7 | 27 | 53 | 237 | 2.74 |
+
+  The 2.5× line keeps ≥ 2.6× margin to the costliest accepted fixture (0.97×, ubuntu with the interpreter; 0.91×
+  natively) and ≥ 2.0× to the cheapest refused one (5.1×, Windows native; ≥ 2.6× everywhere else), on every
+  architecture; the borderline `sudo` pattern flips between 2.4× and 4.5× as expected. The arm64 runner was an M1
+  this time (3.5× slower than the M2 Pro of the earlier run); the ratios did not move — which is the point.
 
   Superseded calibration against a linear scan (4 KB, min of five sweeps, ms per sweep and ratio to `[a-z]!`, which
   is 0.0076–0.0089 ms native and 0.087–0.10 ms interpreted on x64; `ci-fix/calib-*.log`; the last three rows are the
