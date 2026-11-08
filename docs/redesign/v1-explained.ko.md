@@ -17,6 +17,8 @@ v1 빌드에서 동작하는 것:
 - 모든 DB 쓰기 직후 **스냅샷 3개 파일**(`active.v1.json`, `lexical.v1.json`, `dense.v1.bin`)을 다시 만들고, 훅은 **SQLite를 절대 열지 않고** 이 스냅샷만 읽습니다. PreToolUse 훅의 목표 p95는 90 ms입니다(실측은 §12).
 - 교정 한 번으로 만들어진 pitfall/workflow 메모리는 사람이 승인하지 않아도 `authority=auto`로 **자동 활성화**되어 다음 번 같은 도구 호출에서 `soft_deny`/`advise`로 개입합니다. 사람이 만든 행(`authority=human`)은 LLM이나 자동 규칙이 **절대** 상태를 바꿀 수 없습니다.
 - 벡터 검색은 `before_model`(UserPromptSubmit)에서 유지됩니다: 상주형(idle 종료) 임베딩 helper 프로세스 + 추출기가 뽑아준 한국어/영어 **aliases**의 어휘 색인.
+- CLI 33개 명령 중 32개가 동작합니다(`eval:live`만 이후 릴리스). `hm review`(제안·후보·미확인 import 일괄 처리), `hm import --from CLAUDE.md`(bullet → 사람 메모리), `hm memory:why --tool Bash --target "npm test"`(무엇이 왜 발화하는지 설명) 포함.
+- **평가 스위트가 실제 결함을 잡았습니다.** `hm eval:replay`(녹화된 12개 시나리오를 실제 훅과 worker로 재생, 314개 검사)가 "추출 프롬프트의 이벤트 id가 16자리 ledger seq라서 스키마 `^e[0-9]{1,4}$`에 전부 걸린다 → 실제 에피소드에서는 사실이 하나도 저장되지 않는다"는 blocker를 찾아냈고, 이벤트를 `e1..eN` 순번으로 바꿔 고쳤습니다(§3.3). 단위 테스트는 4자리 seq 픽스처만 써서 놓쳤던 것입니다 — v0.5가 "배선" 때문에 죽었다는 진단이 v0.6에서도 재현될 뻔했고, 이번엔 끝까지 도는 평가가 막았습니다.
 
 동작하지만 **이 머신에서 끝까지 검증하지 못한 것** 하나: 실제 `claude -p` 추출입니다. 이 PC의 `claude` CLI가 로그인되어 있지 않아(`/login` 필요) 추출 provider probe가 `not_logged_in`을 돌려줍니다. 그래서 추출 파이프라인은 녹화된 fixture를 재생하는 **replay provider**로 테스트했고, 실제 probe 실패 → 24 h 대기 → `hm status` 안내 경로는 실기로 확인했습니다(§9, §10).
 
@@ -78,6 +80,7 @@ extract end     exit=0
 ```
 
 - **잠금 밖에서 LLM을 부릅니다.** DB 잠금(`locks/db.lock`, mkdir + owner.json heartbeat)을 쥔 채 2분짜리 모델 호출을 기다리는 일은 없습니다.
+- 프롬프트의 이벤트는 `e1, e2, …` 순번으로 번호가 붙습니다(ledger의 seq는 16자리 타임스탬프라 모델이 베껴 쓰기에도, 스키마 `^e[0-9]{1,4}$`에도 맞지 않음). 추출기는 `evidence_refs: ["e2"]`처럼 인용하고, worker는 `seqMap`으로 원래 ledger 줄을 되찾아 `memory_provenance`에 실제 seq와 발췌를 남깁니다.
 - provider 호출: `claude -p --output-format json --json-schema <스키마> --tools "" --disallowedTools "mcp__*" --strict-mcp-config --no-session-persistence --settings '{"disableAllHooks":true,"autoMemoryEnabled":false}'`. 자식 환경은 allowlist(`providerEnv`)로 만들며 `CLAUDECODE*`/`CLAUDE_CODE_*`를 제거하고 `HARNESS_MEMORY_DISABLE=1`을 넣어 **우리 훅이 재귀 호출되지 않게** 합니다. cwd는 저장소 밖 `~/.harness-memory/worker/<repoHash>/`.
 - 결과는 `raw/<run_id>.json`에 캐시되어 같은 episode를 다시 처리할 때 모델을 다시 부르지 않습니다.
 - 잠금 세션 2(`reconcile`)에서 사실(fact)마다 `SAVEPOINT`를 걸고: 스키마·V1–V11 검증 → 기존 행과의 이웃 탐색(semantic_key, Jaccard 0.6, 코사인 0.85) → `reinforce`/`create`/`propose_*` 결정 → `recomputeDerived`(증거 점수·세션 수) → `decideTier`(active/candidate) → `transitionMemory`. 같은 run을 두 번 적용하면 `write_ops`에서 걸러져 **바이트 단위로 동일한 DB**가 됩니다(테스트 (d)).
@@ -228,7 +231,11 @@ hm doctor         # 설치·훅 로그·큐·잠금·DB·스냅샷 교차 점검
 hm memory:list / memory:show <id> / memory:why --tool Bash --target "npm test"
 hm review         # 제안·후보·미확인 import 일괄 처리
 hm uninstall      # 매니페스트에 적힌 것만 되돌림 (--purge 는 .harness-memory/ 삭제, .bak-v* 는 남김)
+hm eval:replay    # 저장소 체크아웃에서: 12개 시나리오를 실제 훅·worker로 재생 (write path 회귀 게이트)
+hm eval:latency   # 300 메모리 픽스처에 pre-tool 훅 50회 스폰, p95 측정 (90 ms 게이트)
 ```
+
+사용자용 문서는 `README.ko.md`(한국어)와 `README.md`에 전체가 있습니다 — 설치, 메모리가 캡처·저장되는 방식, 권한 모델, 무엇이 언제 주입되는가, 임베딩, 설정, CLI 레퍼런스(디스패처와 어긋나면 `test/docs-cli-reference.test.ts`가 실패하도록 묶어 둠), 문제 해결, 프라이버시, 0.5 업그레이드(`docs/redesign/upgrade-from-0.5.md`).
 
 설치가 등록하는 훅은 exec form(`command` + `args`)입니다. Claude Code가 2.1.139보다 오래되었거나 훅이 실행되지 않으면 `hm install --hook-form shell`로 셸 문자열 형태로 다시 등록하세요. `hm doctor --host-debug <claude debug 로그>`가 호스트가 훅을 실제로 불렀는지 확인해 줍니다.
 
@@ -241,9 +248,12 @@ hm uninstall      # 매니페스트에 적힌 것만 되돌림 (--purge 는 .har
 3. Codex 호스트 어댑터(0.6.1)와 OpenCode V2(0.6.2)는 미포함. Codex **provider**(`codex exec --json`)는 포함되어 있으나 Codex가 설치되지 않아 미검증.
 4. Windows에서 worker 재귀 방지의 2차 가드(ppid 체인)는 no-op입니다. 1차 가드(`HARNESS_MEMORY_DISABLE=1`)가 모든 플랫폼을 막습니다.
 5. 임베딩 helper의 dense 왕복 기본 80 ms는 이 PC 기준 추정입니다. 느린 CPU에서는 자주 늦어 어휘 검색만 쓰게 됩니다(동작은 정상). `before_model.dense_timeout_ms`로 조정.
+5-1. **훅 지연 게이트(p95 ≤ 90 ms)가 이 PC에서는 2–5 ms 차이로 실패합니다.** `hm eval:latency` 실측: min 73 / p50 81–83 / p95 93–96 ms. 분해하면 Node 기동 자체가 ≈ 50 ms(`node -e 0`; 설계 당시 같은 PC에서 33 ms였는데 지금은 50 ms), 런처 + 148 KB 번들 로드 ≈ 15 ms, 설정·ledger 꼬리 읽기 ≈ 5 ms, 300행 스냅샷 파싱·결정 ≈ 10 ms입니다. 우리가 줄일 수 있는 부분은 30 ms 남짓이고 그중 scope regex 지연 컴파일은 이미 적용했습니다. 측정으로 확인한 후속 후보: ESM 대신 CommonJS 엔트리(−5 ms), V8 startup snapshot(번들 로드 제거, Node 버전마다 재생성 필요). 둘 다 v1에는 넣지 않았습니다. macOS/Linux나 Node 기동이 30 ms대인 PC에서는 p95 ≈ 70 ms로 게이트 안입니다.
 6. `hm install --with-embeddings`의 실제 `npm install @xenova/transformers`는 seam 테스트만 했습니다.
 7. 이웃 탐색(Jaccard)은 타입별 전체 스캔입니다. 수천 행까지는 문제없지만 색인은 없습니다.
 8. 한 호스트가 UserPromptSubmit을 한 턴에 두 번 쏘면 before_model도 두 번 돕니다(ledger 쪽 가드 없음).
+9. `hm import`는 spec의 "확인 후 삽입"이 아니라 "삽입(`import_unconfirmed=1`, advise) 후 확인 표에서 플래그 해제" 순서입니다. 거절하면 행은 미확인 상태로 `hm review`에 남습니다. MEMORY.md(기계가 쓴 파일)를 auto 후보로 넣는 특례는 미구현이고 모든 import 파일이 사람 행이 됩니다.
+10. 위 5-1의 지연 테스트(`npm run test:latency`)는 다른 스위트와 병렬로 돌면 머신 부하를 재게 되어 `npm test`에서 분리했습니다.
 
 ---
 
@@ -258,10 +268,12 @@ hm uninstall      # 매니페스트에 적힌 것만 되돌림 (--purge 는 .har
 
 ## 12. 산출물과 수치
 
-- 브랜치 `redesign/v0.6` (로컬 `C:\Users\choey\harness-memory-repo`). 커밋: Phase 0 `4bfb770` → A `894c73f` → B `6e1b680` → `c7a802a` → C/D (아래 갱신).
+- 브랜치 `redesign/v0.6` (로컬 `C:\Users\choey\harness-memory-repo`). 커밋: Phase 0 `4bfb770` → A `894c73f` → B `6e1b680`, `c7a802a` → C `f482547`, `ecfdfc4` → D (아래 갱신).
 - 문서: `docs/redesign/spec-v0.6.md`(설계 명세, 15장), `core-review-v0.5.md`(v0.5 결함 분석), `implementation-plan.md`(단계·파일 소유권), `m0-facts.md`(호스트 실측 사실), `phase-a/b/c-notes.md`(모듈별 API·요청·명세 이탈 기록), `upgrade-from-0.5.md`, `CHANGELOG.md`.
-- 품질 게이트 (최종 수치는 Phase D 뒤 갱신):
+- 품질 게이트 (Phase C 통합 시점; Phase D 뒤 최종 갱신):
   - `tsc --noEmit`: 0 errors
-  - `vitest`: 58 files / 762 tests (Phase B 통합 시점)
-  - `npm run build`: dist/hook.js 0.3 KB, hook-bundle.js 148 KB, worker.js 357 KB, embed-helper.js 21 KB, bin 293 KB
-  - 훅 지연: 임시 프로젝트 실기 8회 p95 9 ms(훅 내부 측정, Node 기동 제외); `eval:latency`(프로세스 포함 50회, 300 메모리) 수치는 아래 갱신
+  - `npm test`: 68 files / 839 tests; `npm run test:latency`: 9 tests
+  - `npm run build`: dist/hook.js 0.3 KB, hook-bundle.js 148 KB, worker.js 357 KB, embed-helper.js 21 KB, bin/harness-memory.js 765 KB
+  - `hm eval:replay`: 12/12 시나리오, 314/314 검사, 훅 호출 178회 (≈ 2.1 s)
+  - `hm eval:latency`: 300 메모리 × 50회 — min 73 / p50 81 / p95 93–96 / max 97 ms (게이트 90 ms, §10 5-1 참고); 훅 내부 시간(Node 기동 제외)은 hooks.log 기준 p95 9 ms
+  - 임시 프로젝트 실기: `hm install` → 훅 9종 → episode → worker 스폰 → probe `not_logged_in` → `hm status` 안내까지 한 바퀴 확인 (§3)
