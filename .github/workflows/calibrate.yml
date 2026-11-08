@@ -6,6 +6,13 @@ name: Regex budget calibration
 
 on:
   workflow_dispatch:
+  # A workflow can only be dispatched by hand once it exists on the default branch, so until then (and whenever the
+  # budget code or this calibration changes) a push of these files runs it.
+  push:
+    paths:
+      - scripts/regex-budget-calibration.mjs
+      - .github/workflows/calibrate.yml
+      - src/activation/signature.ts
 
 jobs:
   calibrate:
