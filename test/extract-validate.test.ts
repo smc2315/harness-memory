@@ -334,6 +334,22 @@ describe("intersection-set precedence (§5.6)", () => {
     expect(globalWorkflow.accepted).toHaveLength(1);
   });
 
+  test("import episodes are create-only (§11): propose_supersede / propose_stale are relabelled to create without a target", () => {
+    const bullet = "- Use pnpm test; the npm scripts were removed from this repository.";
+    const importLines = [promptLine(bullet, { seq: 1, turn_key: "import-2" })];
+    const descriptor = descriptorFor(importLines, { host: "import", close_reason: "import", ledger_ref: "import:CLAUDE.md#L3" });
+    const seqMap = seqMapOf(importLines);
+    const supersede = run([fact({ action: "propose_supersede", target_memory_id: "mem-1", evidence_refs: ["e1"], knowledge_kind: "convention", scope_glob: "**/*" })], descriptor, seqMap);
+    expect(supersede.accepted).toHaveLength(1);
+    expect(supersede.accepted[0]).toMatchObject({ action: "create", target_memory_id: null });
+    expect(supersede.accepted[0]?.relabels).toContain("import_create_only");
+    const stale = run([fact({ action: "propose_stale", target_memory_id: "mem-1", evidence_refs: ["e1"], knowledge_kind: "convention", scope_glob: "**/*" })], descriptor, seqMap);
+    expect(stale.accepted[0]).toMatchObject({ action: "create", target_memory_id: null });
+    // Outside import mode the same fact keeps proposing against its target.
+    const normal = run([fact({ action: "propose_supersede", target_memory_id: "mem-1" })]);
+    expect(normal.accepted[0]).toMatchObject({ action: "propose_supersede", target_memory_id: "mem-1" });
+  });
+
   test("tool-less correction episodes: canonical citation (`pnpm test` cites `pm test`), scope intersection skipped", () => {
     const s01Lines = loadLedgerFixture("s01-correction-only.jsonl").lines.filter((line) => line.turn_key === "p1");
     const descriptor = descriptorFor(s01Lines);

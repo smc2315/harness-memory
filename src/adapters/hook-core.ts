@@ -318,13 +318,39 @@ function itemIds(items: readonly InjectedItem[]): string[] {
 // Recursion guard 2: hooks fired by the worker's own headless CLI (POSIX /proc walk; Windows skipped)
 // ---------------------------------------------------------------------------------------------
 
-function parentPidOf(pid: number): number | null {
+/**
+ * A worker run is bounded (≤ 10 extract loops × ≤ 3 leases × 120 s provider wall clock, plus the embed /
+ * dream passes), so a `worker.pid` older than this was left behind by a killed worker; its pid may since
+ * have been reused by an unrelated process (e.g. the user's shell), so the file is ignored.
+ */
+export const WORKER_PID_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+/** Slack for coarse file-system mtimes when comparing a process start with the pid file's mtime. */
+const WORKER_PID_START_TOLERANCE_MS = 2_000;
+/** `/proc/<pid>/stat` starttime is in USER_HZ ticks since boot; USER_HZ is fixed at 100 in the /proc ABI. */
+const PROC_TICK_MS = 10;
+
+/** Fields of `/proc/<pid>/stat` after the `(comm)` token: [0] state, [1] ppid, …, [19] starttime. */
+function procStatFields(pid: number, procRoot: string): string[] | null {
   try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const close = stat.lastIndexOf(")");
-    const fields = stat.slice(close + 2).split(" ");
-    const ppid = Number.parseInt(fields[1] ?? "", 10);
-    return Number.isFinite(ppid) && ppid > 0 ? ppid : null;
+    const stat = readFileSync(`${procRoot}/${String(pid)}/stat`, "utf8");
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+  } catch {
+    return null;
+  }
+}
+
+function parentPidOf(pid: number, procRoot: string): number | null {
+  const ppid = Number.parseInt(procStatFields(pid, procRoot)?.[1] ?? "", 10);
+  return Number.isFinite(ppid) && ppid > 0 ? ppid : null;
+}
+
+/** Wall-clock start of `pid` in ms (`/proc/stat` btime + starttime ticks); null without /proc. */
+function processStartMs(pid: number, procRoot: string): number | null {
+  const startTicks = Number.parseInt(procStatFields(pid, procRoot)?.[19] ?? "", 10);
+  if (!Number.isFinite(startTicks)) return null;
+  try {
+    const btime = /^btime (\d+)$/m.exec(readFileSync(`${procRoot}/stat`, "utf8"));
+    return btime === null ? null : Number.parseInt(btime[1]!, 10) * 1000 + startTicks * PROC_TICK_MS;
   } catch {
     return null;
   }
@@ -334,21 +360,37 @@ function parentPidOf(pid: number): number | null {
  * True when `locks/worker.pid` names an ancestor of this process. On Windows there is no cheap parent
  * chain without spawning `wmic`/PowerShell (which would cost more than the hook itself), so the check
  * is skipped there; recursion guard 1 (`HARNESS_MEMORY_DISABLE=1` in `providerEnv()`) still applies.
+ *
+ * The file is removed only by a clean worker exit, so a killed worker leaves a stale pid that a later,
+ * unrelated process can inherit; honouring it would silently disable every hook with nothing left to
+ * spawn a worker that rewrites it. The pid is therefore validated: a file older than
+ * `WORKER_PID_MAX_AGE_MS` is ignored, and a matching ancestor must have started before the file was
+ * written (the worker writes the file after it starts; a reused pid belongs to a younger process).
  */
-export function spawnedByWorker(paths: Pick<HarnessPaths, "workerPid">, options: { platform?: NodeJS.Platform; ppid?: number; maxDepth?: number } = {}): boolean {
+export function spawnedByWorker(
+  paths: Pick<HarnessPaths, "workerPid">,
+  options: { platform?: NodeJS.Platform; ppid?: number; maxDepth?: number; procRoot?: string; nowMs?: number } = {}
+): boolean {
   const platform = options.platform ?? process.platform;
   if (platform === "win32") return false;
+  const procRoot = options.procRoot ?? "/proc";
   let workerPid: number;
+  let writtenMs: number;
   try {
     workerPid = Number.parseInt(readFileSync(paths.workerPid, "utf8").trim(), 10);
+    writtenMs = statSync(paths.workerPid).mtimeMs;
   } catch {
     return false;
   }
   if (!Number.isFinite(workerPid) || workerPid <= 1) return false;
+  if ((options.nowMs ?? Date.now()) - writtenMs > WORKER_PID_MAX_AGE_MS) return false;
   let current: number | null = options.ppid ?? process.ppid;
   for (let depth = 0; depth < (options.maxDepth ?? 6) && current !== null && current > 1; depth += 1) {
-    if (current === workerPid) return true;
-    current = parentPidOf(current);
+    if (current === workerPid) {
+      const startedMs = processStartMs(current, procRoot);
+      return startedMs === null || startedMs <= writtenMs + WORKER_PID_START_TOLERANCE_MS;
+    }
+    current = parentPidOf(current, procRoot);
   }
   return false;
 }
@@ -450,11 +492,15 @@ async function handlePrompt(input: NormalizedHookInput, runtime: HookRuntime): P
   const offset = ledgerSize(ctx.ledger);
   let state = ctx.state;
   let lastEpisodeId = state?.last_episode_id;
-  const openTurn = hasOpenTurn(state) && state.turn_start_offset < offset;
-  const prevStart = state === null ? 0 : openTurn ? state.turn_start_offset : (state.last_episode_range?.start ?? state.turn_start_offset);
+  // Window of the "previous turn" for the correction check (§5.1): the last closed episode by default,
+  // so a tail holding only marker / assistant lines appended after a Stop (SessionStart resume|compact,
+  // PreCompact, SessionEnd, a continued Stop) cannot hide that episode's tool_fail. An interrupted
+  // close below moves the window onto the segment it closes.
+  let prevStart = state === null ? 0 : (state.last_episode_range?.start ?? state.turn_start_offset);
 
   // (2) a turn without a close record → interrupted (Claude Code runs no Stop hook on interrupts).
-  if (hasOpenTurn(state) && openTurn) {
+  if (hasOpenTurn(state) && state.turn_start_offset < offset) {
+    const segmentStart = state.turn_start_offset;
     const closed = closeSegment({
       paths: runtime.paths,
       ledger: ctx.ledger,
@@ -468,6 +514,7 @@ async function handlePrompt(input: NormalizedHookInput, runtime: HookRuntime): P
       eof: offset,
     });
     if (closed !== null) {
+      prevStart = segmentStart;
       state = closed.state;
       lastEpisodeId = closed.descriptor.id;
       result.episodeId = closed.descriptor.id;

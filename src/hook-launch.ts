@@ -4,6 +4,9 @@
 import * as nodeModule from "node:module";
 
 (nodeModule as { enableCompileCache?: () => unknown }).enableCompileCache?.();
+// A failure after main() returned (a detached child's asynchronous `error`, a stray rejection) stays silent too.
+process.on("uncaughtException", () => { process.exitCode = 0; });
+process.on("unhandledRejection", () => { process.exitCode = 0; });
 
 const bundleSpecifier = "./hook-bundle.js";
 try {

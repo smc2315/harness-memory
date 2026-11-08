@@ -11,7 +11,7 @@ import type { HookForm, HookShell } from "./settings";
 
 export const MANIFEST_SCHEMA = "install-manifest.v1";
 
-export type ManifestFileRole = "settings" | "config" | "git_exclude" | "hook_script" | "worker_script";
+export type ManifestFileRole = "settings" | "config" | "git_exclude" | "git_ignore" | "hook_script" | "worker_script";
 
 export interface ManifestFile {
   path: string;

@@ -92,6 +92,33 @@ describe("extractScopeRefs", () => {
   test("plain words and numbers are not paths", () => {
     expect(extractScopeRefs("run the tests 3.14 v1.2 again")).toEqual([]);
   });
+
+  test("credential-shaped tokens never become scope refs (redacted like a ledger line, plus `NAME=value` secrets)", () => {
+    expect(extractScopeRefs("export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY && aws s3 ls")).toEqual([]);
+    expect(extractScopeRefs("GH_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123 npm run release -- dist/index.js")).toEqual(["dist/index.js"]);
+    expect(extractScopeRefs("curl -H 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789/ABCDEF' https://api.example.com/v1 -o out/result.json")).toEqual(["out/result.json"]);
+    expect(extractScopeRefs("curl -H Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789/ABCDEF -o out/result.json")).toEqual(["out/result.json"]);
+    expect(extractScopeRefs("echo secret=abc/def/ghi123 > src/a.txt")).toEqual(["src/a.txt"]);
+    expect(extractScopeRefs("git clone https://user:pa55word@example.com/org/repo.git vendor/repo")).toEqual(["vendor/repo"]);
+  });
+
+  test("`host:path`, `image:tag` and header-like tokens are not repository paths; drive prefixes still are", () => {
+    expect(extractScopeRefs("docker run repo/image:tag scp user@host:dir/file.txt .")).toEqual([]);
+    expect(extractScopeRefs("git clone git@github.com:org/repo.git src/vendor")).toEqual(["src/vendor"]);
+    expect(extractScopeRefs("C:/repo/src/a.ts", "C:/repo")).toEqual(["src/a.ts"]);
+  });
+
+  test("blob-like tokens and oversized ref lists are capped so a ledger line stays far below 32 KB", () => {
+    const blob = `${"A".repeat(20_000)}/${"B".repeat(20_000)}`;
+    expect(extractScopeRefs(`echo ${blob} | base64 -d > out/blob.bin`)).toEqual(["out/blob.bin"]);
+    const longest = `src/${"x".repeat(252)}`; // exactly 256 chars is kept, 257 is dropped
+    expect(extractScopeRefs(`cat ${longest} ${longest}y`)).toEqual([longest]);
+    const many = Array.from({ length: 60 }, (_, index) => `src/${"d".repeat(90)}/f${String(index).padStart(2, "0")}.ts`).join(" ");
+    const refs = extractScopeRefs(many);
+    expect(refs.length).toBeLessThan(50);
+    expect(refs.join("").length).toBeLessThanOrEqual(4000);
+    expect(refs[0]).toContain("f00.ts");
+  });
 });
 
 describe("pickTarget (§6.2 step 2)", () => {
@@ -111,6 +138,15 @@ describe("pickTarget (§6.2 step 2)", () => {
   test("bash targets are capped at 4,000 chars", () => {
     const picked = pickTarget("bash", { command: `echo ${"x".repeat(6000)}` });
     expect(picked.target?.length).toBe(4000);
+  });
+
+  test("bash: program tokens share the 256-char scope-ref cap and scope refs are redacted", () => {
+    const picked = pickTarget("bash", { command: `${"Z".repeat(600)} --flag src/a.ts` }, { dialect: "bash" });
+    expect(picked.programToken).toHaveLength(256);
+    expect(picked.scopeRefs).toEqual(["src/a.ts"]);
+    const secret = pickTarget("bash", { command: "export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY && aws s3 cp data/x.csv s3://b/" }, { dialect: "bash" });
+    expect(secret.scopeRefs).toEqual(["data/x.csv"]);
+    expect(secret.target).toContain("wJalrXUtnFEMI"); // the target itself is redacted by the ledger writer, not here
   });
 
   test("edit/write/read: repository-relative path", () => {

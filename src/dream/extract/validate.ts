@@ -277,6 +277,14 @@ function validateFact(original: ExtractionFact, ordinal: number, ctx: FactContex
   const missingRefs = fact.evidence_refs.filter((ref) => !ctx.seqMap.has(ref));
   if (missingRefs.length > 0) return reject("evidence_ref", `unknown refs: ${missingRefs.join(", ")}`);
 
+  // Import mode (§11): the extractor is restricted to `action = create`. A bullet states the file's own rule; it
+  // never proposes against stored memories (a replacement row born active/human would bypass §5.7 step 7), and
+  // the CLI's import upgrade path decides supersedes by lexical similarity.
+  if (ctx.mode.kind === "import" && (fact.action === "propose_supersede" || fact.action === "propose_stale")) {
+    fact = { ...fact, action: "create", target_memory_id: null };
+    relabels.push("import_create_only");
+  }
+
   // V7 — targets must exist: reinforce downgrades to create, propose_* is rejected.
   if (fact.action === "reinforce" || fact.action === "propose_supersede" || fact.action === "propose_stale") {
     const exists = fact.target_memory_id !== null && ctx.existingMemoryIds.has(fact.target_memory_id);

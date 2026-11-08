@@ -1,6 +1,8 @@
 import { describe, expect, test } from "vitest";
 
+import { toolGlobFamilies } from "../src/activation/tool-vocabulary";
 import { DEFAULT_CONFIG, type HarnessConfig } from "../src/core/config";
+import { PRE_TOOL_HOOKED_FAMILIES } from "../src/core/vocabulary";
 import {
   addDays,
   baseTtlDays,
@@ -157,6 +159,24 @@ describe("decideTier (§7.4)", () => {
     expect(isReachableTrigger({ type: "workflow", hasSignature: true, signatureTool: "edit|read", lifecycleTriggers: ["before_tool"] })).toBe(true);
     expect(isReachableTrigger({ type: "workflow", hasSignature: true, signatureTool: "mcp:github/*", lifecycleTriggers: ["before_tool"] })).toBe(true);
     expect(isReachableTrigger({ type: "workflow", hasSignature: true, signatureTool: "*", lifecycleTriggers: ["before_tool"] })).toBe(true);
+  });
+
+  test("isReachableTrigger resolves tool globs exactly like the validator's V11 and the PreToolUse matcher", () => {
+    const reaches = (glob: string) => isReachableTrigger({ type: "workflow", hasSignature: true, signatureTool: glob, lifecycleTriggers: ["before_tool"] });
+    const viaValidator = (glob: string) => toolGlobFamilies(glob).some((family) => (PRE_TOOL_HOOKED_FAMILIES as readonly string[]).includes(family));
+    // Prefix / infix / suffix globs that the runtime matcher resolves to a hooked family.
+    for (const glob of ["wr*", "*sh", "ba*sh", "ba*", "b*", "e*|read", "bash*", "mcp", "mcp:server/*", "*"]) {
+      expect(reaches(glob), glob).toBe(true);
+      expect(viaValidator(glob), glob).toBe(true);
+    }
+    // Globs that only resolve to families the hook does not deliver (or to nothing at all).
+    for (const glob of ["read|grep", "gr*", "re*", "*ob", "powershell", ""]) {
+      expect(reaches(glob), glob).toBe(false);
+      expect(viaValidator(glob), glob).toBe(false);
+    }
+    // The same signature therefore activates through decideTier instead of sticking as candidate(trigger).
+    expect(decideTier(input({}, { signatureTool: "wr*" }))).toMatchObject({ status: "active" });
+    expect(decideTier(input({}, { signatureTool: "gr*" }))).toEqual({ status: "candidate", reason: "trigger" });
   });
 
   test("baseTtlDays / addDays", () => {

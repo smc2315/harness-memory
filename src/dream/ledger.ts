@@ -239,7 +239,10 @@ export function readLedgerRangeLines(file: string, start: number, end: number): 
 // ---------------------------------------------------------------------------------------------
 
 export interface TailState {
-  /** `memory_id|tool` of every memory fired in the open turn (soft_deny / confirm once per turn). */
+  /**
+   * `memory_id|tool` of every memory and `rule:<code>|tool` of every rule fired in the open turn
+   * (soft_deny / confirm once per turn, also for a manual rule without a memory row).
+   */
   firedKeys: Set<string>;
   /** `scope_refs[0]` of the newest tool_ok / tool_fail line in the tail. */
   lastScopeRef: string | null;
@@ -273,6 +276,7 @@ export function deriveTailState(lines: readonly OffsetLedgerLine[], options: { t
       case "fired":
         if (inTurn) {
           for (const memoryId of line.memory_ids) firedKeys.add(firedKey(memoryId, line.tool));
+          for (const code of line.rule_codes) firedKeys.add(firedKey(`rule:${code}`, line.tool));
         }
         break;
       case "tool_fail":

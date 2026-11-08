@@ -3,15 +3,21 @@
  * rule and expiry side effects.
  */
 
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, describe, expect, test } from "vitest";
 import type { Database as SqlJsDatabase } from "sql.js";
 
+import { DEFAULT_CONFIG } from "../src/core/config";
 import { AuthorityViolationError } from "../src/core/errors";
+import { resolvePaths } from "../src/core/paths";
 import { ProposalRepository } from "../src/db/repositories/proposals";
 import { ProvenanceRepository } from "../src/db/repositories/provenance";
 import { TransitionRepository } from "../src/db/repositories/transitions";
-import { MemoryRepository } from "../src/memory/repository";
+import { runDream } from "../src/dream/consolidate";
+import { InvalidMemoryTransitionError, MemoryRepository } from "../src/memory/repository";
 import {
+  ProposalNotApplicableError,
   decideProposal,
   evaluateAutoDemotion,
   expireProposals,
@@ -19,6 +25,7 @@ import {
   parseProposalPayload,
   withProposalPayload,
 } from "../src/promotion/proposals";
+import { transitionMemory } from "../src/promotion/transitions";
 import { createTestDb } from "./helpers/create-test-db";
 import { T0, autoMemory, humanMemory, insertEpisode, isoPlus } from "./helpers/memory-fixtures";
 
@@ -34,6 +41,29 @@ beforeEach(async () => {
 
 function support(episodeId: string, sessionId: string, extra: { hasHumanSignal?: 0 | 1; deterministic?: 0 | 1 } = {}) {
   return { episodeId, sessionId, confidence: 0.8, ...extra };
+}
+
+/** `worker dream` on the database only (skipFiles: nothing under these paths is ever touched). */
+const dreamPaths = resolvePaths(join(tmpdir(), "hm-proposals-dream-unused"));
+async function dream(now: string) {
+  db.run("BEGIN");
+  try {
+    const op = await runDream(db, { paths: dreamPaths, config: DEFAULT_CONFIG, now, skipFiles: true });
+    db.run("COMMIT");
+    return op;
+  } catch (error) {
+    db.run("ROLLBACK");
+    throw error;
+  }
+}
+
+function captureError(fn: () => unknown): unknown {
+  try {
+    fn();
+  } catch (error) {
+    return error;
+  }
+  throw new Error("expected the call to throw");
 }
 
 describe("openOrSupportProposal", () => {
@@ -96,6 +126,31 @@ describe("decideProposal", () => {
     expect(memories.getById(target.id)?.status).toBe("active");
   });
 
+  test("accepting a supersede whose replacement is no longer live is refused before anything is written", () => {
+    const target = memories.create(humanMemory({ summary: "Old rule that must not dangle" }));
+    const replacement = memories.create(autoMemory({ summary: "Replacement the user already rejected", supersedesMemoryId: target.id }));
+    const opened = openOrSupportProposal(db, { kind: "supersede", targetMemoryId: target.id, candidateMemoryId: replacement.id, rationale: "r", confidence: 0.8, createdBy: "extractor", now: T0 });
+    // `hm memory:reject <replacement>` while the proposal is still open
+    transitionMemory(db, { memoryId: replacement.id, to: "rejected", actor: "human", reason: "cli:memory:reject", now: isoPlus(T0, { hours: 1 }) });
+
+    const error = captureError(() => decideProposal(db, { proposalId: opened.proposalId!, decidedBy: "human", accept: true, now: isoPlus(T0, { hours: 2 }) }));
+    expect(error).toBeInstanceOf(ProposalNotApplicableError);
+    expect(error).toBeInstanceOf(InvalidMemoryTransitionError);
+    expect(error).toMatchObject({ code: "candidate_not_live", proposalId: opened.proposalId, kind: "supersede" });
+    expect((error as Error).message).toContain("is rejected");
+
+    expect(memories.getById(target.id)).toMatchObject({ status: "active", supersededByMemoryId: null, contested: 1, openProposalId: opened.proposalId });
+    expect(memories.getById(replacement.id)?.status).toBe("rejected");
+    expect(proposals.getById(opened.proposalId!)?.status).toBe("open");
+    expect(new TransitionRepository(db).listForMemory(target.id)).toEqual([]);
+
+    // the way out is a reject: the proposal closes and the target is unflagged
+    const rejected = decideProposal(db, { proposalId: opened.proposalId!, decidedBy: "human", accept: false, now: isoPlus(T0, { hours: 3 }) });
+    expect(rejected.proposal.status).toBe("rejected");
+    expect(rejected.effects).toEqual([]);
+    expect(memories.getById(target.id)).toMatchObject({ status: "active", contested: 0, openProposalId: null });
+  });
+
   test("auto_rule may not accept activate_policy / activate_global / merge", () => {
     const target = memories.create(autoMemory({ type: "policy" }));
     const opened = openOrSupportProposal(db, { kind: "activate_policy", targetMemoryId: target.id, rationale: "r", confidence: 0.8, createdBy: "extractor", now: T0 });
@@ -139,6 +194,48 @@ describe("decideProposal", () => {
     expect(memories.getById(target.id)?.triggerSignature).toBeNull();
   });
 
+  test("a fix_scope / fix_signature proposal without a payload cannot be accepted: nothing is cleared, promoted or decided", () => {
+    // Exactly what migration 019 inserts for an R2 victim (needs_scope = 1): prose, no @payload.
+    const legacy = memories.create(autoMemory({ status: "active", scopeGlob: "**/*", needsScope: 1, lifecycleTriggers: ["before_model"], summary: "Legacy v0.5 row without a scope" }));
+    const fixScope = openOrSupportProposal(db, {
+      kind: "fix_scope",
+      targetMemoryId: legacy.id,
+      rationale: "v0.5 stored scope **/* and trigger before_model only; set scope, trigger and signature",
+      confidence: 0.5,
+      createdBy: "migration",
+      now: T0,
+      expiresInDays: 90,
+    });
+    const error = captureError(() => decideProposal(db, { proposalId: fixScope.proposalId!, decidedBy: "human", accept: true, now: T0 }));
+    expect(error).toBeInstanceOf(ProposalNotApplicableError);
+    expect(error).toMatchObject({ code: "payload_missing", kind: "fix_scope" });
+    expect(memories.getById(legacy.id)).toMatchObject({ scopeGlob: "**/*", lifecycleTriggers: ["before_model"], needsScope: 1, authority: "auto", status: "active", openProposalId: fixScope.proposalId });
+    expect(proposals.getById(fixScope.proposalId!)?.status).toBe("open");
+
+    // The consolidator's fix_signature rationale is prose as well.
+    const broken = { tool: "bash", target: "command", pattern_kind: "regex", pattern: "(a+)+$" } as const;
+    const human = memories.create(humanMemory({ triggerSignature: broken }));
+    const fixSignature = openOrSupportProposal(db, {
+      kind: "fix_signature",
+      targetMemoryId: human.id,
+      rationale: "stored signature does not compile (signature_regex_unsafe: catastrophic backtracking); the hooks ignore it",
+      confidence: 0.5,
+      createdBy: "consolidator",
+      now: T0,
+    });
+    expect(() => decideProposal(db, { proposalId: fixSignature.proposalId!, decidedBy: "human", accept: true, now: T0 })).toThrow(ProposalNotApplicableError);
+    expect(memories.getById(human.id)?.triggerSignature).toEqual(broken);
+    expect(proposals.getById(fixSignature.proposalId!)?.status).toBe("open");
+
+    // Rejecting stays possible and is the only decision such a proposal takes.
+    expect(decideProposal(db, { proposalId: fixSignature.proposalId!, decidedBy: "human", accept: false, now: T0 }).proposal.status).toBe("rejected");
+
+    // With a payload the same kind still applies it (the 019 proposal could be re-opened with one by a future editor).
+    const withPayload = openOrSupportProposal(db, { kind: "fix_scope", targetMemoryId: legacy.id, rationale: withProposalPayload("set the scope", { scope_glob: "src/db/**" }), confidence: 0.5, createdBy: "migration", now: isoPlus(T0, { hours: 1 }), rejectSkipDays: 0 });
+    expect(withPayload.created).toBe(false);
+    expect(withPayload.proposalId).toBe(fixScope.proposalId);
+  });
+
   test("accepting revalidate extends the TTL and returns a stale row to active", () => {
     const target = memories.create(autoMemory({ status: "active", knowledgeKind: "correction", ttlExpiresAt: isoPlus(T0, { days: -1 }), validationCount: 0 }));
     insertEpisode(db, { id: "ep-origin", session_id: "s1" });
@@ -149,6 +246,39 @@ describe("decideProposal", () => {
     const row = memories.getById(target.id)!;
     expect(Date.parse(row.ttlExpiresAt!)).toBeGreaterThan(Date.parse(T0));
     expect(row.status).toBe("active");
+  });
+
+  test("rejecting a revalidate by a human stales the row as ttl_expired and the next dream does not re-propose it", async () => {
+    const target = memories.create(autoMemory({ status: "active", knowledgeKind: "correction", ttlExpiresAt: isoPlus(T0, { days: 30 }), summary: "Correction whose TTL ran out" }));
+    const atTtl = await dream(isoPlus(T0, { days: 31 }));
+    expect(atTtl.report.revalidateProposals).toHaveLength(1);
+    const proposalId = atTtl.report.revalidateProposals[0]!;
+
+    const rejectedAt = isoPlus(T0, { days: 31, hours: 1 });
+    const result = decideProposal(db, { proposalId, decidedBy: "human", accept: false, now: rejectedAt });
+    expect(result.proposal).toMatchObject({ status: "rejected", decidedBy: "human" });
+    expect(result.effects).toEqual(["target:stale(ttl_expired)"]);
+    expect(result.memories.map((memory) => memory.id)).toEqual([target.id]);
+    expect(memories.getById(target.id)).toMatchObject({ status: "stale", statusReason: "ttl_expired", authority: "auto", contested: 0, openProposalId: null });
+    expect(new TransitionRepository(db).listForMemory(target.id)).toEqual([
+      expect.objectContaining({ fromStatus: "active", toStatus: "stale", actor: "human", proposalId, reason: "proposal:revalidate rejected", createdAt: rejectedAt }),
+    ]);
+
+    // Six hours later (dream.interval_hours) the consolidator finds no active row at its TTL: no second proposal.
+    const next = await dream(isoPlus(T0, { days: 31, hours: 7 }));
+    expect(next.report.revalidateProposals).toEqual([]);
+    expect(next.report.staled).toEqual([]);
+    expect(proposals.listOpen({ targetId: target.id })).toEqual([]);
+    expect(proposals.listForMemory(target.id)).toHaveLength(1);
+    expect(memories.getById(target.id)?.status).toBe("stale");
+
+    // A revalidate rejected on a row that is no longer active changes nothing.
+    const other = memories.create(autoMemory({ status: "active", knowledgeKind: "correction", ttlExpiresAt: isoPlus(T0, { days: -1 }), summary: "Already demoted meanwhile" }));
+    const opened = openOrSupportProposal(db, { kind: "revalidate", targetMemoryId: other.id, rationale: "ttl", confidence: 0.8, createdBy: "consolidator", now: T0 });
+    transitionMemory(db, { memoryId: other.id, to: "stale", actor: "human", reason: "cli:memory:demote", now: T0 });
+    const unchanged = decideProposal(db, { proposalId: opened.proposalId!, decidedBy: "human", accept: false, now: isoPlus(T0, { hours: 1 }) });
+    expect(unchanged.effects).toEqual([]);
+    expect(memories.getById(other.id)).toMatchObject({ status: "stale", statusReason: "human" });
   });
 
   test("accepting merge keeps the older row with the max enforcement and merged aliases; the loser is superseded", () => {
@@ -208,6 +338,21 @@ describe("evaluateAutoDemotion", () => {
     openOrSupportProposal(db, { kind: "stale", targetMemoryId: target.id, rationale: "r", confidence: 0.8, createdBy: "extractor", now: T0, support: support("ep-s4", "s4", { hasHumanSignal: 1 }) });
     expect(evaluateAutoDemotion(db, { proposalId: opened.proposalId!, now: T0 }).applied).toBe(true);
     expect(memories.getById(target.id)?.status).toBe("stale");
+  });
+
+  test("a supersede whose replacement expired as a candidate is not applied by the auto rule", () => {
+    const target = activeAuto("Auto row with a dead replacement", { id: "ep-o3" });
+    const replacement = memories.create(autoMemory({ summary: "Replacement that expired first", supersedesMemoryId: target.id, createdAt: isoPlus(T0, { days: -50 }), updatedAt: isoPlus(T0, { days: -50 }) }));
+    insertEpisode(db, { id: "ep-s5", session_id: "s5" });
+    insertEpisode(db, { id: "ep-s6", session_id: "s6" });
+    const opened = openOrSupportProposal(db, { kind: "supersede", targetMemoryId: target.id, candidateMemoryId: replacement.id, rationale: "r", confidence: 0.8, createdBy: "extractor", now: T0, support: support("ep-s5", "s5") });
+    openOrSupportProposal(db, { kind: "supersede", targetMemoryId: target.id, candidateMemoryId: replacement.id, rationale: "r", confidence: 0.8, createdBy: "extractor", now: T0, support: support("ep-s6", "s6") });
+    // consolidate (3) with retention.proposal_days >= candidate_days: the candidate expires before the proposal does
+    transitionMemory(db, { memoryId: replacement.id, to: "rejected", actor: "expiry", reason: "candidate older than 45 d", now: T0, statusReason: "expiry" });
+
+    expect(evaluateAutoDemotion(db, { proposalId: opened.proposalId!, now: T0 })).toEqual({ applied: false, reason: "candidate_not_live" });
+    expect(memories.getById(target.id)).toMatchObject({ status: "active", supersededByMemoryId: null });
+    expect(proposals.getById(opened.proposalId!)?.status).toBe("open");
   });
 
   test("human targets and policy rows are never demoted automatically", () => {

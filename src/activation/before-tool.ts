@@ -219,8 +219,8 @@ export function decideBeforeTool(params: DecideBeforeToolParams): BeforeToolDeci
     else suppressed.push(outcome.suppression);
   }
 
-  // Step 7: derived / manual policy rules through the shared matcher.
-  const engine = PolicyEngine.fromSnapshotRules(loaded.snapshot.rules);
+  // Step 7: derived / manual policy rules through the shared matcher (derived rules reuse their memory's precompiled signature).
+  const engine = PolicyEngine.fromSnapshotRules(loaded.snapshot.rules, loaded.byId);
   const evaluation = engine.evaluate({
     lifecycleTrigger: "before_tool",
     scopeRef: input.scopeRefs[0] ?? "",

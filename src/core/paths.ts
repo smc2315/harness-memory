@@ -1,13 +1,15 @@
 /**
  * Where state lives (spec §3.2). Everything project-scoped is under `<root>/.harness-memory/`;
  * the user-level directory `~/.harness-memory/` holds the headless-CLI cwd, the embedding model
- * cache and the untouched v0.5 global database.
+ * cache and the untouched v0.5 global database. The one exception is the embedding helper's
+ * rendezvous point (`embedHelperSocket`), which is keyed by `repoHash` and lives outside the
+ * repository on every platform — see `embedHelperSocketPath`.
  */
 
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, posix, resolve, sep } from "node:path";
 
 export const HARNESS_DIR_NAME = ".harness-memory";
 export const DB_FILE_NAME = "memory.sqlite";
@@ -71,10 +73,7 @@ export function resolvePaths(root: string): HarnessPaths {
     workerLock: join(locksDir, "worker.lock"),
     workerPid: join(locksDir, "worker.pid"),
     embedHelperPid: join(locksDir, "embed-helper.pid"),
-    embedHelperSocket:
-      process.platform === "win32"
-        ? `\\\\.\\pipe\\harness-memory-embed-${hash}`
-        : join(locksDir, "embed-helper.sock"),
+    embedHelperSocket: embedHelperSocketPath(hash),
     logsDir: join(dir, "logs"),
     hooksLog: join(dir, "logs", "hooks.log"),
     workerLog: join(dir, "logs", "worker.log"),
@@ -84,6 +83,40 @@ export function resolvePaths(root: string): HarnessPaths {
     legacyConversationBuffer: join(dir, ".conversation-buffer.json"),
     legacyExtractState: join(dir, ".dream-extract-state.json"),
   };
+}
+
+export interface EmbedSocketOptions {
+  platform?: NodeJS.Platform;
+  env?: NodeJS.ProcessEnv;
+  /** POSIX fallback when `XDG_RUNTIME_DIR` is unset; defaults to `os.tmpdir()`. */
+  tmpDir?: string;
+}
+
+/**
+ * Rendezvous point between the `prompt` hook and the embedding helper: the named pipe
+ * `\\.\pipe\harness-memory-embed-<repoHash>` on Windows and, on POSIX, the socket
+ * `harness-memory-embed-<repoHash>.sock` in the per-user runtime directory (`$XDG_RUNTIME_DIR`, else the
+ * temp dir). It deliberately does not live under `<root>/.harness-memory/`: `sockaddr_un.sun_path` holds
+ * at most 107 (Linux) / 103 (macOS, BSD) bytes, so a socket under a deep checkout makes `bind()` /
+ * `connect()` fail with EINVAL on Node ≥ 24 and get silently truncated on Node 20/22. The hook and the
+ * detached helper see the same `XDG_RUNTIME_DIR` / `TMPDIR` (`providerEnv` forwards both).
+ */
+export function embedHelperSocketPath(repoHash: string, options: EmbedSocketOptions = {}): string {
+  const platform = options.platform ?? process.platform;
+  if (platform === "win32") return `\\\\.\\pipe\\harness-memory-embed-${repoHash}`;
+  const env = options.env ?? process.env;
+  const runtimeDir = env.XDG_RUNTIME_DIR || options.tmpDir || tmpdir();
+  return posix.join(runtimeDir, `harness-memory-embed-${repoHash}.sock`);
+}
+
+/** Usable bytes of `sockaddr_un.sun_path` (its size minus the terminating NUL): 107 on Linux, 103 on macOS and the BSDs. */
+export function unixSocketPathMaxBytes(platform: NodeJS.Platform = process.platform): number {
+  return platform === "linux" ? 107 : 103;
+}
+
+/** True when `listen()` / `connect()` would reject this socket path (Node ≥ 24: EINVAL) or truncate it (Node 20/22). */
+export function unixSocketPathTooLong(socketPath: string, platform: NodeJS.Platform = process.platform): boolean {
+  return Buffer.byteLength(socketPath, "utf8") > unixSocketPathMaxBytes(platform);
 }
 
 /** Directories a writer must ensure exist (hooks create them lazily with mkdirSync recursive). */

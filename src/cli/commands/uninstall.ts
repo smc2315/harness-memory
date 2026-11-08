@@ -14,7 +14,7 @@ import type { CommandContext } from "../context";
 import { flagBoolean, type OptionSpecs } from "../lib/args";
 import { readPidFile } from "../lib/diagnostics";
 import { readManifest, type InstallManifest } from "../lib/manifest";
-import { GIT_EXCLUDE_LINE, gitExcludeFile, projectSettingsFile, userSettingsFile } from "../lib/paths";
+import { GIT_EXCLUDE_LINE, projectSettingsFile, stateGitignoreFile, userSettingsFile } from "../lib/paths";
 import { readSettingsFile, SettingsParseError, stripHarnessHooks, writeSettingsFile } from "../lib/settings";
 
 export const uninstallOptions: OptionSpecs = {
@@ -64,9 +64,9 @@ export function cleanupSettingsFile(file: string, deleteWhenEmpty: boolean): Set
   }
 }
 
-export function removeGitExcludeLine(root: string): boolean {
-  const file = gitExcludeFile(root);
-  if (file === null || !existsSync(file)) return false;
+/** Drops GIT_EXCLUDE_LINE from the exclude file the manifest recorded (install resolved it, worktree pointers included). */
+export function removeGitExcludeLine(file: string): boolean {
+  if (!existsSync(file)) return false;
   const content = readFileSync(file, "utf8");
   const lines = content.split(/\r?\n/);
   const kept = lines.filter((line) => {
@@ -78,7 +78,10 @@ export function removeGitExcludeLine(root: string): boolean {
   return true;
 }
 
-/** Deletes everything under `.harness-memory/` except `*.bak-v<N>`; the directory stays only when backups remain. */
+/**
+ * Deletes everything under `.harness-memory/` except `*.bak-v<N>`; the directory stays only when backups
+ * remain, and then its `.gitignore` stays with them (a backup is a full database and must not be committed either).
+ */
 export function purgeHarnessDir(paths: HarnessPaths): { kept: string[]; removed: string[]; errors: string[] } {
   const kept: string[] = [];
   const removed: string[] = [];
@@ -89,12 +92,14 @@ export function purgeHarnessDir(paths: HarnessPaths): { kept: string[]; removed:
   } catch {
     return { kept, removed, errors };
   }
+  const gitIgnore = stateGitignoreFile(paths);
   for (const name of names) {
     const target = join(paths.dir, name);
     if (BACKUP_PATTERN.test(name)) {
       kept.push(target);
       continue;
     }
+    if (target === gitIgnore) continue;
     try {
       rmSync(target, { recursive: true, force: true });
       removed.push(target);
@@ -109,6 +114,8 @@ export function purgeHarnessDir(paths: HarnessPaths): { kept: string[]; removed:
     } catch (error) {
       errors.push(`${paths.dir}: ${error instanceof Error ? error.message : String(error)}`);
     }
+  } else if (kept.length > 0 && existsSync(gitIgnore)) {
+    kept.push(gitIgnore);
   }
   return { kept, removed, errors };
 }
@@ -120,7 +127,7 @@ export function renderUninstallReport(report: UninstallReport): string[] {
     else if (entry.deleted_file) lines.push(`  settings    ${entry.file}: removed ${String(entry.removed)} hook entries, deleted the now-empty file`);
     else lines.push(`  settings    ${entry.file}: removed ${String(entry.removed)} hook entries`);
   }
-  if (report.git_exclude_removed) lines.push(`  git         ${GIT_EXCLUDE_LINE} removed from .git/info/exclude`);
+  if (report.git_exclude_removed) lines.push(`  git         ${GIT_EXCLUDE_LINE} removed from git's exclude file`);
   lines.push(`  manifest    ${report.manifest_removed ? "removed" : "none"}`);
   if (report.purged) {
     lines.push(`  purge       removed ${String(report.removed_paths.length)} entries under .harness-memory/`);
@@ -149,7 +156,7 @@ export async function runUninstall(ctx: CommandContext): Promise<number> {
   }
   for (const entry of settings) if (entry.error !== null) errors.push(entry.error);
 
-  const gitExcludeRemoved = manifest?.git_exclude?.added === true ? removeGitExcludeLine(ctx.paths.root) : false;
+  const gitExcludeRemoved = manifest !== null && manifest.git_exclude !== null && manifest.git_exclude.added ? removeGitExcludeLine(manifest.git_exclude.path) : false;
 
   let manifestRemoved = false;
   if (existsSync(ctx.paths.manifest)) {

@@ -29,6 +29,8 @@ export interface CliSeams {
   runNpm?: (args: readonly string[], cwd: string) => NpmRunResult;
   /** Extraction provider for the install probe; `undefined` → selectProvider(config), `null` → none. */
   provider?: ExtractionProvider | null;
+  /** Files git tracks under `pathspec` in the project (`git ls-files`); null when git or a repository is absent. */
+  gitTrackedFiles?: (root: string, pathspec: string) => string[] | null;
   /** Wall clock in ms for relative times (default Date.now). */
   nowMs?: () => number;
 }

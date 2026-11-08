@@ -5,6 +5,7 @@
  * input becomes a null/false fact plus an `error` string, never an exception.
  */
 
+import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 
 import { isSnapshotStale, readActiveSnapshot } from "../../activation/snapshot-reader";
@@ -22,6 +23,24 @@ import type { Store } from "../../db/store";
 import { readLastProbe, type ProbeCache } from "../../dream/extract/providers";
 import { isProcessAlive } from "../../core/process";
 import { spawnTouchFile } from "../../embed/client";
+import { findExecutable } from "./paths";
+
+/**
+ * Paths git tracks under `pathspec` in the work tree at `root` (`git ls-files -z`), so `doctor` can warn
+ * when `.harness-memory/` was committed before its `.gitignore` existed. Null when git is not on PATH, `root`
+ * is not inside a repository or git fails. git is spawned by absolute path, never through a shell.
+ */
+export function readGitTrackedFiles(root: string, pathspec: string, env: NodeJS.ProcessEnv = process.env): string[] | null {
+  const git = findExecutable(process.platform === "win32" ? ["git.exe"] : ["git"], env);
+  if (git === null) return null;
+  try {
+    const run = spawnSync(git, ["ls-files", "-z", "--", pathspec], { cwd: root, encoding: "utf8", windowsHide: true, timeout: 10_000, env });
+    if (run.error !== undefined || run.status !== 0) return null;
+    return run.stdout.split("\0").filter((entry) => entry.length > 0);
+  } catch {
+    return null;
+  }
+}
 
 export interface DbFacts {
   exists: boolean;

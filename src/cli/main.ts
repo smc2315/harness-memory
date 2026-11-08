@@ -25,6 +25,8 @@ export interface RunCliOptions {
   clock?: () => string;
   /** Answers confirmation prompts (tests); default asks on a TTY and refuses otherwise. */
   confirm?: (question: string) => Promise<boolean>;
+  /** The harness-memory package directory (default: found from this bundle); null when it is unknown. */
+  packageRoot?: string | null;
   seams?: CliSeams;
 }
 
@@ -92,7 +94,7 @@ export async function runCli(argv: readonly string[], options: RunCliOptions = {
   const streams = options.streams ?? processStreams;
   const env = options.env ?? process.env;
   const cwd = options.cwd ?? process.cwd();
-  const packageRoot = findPackageRoot();
+  const packageRoot = options.packageRoot === undefined ? findPackageRoot() : options.packageRoot;
   const version = readPackageVersion(packageRoot);
   const debug = env.HARNESS_MEMORY_DEBUG === "1";
 

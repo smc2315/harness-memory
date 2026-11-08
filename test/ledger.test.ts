@@ -195,6 +195,17 @@ describe("deriveTailState (§6.2 step 4)", () => {
     expect(state.openTurnHasLines).toBe(true);
   });
 
+  test("a rule-only fired line (manual rule, no memory row) enters firedKeys as rule:<code>|tool", () => {
+    const manual = withOffsets([
+      promptLine("push it", { turn_key: "t2", seq: 1 }),
+      firedLine([], { turn_key: "t2", seq: 2, tool: "bash", rule_codes: ["MANUAL_FORCE_PUSH"] }),
+    ]);
+    const open = deriveTailState(manual, { turnStartOffset: 0 });
+    expect([...open.firedKeys]).toEqual(["rule:MANUAL_FORCE_PUSH|bash"]);
+    const closed = deriveTailState(manual, { turnStartOffset: manual[1]!.offset + manual[1]!.length });
+    expect(closed.firedKeys.size).toBe(0);
+  });
+
   test("an offset past the end means no open-turn lines", () => {
     const last = lines[lines.length - 1]!;
     const state = deriveTailState(lines, { turnStartOffset: last.offset + last.length });

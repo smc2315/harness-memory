@@ -57,6 +57,7 @@ import { decideTier, enforcementDefault } from "../promotion/authority";
 import { evaluateAutoDemotion, openOrSupportProposal } from "../promotion/proposals";
 import { revalidateMemory } from "../promotion/revalidate";
 import { transitionMemory } from "../promotion/transitions";
+import { scanMemoryContent } from "../security/scanner";
 import { renderEventLine } from "./extract/prompt";
 import type { ValidatedFact, ValidationResult } from "./extract/validate";
 
@@ -389,6 +390,11 @@ export interface ExtractionFailureInput {
   attemptCount: number;
   outcomes?: readonly FactOutcome[];
   factsTotal?: number;
+  /**
+   * True when the failure describes the provider, not this episode (a probe that timed out or returned garbage
+   * before any extraction call): the episode waits like a `no_provider` one instead of burning an attempt.
+   */
+  providerUnavailable?: boolean;
 }
 
 export interface ExtractionFailureResult {
@@ -428,7 +434,7 @@ export function recordExtractionFailure(db: SqlJsDatabase, input: ExtractionFail
   });
 
   const op: WriteOp = { id: null, kind: "extract:failed", noop: true, wrote: true };
-  if (isProviderUnavailable(input.status)) {
+  if (input.providerUnavailable === true || isProviderUnavailable(input.status)) {
     const nextAttemptAt = addMs(input.now, PROVIDER_UNAVAILABLE_RETRY_MS);
     episodes.requeue(input.episodeId, { nextAttemptAt, undoAttempt: true, lastError: oneLine(`${input.status}: ${input.error}`, 2_000) });
     return { op, disposition: "waiting", nextAttemptAt };
@@ -666,7 +672,14 @@ function supportFor(state: RunState, target: MemoryRecord, confidence: number) {
   };
 }
 
-function proposeAgainst(state: RunState, normalized: NormalizedFact, target: MemoryRecord, kind: "supersede" | "stale", candidate: MemoryRecord | null): FactOutcome {
+interface ProposalStep {
+  proposalId: string;
+  /** `auto_demotion:<effects>` when the §5.7 step 6 rule fired, else the support counts. */
+  detail: string;
+}
+
+/** `memory_provenance(contradict)` + openOrSupportProposal + the auto demotion rule; null when a recent reject skips it. */
+function supportProposal(state: RunState, normalized: NormalizedFact, target: MemoryRecord, kind: "supersede" | "stale", candidate: MemoryRecord | null): ProposalStep | null {
   const { fact } = normalized;
   insertProvenance(state, target.id, fact, "contradict");
   const opened = openOrSupportProposal(state.db, {
@@ -680,18 +693,52 @@ function proposeAgainst(state: RunState, normalized: NormalizedFact, target: Mem
     expiresInDays: state.ctx.config.retention.proposal_days,
     support: supportFor(state, target, fact.confidence),
   });
-  if (opened.proposalId === null) {
-    return outcomeFor(fact, "skipped", { rejection: "skipped_recent_reject", memory_id: target.id, detail: "proposal rejected within 30 days" }, normalized.relabels);
-  }
+  if (opened.proposalId === null) return null;
   state.proposalIds.push(opened.proposalId);
   const demotion = evaluateAutoDemotion(state.db, { proposalId: opened.proposalId, now: state.ctx.now, runId: state.runId });
   const detail = demotion.applied ? `auto_demotion:${demotion.decision?.effects.join("|") ?? ""}` : `support=${String(opened.supportCount)}/${String(opened.supportSessions)} (${demotion.reason})`;
+  return { proposalId: opened.proposalId, detail };
+}
+
+function proposeAgainst(state: RunState, normalized: NormalizedFact, target: MemoryRecord, kind: "supersede" | "stale", candidate: MemoryRecord | null): FactOutcome {
+  const { fact } = normalized;
+  const step = supportProposal(state, normalized, target, kind, candidate);
+  if (step === null) {
+    return outcomeFor(fact, "skipped", { rejection: "skipped_recent_reject", memory_id: target.id, detail: "proposal rejected within 30 days" }, normalized.relabels);
+  }
   return outcomeFor(
     fact,
     kind === "supersede" ? "superseded_proposed" : "proposed",
-    { memory_id: candidate?.id ?? target.id, proposal_id: opened.proposalId, detail },
+    { memory_id: candidate?.id ?? target.id, proposal_id: step.proposalId, detail: step.detail },
     normalized.relabels
   );
+}
+
+function isLiveRow(memory: MemoryRecord): boolean {
+  return (LIVE_STATUSES as readonly MemoryStatus[]).includes(memory.status);
+}
+
+/** True when `candidate` is the replacement row an earlier run proposed for `target` (§5.7 step 6). */
+function isReplacementOf(state: RunState, candidate: MemoryRecord, target: MemoryRecord): boolean {
+  if (candidate.id === target.id) return false;
+  return candidate.supersedesMemoryId === target.id || state.proposals.findOpen("supersede", target.id, candidate.id) !== null;
+}
+
+/**
+ * A later session that reproduces an existing replacement row (`reinforce` on it, or a `create` that collapsed into
+ * its live twin) is the same claim as the open `supersede` proposal(s) carrying that row as candidate: add this
+ * session's support so the two-session rule of §5.7 step 6 can supersede the target and activate the replacement.
+ */
+function supportReplacementProposals(state: RunState, normalized: NormalizedFact, candidate: MemoryRecord): ProposalStep | null {
+  if (candidate.authority !== "auto" || candidate.status !== "candidate") return null;
+  let step: ProposalStep | null = null;
+  for (const proposal of state.proposals.listOpen({ kind: "supersede", candidateId: candidate.id })) {
+    const target = state.repository.getById(proposal.targetMemoryId);
+    if (target === null || !isLiveRow(target)) continue;
+    const supported = supportProposal(state, normalized, target, "supersede", candidate);
+    if (supported !== null) step = step === null ? supported : { proposalId: step.proposalId, detail: `${step.detail}; ${supported.detail}` };
+  }
+  return step;
 }
 
 function applyFact(state: RunState, fact: ValidatedFact): FactOutcome {
@@ -710,7 +757,16 @@ function applyFact(state: RunState, fact: ValidatedFact): FactOutcome {
       }
       const step = twin !== null ? reinforceRow(state, normalized, twin) : createRow(state, normalized, null);
       if (step.kind === "skipped") return step.outcome;
-      return outcomeFor(fact, step.kind, { memory_id: step.memory.id, detail: step.kind === "reinforced" && twin !== null ? `target=${twin.id}` : undefined }, normalized.relabels);
+      const outcome = outcomeFor(fact, step.kind, { memory_id: step.memory.id, detail: step.kind === "reinforced" && twin !== null ? `target=${twin.id}` : undefined }, normalized.relabels);
+      if (step.kind === "reinforced") {
+        // Reinforcing a proposed replacement row supports its open supersede proposal (same claim, §7.5).
+        const supported = supportReplacementProposals(state, normalized, step.memory);
+        if (supported !== null) {
+          outcome.proposal_id = supported.proposalId;
+          outcome.detail = outcome.detail === undefined ? supported.detail : `${outcome.detail}; ${supported.detail}`;
+        }
+      }
+      return outcome;
     }
     case "propose_supersede": {
       const resolved = target ?? sameKey;
@@ -723,6 +779,9 @@ function applyFact(state: RunState, fact: ValidatedFact): FactOutcome {
       const replacement = createRow(state, normalized, resolved);
       if (replacement.kind === "skipped") return replacement.outcome;
       if (replacement.kind === "reinforced") {
+        // The replacement already exists (an earlier session proposed it): the same (supersede, target, candidate)
+        // proposal gains this session's support, which is the only way §5.7 step 6 can activate a replacement.
+        if (isReplacementOf(state, replacement.memory, resolved)) return proposeAgainst(state, normalized, resolved, "supersede", replacement.memory);
         return proposeAgainst(state, normalized, resolved, "stale", null);
       }
       return proposeAgainst(state, normalized, resolved, "supersede", replacement.memory);
@@ -775,6 +834,9 @@ function decideTiers(state: RunState): void {
       autonomyLevel: config.autonomy_level,
       knowledgeKind: memory.knowledgeKind,
       isReplacementRow,
+      // The validator (V6) already rejected unsafe facts of this run; the stored text of a row that predates
+      // v0.6 (or was imported) is scanned here so a legacy candidate cannot auto-activate with unsafe text.
+      scanSafe: scanMemoryContent(memory.summary, memory.details).safe,
       now: state.ctx.now,
     });
 

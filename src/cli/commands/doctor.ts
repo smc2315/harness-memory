@@ -3,21 +3,23 @@
  * manifest vs registered hooks, node path, last call per event and p95 from hooks.log, queue depth,
  * last extraction run, probe result, lock state (+ stale owner), quick_check, user_version,
  * db_generation vs snapshot, unreachable memories, Git Bash on Windows, `not_logged_in` guidance,
- * the worker's `waiting=<reason>`, hook-side touch/pid files; `--host-debug` greps the host's debug log
- * for `finished with status N`. `--fix` rewrites the node/hook-script path in the settings file and
- * rebuilds the snapshot (migrating first when needed).
+ * the worker's `waiting=<reason>`, hook-side touch/pid files, the git footprint (`.harness-memory/.gitignore`
+ * present and nothing under the directory tracked, the settings file excluded); `--host-debug` greps the
+ * host's debug log for `finished with status N`. `--fix` rewrites the node/hook-script path in the settings
+ * file, writes a missing `.harness-memory/.gitignore` and rebuilds the snapshot (migrating first when needed).
  */
 
 import { existsSync, readFileSync } from "node:fs";
 
 import { EXIT_CODES } from "../../core/errors";
-import { TARGET_USER_VERSION } from "../../core/paths";
+import { HARNESS_DIR_NAME, TARGET_USER_VERSION, unixSocketPathTooLong } from "../../core/paths";
 import type { CommandContext } from "../context";
 import { flagBoolean, flagString, type OptionSpecs } from "../lib/args";
 import {
   countQueueFiles,
   probeGuidance,
   readDbFacts,
+  readGitTrackedFiles,
   readLockFacts,
   readSnapshotFacts,
   readWorkerLogFacts,
@@ -29,7 +31,7 @@ import {
 import { readHookLogTail, summarizeHookLog, type HookLogSummary } from "../lib/hooks-log";
 import { readManifest, sha256File, writeManifest, type InstallManifest } from "../lib/manifest";
 import { formatMs, formatRelative, pluralize } from "../lib/output";
-import { projectSettingsFile, resolveHookScript, siblingScripts } from "../lib/paths";
+import { ensureStateGitignore, GIT_EXCLUDE_LINE, gitDirectory, hasGitExcludeLine, projectSettingsFile, resolveHookScript, siblingScripts, stateGitignoreFile } from "../lib/paths";
 import { runHookSelfTest, type SelfTestResult } from "../lib/selftest";
 import { findGitBash, HOOK_REGISTRATIONS, listHarnessHooks, mergeHarnessHooks, readSettingsFile, writeSettingsFile, type HarnessHookEntry, type HookCommandSpec } from "../lib/settings";
 import { CLI_LOCK_WAIT_MS, createCliStore } from "../lib/store";
@@ -78,6 +80,30 @@ function readSettingsFacts(manifest: InstallManifest | null, root: string): Sett
   }
 }
 
+interface StateIgnoreFacts {
+  /** `.harness-memory/` exists (otherwise there is nothing to ignore yet). */
+  dirExists: boolean;
+  file: string;
+  exists: boolean;
+  /** Paths under `.harness-memory/` that git tracks; null when git was not consulted (absent, or no repository). */
+  tracked: string[] | null;
+}
+
+function readStateIgnoreFacts(ctx: CommandContext): StateIgnoreFacts {
+  const file = stateGitignoreFile(ctx.paths);
+  const dirExists = existsSync(ctx.paths.dir);
+  const trackedFiles = ctx.seams.gitTrackedFiles ?? ((root: string, pathspec: string) => readGitTrackedFiles(root, pathspec, ctx.env));
+  return { dirExists, file, exists: existsSync(file), tracked: dirExists ? trackedFiles(ctx.paths.root, HARNESS_DIR_NAME) : null };
+}
+
+function excludeFileHasLine(file: string): boolean {
+  try {
+    return hasGitExcludeLine(readFileSync(file, "utf8"));
+  } catch {
+    return false;
+  }
+}
+
 interface Facts {
   manifest: InstallManifest | null;
   settings: SettingsFacts;
@@ -87,6 +113,7 @@ interface Facts {
   worker: WorkerLogFacts;
   locks: LockFacts;
   queueFiles: number;
+  stateIgnore: StateIgnoreFacts;
 }
 
 async function collectFacts(ctx: CommandContext): Promise<Facts> {
@@ -102,6 +129,7 @@ async function collectFacts(ctx: CommandContext): Promise<Facts> {
     worker: readWorkerLogFacts(ctx.paths),
     locks: readLockFacts(ctx.paths, ctx.clock, nowMs),
     queueFiles: countQueueFiles(ctx.paths),
+    stateIgnore: readStateIgnoreFacts(ctx),
   };
 }
 
@@ -163,6 +191,34 @@ export function buildChecks(ctx: CommandContext, facts: Facts, hostDebug: string
       const siblings = siblingScripts(manifest.hook_script);
       const missing = Object.entries(siblings).filter(([, file]) => !existsSync(file)).map(([name]) => name);
       checks.push({ id: "install.hook_script", status: missing.length === 0 ? "ok" : "warn", summary: missing.length === 0 ? `hook script ${manifest.hook_script} with worker/hook-bundle/embed-helper bundles` : `hook script present but ${missing.join(", ")} bundle(s) missing next to it` });
+    }
+  }
+
+  // git footprint: the settings file (absolute local paths) excluded, the state directory (prompts, tool output, database) never tracked
+  if (manifest !== null && manifest.scope === "project") {
+    if (manifest.git_exclude === null) {
+      if (gitDirectory(ctx.paths.root) !== null) {
+        checks.push({ id: "install.git_exclude", status: "warn", summary: `${GIT_EXCLUDE_LINE} is not excluded from git (install could not resolve the .git pointer); add the line to .gitignore so the hooks' local paths are never committed` });
+      }
+    } else if (!excludeFileHasLine(manifest.git_exclude.path)) {
+      checks.push({ id: "install.git_exclude", status: "warn", summary: `${GIT_EXCLUDE_LINE} is missing from ${manifest.git_exclude.path}; re-run \`hm install --host claude\`` });
+    } else {
+      checks.push({ id: "install.git_exclude", status: "ok", summary: `${GIT_EXCLUDE_LINE} excluded via ${manifest.git_exclude.path}` });
+    }
+  }
+  const ignore = facts.stateIgnore;
+  if (ignore.dirExists) {
+    if (ignore.tracked !== null && ignore.tracked.length > 0) {
+      checks.push({
+        id: "install.state_ignore",
+        status: "warn",
+        summary: `${pluralize(ignore.tracked.length, "file is", "files are")} tracked by git under ${HARNESS_DIR_NAME}/ (ledgers and memory.sqlite hold prompts and tool output): run \`git rm -r --cached ${HARNESS_DIR_NAME}\` and commit`,
+        detail: ignore.tracked.slice(0, 10),
+      });
+    } else if (!ignore.exists) {
+      checks.push({ id: "install.state_ignore", status: "warn", summary: `${ignore.file} is missing, so \`git add -A\` would commit the state directory; \`hm doctor --fix\` writes it` });
+    } else {
+      checks.push({ id: "install.state_ignore", status: "ok", summary: `${HARNESS_DIR_NAME}/ ignored by git (${ignore.file})${ignore.tracked === null ? "" : ", nothing tracked"}` });
     }
   }
 
@@ -286,12 +342,15 @@ export function buildChecks(ctx: CommandContext, facts: Facts, hostDebug: string
   // embeddings
   if (ctx.config.embeddings.enabled) {
     const helper = locks.embedHelperPid;
+    const socket = ctx.paths.embedHelperSocket;
+    const socketTooLong = process.platform !== "win32" && unixSocketPathTooLong(socket);
     const parts = [
       helper === null ? "helper not running" : helper.alive ? `helper running (pid ${String(helper.pid)})` : `stale embed-helper.pid (pid ${String(helper.pid)})`,
       locks.embedSpawnAgeMs === null ? "never spawned by a hook" : `last spawn request ${formatRelative(new Date(nowMs - locks.embedSpawnAgeMs).toISOString(), nowMs)}`,
       snapshot.denseExists ? "dense.v1.bin present" : "dense.v1.bin absent (no embeddings yet; `hm dream` backfills)",
+      `rendezvous ${socket}${socketTooLong ? " (over the unix socket path limit: the helper refuses to start; set XDG_RUNTIME_DIR or TMPDIR to a shorter directory)" : ""}`,
     ];
-    checks.push({ id: "embeddings", status: helper !== null && !helper.alive ? "warn" : "info", summary: parts.join("; ") });
+    checks.push({ id: "embeddings", status: (helper !== null && !helper.alive) || socketTooLong ? "warn" : "info", summary: parts.join("; ") });
   } else {
     checks.push({ id: "embeddings", status: "info", summary: "embeddings off (install with --with-embeddings or set embeddings.enabled)" });
   }
@@ -361,6 +420,10 @@ async function applyFixes(ctx: CommandContext, facts: Facts): Promise<string[]> 
         fixes.push(`rewrote ${manifest.events.length} hook entries in ${manifest.settings_file} → node ${ctx.execPath}, hook ${hookScript}`);
       }
     }
+  }
+  if (facts.stateIgnore.dirExists && !facts.stateIgnore.exists) {
+    const written = ensureStateGitignore(ctx.paths);
+    fixes.push(`wrote ${written.path} (nothing under ${HARNESS_DIR_NAME}/ is ever committed)`);
   }
   if (facts.db.exists && !facts.db.newerThanCode && facts.db.error === null) {
     try {

@@ -244,31 +244,82 @@ describe("Store.withWriteLock", () => {
     });
   });
 
-  test("removes orphan tmp files older than ten minutes and keeps fresh ones", async () => {
+  test("removes orphan tmp files older than ten minutes in db, snapshot, queue, state and raw; keeps fresh ones and real files", async () => {
     await store.withWriteLock("seed", 0, () => op("run-1"));
     mkdirSync(paths.snapshotDir, { recursive: true });
     const oldDbTmp = `${paths.db}.tmp-4242`;
     const oldSnapshotTmp = join(paths.snapshotDir, "active.v1.json.tmp-4242");
+    // hook writeJsonAtomic / worker import / idle sweep / notify / provider cache leftovers (killed between write and rename)
+    const oldQueueTmp = join(paths.queueDir, "ep-0123456789abcdef.json.tmp-4242");
+    const oldStateTmp = join(paths.stateDir, "claude-code-0123456789abcdef.json.tmp-4242");
+    const oldNotifyTmp = join(paths.stateDir, "claude-code-0123456789abcdef.notify.json.tmp-4242");
+    const oldRawTmp = join(paths.rawDir, "run-1.json.tmp-4242");
     const freshTmp = `${paths.db}.tmp-777`;
-    writeFileSync(oldDbTmp, "x");
-    writeFileSync(oldSnapshotTmp, "x");
-    writeFileSync(freshTmp, "x");
+    const freshQueueTmp = join(paths.queueDir, "ep-fresh.json.tmp-777");
+    const realQueueFile = join(paths.queueDir, "ep-real.json");
+    const realStateFile = join(paths.stateDir, "claude-code-real.json");
+    const oldOnes = [oldDbTmp, oldSnapshotTmp, oldQueueTmp, oldStateTmp, oldNotifyTmp, oldRawTmp];
+    for (const file of [...oldOnes, freshTmp, freshQueueTmp, realQueueFile, realStateFile]) {
+      writeFileSync(file, "x");
+    }
     const oneHourAgo = new Date(Date.parse(NOW) - 3_600_000);
-    utimesSync(oldDbTmp, oneHourAgo, oneHourAgo);
-    utimesSync(oldSnapshotTmp, oneHourAgo, oneHourAgo);
+    for (const file of [...oldOnes, realQueueFile, realStateFile]) {
+      utimesSync(file, oneHourAgo, oneHourAgo);
+    }
     const now = new Date(Date.parse(NOW));
     utimesSync(freshTmp, now, now);
+    utimesSync(freshQueueTmp, now, now);
 
     const result = await store.withWriteLock("sweep", 0, () => noopOp("sweep"));
 
-    expect(result.orphansRemoved.sort()).toEqual([oldDbTmp, oldSnapshotTmp].sort());
-    expect(existsSync(oldDbTmp)).toBe(false);
-    expect(existsSync(oldSnapshotTmp)).toBe(false);
+    expect(result.orphansRemoved.sort()).toEqual([...oldOnes].sort());
+    for (const file of oldOnes) {
+      expect(existsSync(file)).toBe(false);
+    }
     expect(existsSync(freshTmp)).toBe(true);
+    expect(existsSync(freshQueueTmp)).toBe(true);
+    expect(existsSync(realQueueFile)).toBe(true);
+    expect(existsSync(realStateFile)).toBe(true);
     expect(existsSync(paths.db)).toBe(true);
 
-    // direct helper call with an explicit clock removes the remaining one once it is old enough
-    expect(cleanOrphanTmp(paths, 600_000, Date.parse(NOW) + 601_000)).toEqual([freshTmp]);
+    // direct helper call with an explicit clock removes the remaining ones once they are old enough
+    expect(cleanOrphanTmp(paths, 600_000, Date.parse(NOW) + 601_000).sort()).toEqual([freshTmp, freshQueueTmp].sort());
+    expect(existsSync(realQueueFile)).toBe(true);
+  });
+
+  test("a lock lost to another writer during the callback is detected before the save: nothing is written", async () => {
+    await store.withWriteLock("seed", 0, (db) => {
+      writeMeta(db, "test:1", "a");
+      return op("run-1");
+    });
+    const before = readFileSync(paths.db);
+    const intruder = { pid: process.pid + 1, hostname: hostname(), purpose: "intruder", started_at: NOW, heartbeat_at: NOW };
+    calls = [];
+
+    let called = false;
+    const attempt = store.withWriteLock("fenced", 0, (db) => {
+      called = true;
+      writeMeta(db, "test:2", "lost");
+      // another writer took db.lock over while fn was running (our heartbeat looked stale to it)
+      writeFileSync(join(paths.dbLock, LOCK_OWNER_FILE), JSON.stringify(intruder));
+      return op("run-2");
+    });
+    await expect(attempt).rejects.toBeInstanceOf(LockBusyError);
+    await expect(attempt).rejects.toMatchObject({ lockPath: paths.dbLock, holder: { purpose: "intruder" } });
+
+    expect(called).toBe(true);
+    expect(Buffer.compare(readFileSync(paths.db), before)).toBe(0);
+    // deriveRules ran inside the (in-memory) transaction; the fence fired before the save, so no snapshot was built
+    expect(calls).toEqual(["deriveRules"]);
+    expect(logger.lines.some((line) => line.startsWith("warn db.lock was taken over by intruder"))).toBe(true);
+    // the new owner's lock is left alone by our release
+    expect(existsSync(paths.dbLock)).toBe(true);
+    expect(JSON.parse(readFileSync(join(paths.dbLock, LOCK_OWNER_FILE), "utf8"))).toEqual(intruder);
+    await store.read((db) => {
+      expect(getMeta(db, "test:2")).toBeNull();
+      expect(hasWriteOp(db, "run-2")).toBe(false);
+      expect(getDbGeneration(db)).toBe(1);
+    });
   });
 
   test("migrates a legacy v9 file with a backup even when the callback is a noop", async () => {

@@ -2,12 +2,13 @@
  * In-process hook runs with synthetic Claude Code stdin against a fixture snapshot (plan §4 B2 tests).
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { basename } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
-import { runHook, type HookResult } from "../src/adapters/hook-core";
+import { runHook, spawnedByWorker, WORKER_PID_MAX_AGE_MS, type HookResult } from "../src/adapters/hook-core";
 import { normalizeClaudeCode, renderClaudeCode } from "../src/adapters/hosts/claude-code";
 import type { EpisodeDescriptor } from "../src/core/episode-types";
 import type { ClaudeCodeHookStdin, NormalizedHookInput } from "../src/core/hook-types";
@@ -21,6 +22,7 @@ import {
   FIXTURE_NOW,
   FIXTURE_SESSION_ID,
   fixtureMemory,
+  fixtureRule,
   recordingRuntime,
   writeStdin,
   type HarnessFixture,
@@ -211,6 +213,43 @@ describe("hook core (in-process, synthetic Claude Code stdin)", () => {
     expect(pnpm.decision).toBe("none");
   });
 
+  test("a manual soft_deny rule without a memory row also fires once per turn: the same-turn retry passes with an already_fired suppression", async () => {
+    const manualRule = fixtureRule({
+      rule_code: "MANUAL_PRUNE",
+      memory_id: null,
+      tool_pattern: "bash",
+      target_kind: "command",
+      pattern_kind: "cmd",
+      arg_pattern: "docker system prune",
+      enforcement: "soft_deny",
+      message: "Pruning docker state needs a human",
+    });
+    const own = createHarnessFixture({ memories: ALL_MEMORIES, rules: [manualRule] });
+    const ownRecording = recordingRuntime(own);
+    const runOwn = async (stdin: ClaudeCodeHookStdin): Promise<HookResult> => {
+      const input = normalize(stdin);
+      return runHook(input.event, input, ownRecording.runtime);
+    };
+    try {
+      await runOwn(claudeStdin(own, "UserPromptSubmit", { prompt: "clean up docker", prompt_id: "p-9" }));
+      const first = await runOwn(bashStdin(own, "docker system prune"));
+      expect(first.decision).toBe("deny");
+      expect(first.enforcement).toBe("soft_deny");
+      expect(first.activated).toContain("rule:MANUAL_PRUNE");
+
+      const retry = await runOwn(bashStdin(own, "docker system prune"));
+      expect(retry.decision).toBe("none");
+      expect(retry.activated).toEqual([]);
+      expect(retry.detail.suppressed).toEqual(expect.arrayContaining([expect.objectContaining({ id: "rule:MANUAL_PRUNE", kind: "already_fired" })]));
+
+      const fired = own.readLedger().filter((line): line is FiredLine => line.kind === "fired");
+      expect(fired).toHaveLength(1);
+      expect(fired[0]).toMatchObject({ memory_ids: [], rule_codes: ["MANUAL_PRUNE"], tool: "bash", decision: "deny", enforcement: "soft_deny" });
+    } finally {
+      own.cleanup();
+    }
+  });
+
   test("bypassPermissions downgrades confirm to soft_deny with delivery before_downgraded", async () => {
     const result = await run(writeStdin(fixture, "config/.env.local", "X=1", { permission_mode: "bypassPermissions" }));
     expect(result.decision).toBe("deny");
@@ -326,6 +365,45 @@ describe("hook core (in-process, synthetic Claude Code stdin)", () => {
     // The build success resolves the earlier failure of the same program token.
     const okLines = fixture.readLedger().filter((line): line is ToolOkLine => line.kind === "tool_ok");
     expect(okLines[0]!.resolution_of).toBe("bash|exit_1|pm build");
+  });
+
+  test("a marker-only tail after Stop (compact / resume) does not hide the failed turn from the correction check", async () => {
+    const failRun = async (prompt: string, promptId: string, useId: string) => {
+      await run(claudeStdin(fixture, "UserPromptSubmit", { prompt, prompt_id: promptId }));
+      await run(claudeStdin(fixture, "PostToolUseFailure", { tool_name: "Bash", tool_input: { command: "npm test" }, tool_use_id: useId, error: "Exit code 1\n3 failing" }));
+      return run(claudeStdin(fixture, "Stop", { last_assistant_message: "The tests fail.", prompt_id: promptId }));
+    };
+
+    // Manual /compact between turns: PreCompact + SessionStart(compact) append markers after the closed segment.
+    const first = await failRun("run the tests", "p-10", "toolu_fail_c1");
+    expect(first.episodeId).not.toBeNull();
+    const precompact = await run(claudeStdin(fixture, "PreCompact", { trigger: "manual" }));
+    expect(precompact.status).toBe("skipped:empty_segment");
+    await run(claudeStdin(fixture, "SessionStart", { source: "compact" }));
+
+    // No correction vocabulary: the flag must come from the previous turn's tool_fail.
+    const prompt = await run(claudeStdin(fixture, "UserPromptSubmit", { prompt: "use pnpm", prompt_id: "p-11" }));
+    expect(prompt.status).toBe("ok");
+    expect(prompt.detail.correction).toBe(1);
+    expect(prompt.detail.closed_as).toBeUndefined();
+    expect(fixture.queueFiles()).toHaveLength(1);
+    expect(fixture.readState()).toMatchObject({ turn_key: "p-11", segment: 0, correction_for: first.episodeId });
+
+    const stop = await run(claudeStdin(fixture, "Stop", { last_assistant_message: "Switched to pnpm.", prompt_id: "p-11" }));
+    const correcting = (fixture.readQueue() as EpisodeDescriptor[]).find((entry) => entry.id === stop.episodeId);
+    expect(correcting).toMatchObject({ correction_for: first.episodeId, flags: { correction: 1 } });
+    expect(correcting!.context_ref).toContain("(prev) tool_fail bash(bash): npm test");
+
+    // Exit + `claude --resume`: SessionEnd + SessionStart(resume) is the same marker-only shape.
+    const second = await failRun("run them again", "p-12", "toolu_fail_c2");
+    await run(claudeStdin(fixture, "SessionEnd", { reason: "prompt_input_exit" } as Partial<ClaudeCodeHookStdin>));
+    await run(claudeStdin(fixture, "SessionStart", { source: "resume" }));
+    const resumed = await run(claudeStdin(fixture, "UserPromptSubmit", { prompt: "use pnpm", prompt_id: "p-13" }));
+    expect(resumed.detail.correction).toBe(1);
+    expect(fixture.readState()).toMatchObject({ turn_key: "p-13", correction_for: second.episodeId });
+
+    const promptLines = fixture.readLedger().filter((line): line is PromptLine => line.kind === "prompt");
+    expect(promptLines.map((line) => line.correction)).toEqual([0, 1, 0, 1]);
   });
 
   test("session-start injects startup rows only, skips before_tool-only pitfalls and host-loaded rows, and digests once a day", async () => {
@@ -560,5 +638,79 @@ describe("hook main (process wrapper)", () => {
     const outcome = await main([], overrides);
     expect(outcome.result?.event).toBe("session-start");
     expect(outcome.stdout?.hookSpecificOutput?.hookEventName).toBe("SessionStart");
+  });
+});
+
+describe("recursion guard 2: locks/worker.pid against the ppid chain (fake /proc)", () => {
+  /** Boot time of the fake machine (seconds since the epoch); process starts are USER_HZ ticks after it. */
+  const BTIME_S = 1_762_600_000;
+  const WORKER_PID = 4123;
+  const WORKER_START_TICKS = 500_000;
+  let root: string;
+  let procRoot: string;
+  let pidFile: string;
+
+  const startMs = (ticks: number): number => BTIME_S * 1000 + ticks * 10;
+
+  /** `/proc/<pid>/stat`: after `(comm)` come state, ppid, … and starttime at index 19. */
+  function writeProcStat(pid: number, ppid: number, startTicks: number): void {
+    mkdirSync(join(procRoot, String(pid)), { recursive: true });
+    writeFileSync(join(procRoot, String(pid), "stat"), `${String(pid)} (node) S ${String(ppid)} 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 ${String(startTicks)} 0 0\n`, "utf8");
+  }
+
+  function writePidFile(pid: number, mtimeMs: number): void {
+    writeFileSync(pidFile, String(pid), "utf8");
+    utimesSync(pidFile, new Date(mtimeMs), new Date(mtimeMs));
+  }
+
+  function guard(options: { platform?: NodeJS.Platform; ppid?: number; nowMs: number }): boolean {
+    return spawnedByWorker({ workerPid: pidFile }, { platform: "linux", ppid: 9001, procRoot, ...options });
+  }
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "hm-pid-"));
+    procRoot = join(root, "proc");
+    mkdirSync(procRoot, { recursive: true });
+    writeFileSync(join(procRoot, "stat"), `cpu  1 2 3 4\nbtime ${String(BTIME_S)}\nprocesses 100\n`, "utf8");
+    pidFile = join(root, "worker.pid");
+    // hook's parent shell (9001) → headless claude (9000) → worker (4123) → init
+    writeProcStat(9001, 9000, 600_000);
+    writeProcStat(9000, WORKER_PID, 590_000);
+    writeProcStat(WORKER_PID, 1, WORKER_START_TICKS);
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("a live worker that wrote the pid file is found through the ppid chain; an unrelated chain is not", () => {
+    writePidFile(WORKER_PID, startMs(WORKER_START_TICKS) + 5_000); // written 5 s after the worker started (lock wait)
+    const nowMs = startMs(600_000) + 60_000;
+    expect(guard({ nowMs })).toBe(true);
+    writeProcStat(9000, 1, 590_000); // claude no longer under the worker
+    expect(guard({ nowMs })).toBe(false);
+  });
+
+  test("a reused pid (the matching ancestor started after the file was written) never disables the hook", () => {
+    // The worker that wrote the file was killed; pid 4123 now belongs to a process born two minutes later.
+    writePidFile(WORKER_PID, startMs(WORKER_START_TICKS) - 120_000);
+    expect(guard({ nowMs: startMs(600_000) + 60_000 })).toBe(false);
+  });
+
+  test("a pid file older than the worker lifetime bound is ignored even when the chain matches", () => {
+    const writtenMs = startMs(WORKER_START_TICKS) + 5_000;
+    writePidFile(WORKER_PID, writtenMs);
+    expect(guard({ nowMs: writtenMs + WORKER_PID_MAX_AGE_MS })).toBe(true);
+    expect(guard({ nowMs: writtenMs + WORKER_PID_MAX_AGE_MS + 1 })).toBe(false);
+  });
+
+  test("windows, a garbage pid and a missing file are never 'disabled'", () => {
+    writePidFile(WORKER_PID, startMs(WORKER_START_TICKS) + 5_000);
+    const nowMs = startMs(600_000);
+    expect(guard({ platform: "win32", nowMs })).toBe(false);
+    writePidFile(Number.NaN, startMs(WORKER_START_TICKS) + 5_000);
+    expect(guard({ nowMs })).toBe(false);
+    rmSync(pidFile);
+    expect(guard({ nowMs })).toBe(false);
   });
 });

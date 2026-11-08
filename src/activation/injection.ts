@@ -45,8 +45,20 @@ export const ITEM_DETAILS_CHARS = 240;
 export const ITEM_SUMMARY_CHARS = 200;
 export const INJECTION_PREFIX = "[harness-memory]";
 
+const ANSI_CSI_SEQUENCE = /\u001b\[[0-?]*[ -/]*[@-~]/g;
+/** C0 / C1 controls other than the `\s` whitespace (`\t \n \v \f \r`) that `oneLine` collapses. */
+const CONTROL_CHARACTERS = /[\u0000-\u0008\u000e-\u001f\u007f-\u009f]/g;
+
+/**
+ * Removes ANSI escape sequences and C0/C1 control characters so a stored row renders as its visible text:
+ * an extractor quoting coloured tool output must not be able to erase or overwrite what a person sees.
+ */
+export function stripControlCharacters(text: string): string {
+  return text.replace(ANSI_CSI_SEQUENCE, "").replace(CONTROL_CHARACTERS, "");
+}
+
 function oneLine(text: string, max: number): string {
-  const flat = text.replace(/\s+/g, " ").trim();
+  const flat = stripControlCharacters(text).replace(/\s+/g, " ").trim();
   if (flat.length <= max) return flat;
   return `${flat.slice(0, Math.max(0, max - 1))}…`;
 }

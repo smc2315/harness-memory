@@ -4,13 +4,16 @@
  * worker.log lines.
  */
 
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import type { DoctorReport } from "../src/cli/commands/doctor";
 import type { StatusReport } from "../src/cli/commands/status";
+import { readGitTrackedFiles } from "../src/cli/lib/diagnostics";
 import type { InstallManifest } from "../src/cli/lib/manifest";
+import { STATE_GITIGNORE_CONTENT } from "../src/cli/lib/paths";
 import { listHarnessHooks } from "../src/cli/lib/settings";
 import { createCliStore } from "../src/cli/lib/store";
 import { loadConfig } from "../src/core/config";
@@ -144,6 +147,19 @@ describe("hm doctor", () => {
     expect(text.stdout).toMatch(/\d+ ok, \d+ warnings, 0 failures/);
   });
 
+  test("with embeddings enabled the embeddings check names the helper rendezvous point", async () => {
+    await install();
+    const config = JSON.parse(readFileSync(project.paths.config, "utf8")) as Record<string, unknown>;
+    const embeddings = (config.embeddings ?? {}) as Record<string, unknown>;
+    writeFileSync(project.paths.config, `${JSON.stringify({ ...config, embeddings: { ...embeddings, enabled: true } }, null, 2)}\n`);
+    const result = await runHm(project, ["doctor", "--json"], { clock: () => NOW, seams: { nowMs: () => NOW_MS } });
+    expect(result.code).toBe(0);
+    const check = checkOf(result.json<DoctorReport>(), "embeddings");
+    expect(check.status).toBe("info");
+    expect(check.summary).toContain(`rendezvous ${project.paths.embedHelperSocket}`);
+    expect(check.summary).toContain("helper not running");
+  });
+
   test("flags a vanished node binary and a stale lock; --fix rewrites the hooks and rebuilds the snapshot", async () => {
     await install();
     const manifest = JSON.parse(readFileSync(project.paths.manifest, "utf8")) as InstallManifest;
@@ -200,6 +216,46 @@ describe("hm doctor", () => {
     expect(checkOf(fixedReport, "host.debug").summary).toContain("status 0 ×2");
     expect(checkOf(fixedReport, "host.debug").summary).toContain("status 1 ×1");
     expect(existsSync(project.paths.dbBackup(9))).toBe(true);
+  });
+
+  test("checks the git footprint: .harness-memory/.gitignore, files git tracks there, the exclude line; --fix rewrites a missing .gitignore", async () => {
+    await install();
+    const healthy = (await runHm(project, ["doctor", "--json"], { seams: { gitTrackedFiles: () => [] } })).json<DoctorReport>();
+    expect(checkOf(healthy, "install.state_ignore").status).toBe("ok");
+    expect(checkOf(healthy, "install.state_ignore").summary).toContain("nothing tracked");
+    expect(checkOf(healthy, "install.git_exclude").status).toBe("ok");
+    expect(checkOf(healthy, "install.git_exclude").summary).toContain(join(project.root, ".git", "info", "exclude"));
+
+    // Committed before the ignore file existed (a v0.5 install, say): the ignore file does not untrack them, so say so.
+    const trackedFiles = [".harness-memory/memory.sqlite", ".harness-memory/ledger/claude-code-0123456789abcdef.jsonl"];
+    const tracked = (await runHm(project, ["doctor", "--json"], { seams: { gitTrackedFiles: () => trackedFiles } })).json<DoctorReport>();
+    expect(checkOf(tracked, "install.state_ignore").status).toBe("warn");
+    expect(checkOf(tracked, "install.state_ignore").summary).toContain("2 files are tracked by git under .harness-memory/");
+    expect(checkOf(tracked, "install.state_ignore").summary).toContain("git rm -r --cached .harness-memory");
+    expect(checkOf(tracked, "install.state_ignore").detail).toEqual(trackedFiles);
+
+    const gitignore = join(project.paths.dir, ".gitignore");
+    rmSync(gitignore);
+    writeFileSync(join(project.root, ".git", "info", "exclude"), "node_modules\n");
+    const missing = (await runHm(project, ["doctor", "--json"], { seams: { gitTrackedFiles: () => null } })).json<DoctorReport>();
+    expect(checkOf(missing, "install.state_ignore").status).toBe("warn");
+    expect(checkOf(missing, "install.state_ignore").summary).toContain("--fix");
+    expect(checkOf(missing, "install.git_exclude").status).toBe("warn");
+    expect(checkOf(missing, "install.git_exclude").summary).toContain("re-run");
+
+    const fixed = (await runHm(project, ["doctor", "--fix", "--json"], { seams: { gitTrackedFiles: () => null } })).json<DoctorReport>();
+    expect(fixed.fixes.some((fix) => fix.startsWith(`wrote ${gitignore}`))).toBe(true);
+    expect(readFileSync(gitignore, "utf8")).toBe(STATE_GITIGNORE_CONTENT);
+    expect(checkOf(fixed, "install.state_ignore").status).toBe("ok");
+    expect(checkOf(fixed, "install.state_ignore").summary).not.toContain("nothing tracked");
+  });
+
+  test("readGitTrackedFiles answers null outside a repository and lists tracked paths inside one", () => {
+    // The temp project carries a bare `.git/info/` directory, which git does not accept as a repository.
+    expect(readGitTrackedFiles(project.root, ".harness-memory")).toBeNull();
+    const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+    const tracked = readGitTrackedFiles(repoRoot, "src/cli/lib");
+    if (tracked !== null) expect(tracked).toContain("src/cli/lib/paths.ts");
   });
 
   test("without an install everything downstream fails clearly and --self-test uses the seam", async () => {

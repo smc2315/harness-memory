@@ -25,6 +25,20 @@ so two contenders do not retry in lockstep; the deadline is `waitMs` (CLI 5 s, w
 wait). `release()` re-reads `owner.json` and only removes the directory if it is still ours, so a holder that
 was taken over cannot delete the new owner's lock.
 
+The takeover itself must never remove or rename the lock directory: two contenders that both saw the stale
+owner would `rmSync` each other's fresh directory and both believe they hold the lock (a silent lost write,
+the very defect the lock exists for), and a renamed-away directory lets a third contender `mkdir` the path
+while the previous holder still thinks it owns it. The takeover is therefore a compare-and-swap on
+`owner.json` inside the directory: `renameSync(owner.json → owner.json.stale-<pid>-<ms>-<n>)` claims the
+stale record (only one rename can win), the moved copy must equal the record the stale verdict was based
+on — heartbeat included, so a holder that woke up and refreshed is left alone and the copy is moved back —
+and the new owner publishes its own `owner.json` with an exclusive create (`wx`). The same exclusive create
+stamps a fresh `mkdir`; a contender whose directory or record disappears under it competes again instead
+of failing with ENOENT. Two more guards close the remaining sub-millisecond windows: the heartbeat never
+re-stamps an `owner.json` that carries another identity, and `Store.withWriteLock` calls
+`LockHandle.stillHeld()` right before the save (fencing) — a lost lock throws `LockBusyError` and nothing is
+written. Stale copies left by a kill mid-takeover live inside the lock directory and vanish with it.
+
 ### 3. Save is export → tmp → fsync → `.prev` → rename
 
 `db.export()` yields the complete database buffer. Writing it to `memory.sqlite.tmp-<pid>`, fsyncing, and
@@ -33,7 +47,9 @@ previous file is copied to `.prev` right before the rename, which is what `recov
 main file fails the header or `quick_check`; the damaged file is kept as `.corrupt-<ts>` for `hm doctor`.
 Windows can refuse the rename while an antivirus or indexer holds the file (EPERM/EBUSY): five attempts
 20 ms apart, then a copy fallback with a warning. Orphan `*.tmp-<pid>` files older than ten minutes are removed
-at the start of every write (and by `worker dream`).
+at the start of every write (and by `worker dream`) from every directory whose writers use tmp + rename:
+next to the database, `snapshot/`, `queue/`, `state/` and `raw/` (hooks, worker import, idle sweep, notify
+and the provider cache all leave `<file>.tmp-<pid>` behind when killed between write and rename).
 
 `export()` closes and reopens sql.js' internal connection: prepared statements die and connection PRAGMAs
 reset (`foreign_keys` back to OFF). The store re-enables foreign keys after saving and documents that

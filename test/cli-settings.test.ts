@@ -1,13 +1,19 @@
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 
 import { parseHookLogLine, percentile, summarizeHookLog } from "../src/cli/lib/hooks-log";
 import {
   buildHookCommand,
   chooseHookForm,
+  claudeVersionSpawn,
   compareVersions,
+  detectClaudeVersion,
   EXEC_FORM_MIN_VERSION,
   HOOK_REGISTRATIONS,
   isHarnessHookCommand,
+  isWindowsShim,
   listHarnessHooks,
   mergeHarnessHooks,
   serializeSettings,
@@ -101,6 +107,37 @@ describe("hook form selection", () => {
     expect(chooseHookForm("2.1.100")).toBe("shell");
     expect(chooseHookForm("2.1.100", "exec")).toBe("exec");
     expect(chooseHookForm("2.1.172", "shell")).toBe("shell");
+  });
+});
+
+describe("claude version probe", () => {
+  test("a Windows .cmd shim is run by cmd.exe as one quoted command string; everything else directly", () => {
+    const shim = "C:\\Program Files\\nodejs\\claude.cmd";
+    expect(isWindowsShim(shim, "win32")).toBe(true);
+    expect(isWindowsShim("C:\\Users\\me\\claude.BAT", "win32")).toBe(true);
+    expect(isWindowsShim("C:\\Users\\me\\claude.exe", "win32")).toBe(false);
+    expect(isWindowsShim("/home/me/claude.cmd", "linux")).toBe(false);
+    expect(claudeVersionSpawn(shim, true)).toEqual({ command: `"${shim}" --version`, args: [], shell: true });
+    expect(claudeVersionSpawn("/usr/local/bin/claude", false)).toEqual({ command: "/usr/local/bin/claude", args: ["--version"], shell: false });
+  });
+
+  test("detects the version of a binary installed under a path with a space (HARNESS_MEMORY_CLAUDE_BIN)", () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), "hm-claude-")));
+    const dir = join(base, "Program Files", "claude code");
+    mkdirSync(dir, { recursive: true });
+    const windows = process.platform === "win32";
+    const binary = join(dir, windows ? "claude.cmd" : "claude");
+    writeFileSync(binary, windows ? "@echo off\r\necho 9.9.9 (Claude Code)\r\n" : '#!/bin/sh\necho "9.9.9 (Claude Code)"\n');
+    if (!windows) chmodSync(binary, 0o755);
+    const previous = process.env.HARNESS_MEMORY_CLAUDE_BIN;
+    process.env.HARNESS_MEMORY_CLAUDE_BIN = binary;
+    try {
+      expect(detectClaudeVersion()).toBe("9.9.9");
+    } finally {
+      if (previous === undefined) delete process.env.HARNESS_MEMORY_CLAUDE_BIN;
+      else process.env.HARNESS_MEMORY_CLAUDE_BIN = previous;
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });
 

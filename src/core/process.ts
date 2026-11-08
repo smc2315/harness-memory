@@ -78,6 +78,11 @@ export interface SpawnDetachedOptions {
   env?: Record<string, string>;
   /** Defaults to process.execPath (never a bare `node`, which may not be on PATH). */
   execPath?: string;
+  /**
+   * Called for a spawn failure that Node reports asynchronously (EAGAIN/EMFILE/ENFILE/ENOENT/EACCES arrive
+   * as an `error` event after `spawn` has returned, so the try/catch below never sees them). Default: ignore.
+   */
+  onError?: (error: Error) => void;
 }
 
 /** Fire-and-forget child that survives this process (verified on Windows/Node, m0-facts #1). Returns the pid or null. */
@@ -89,6 +94,15 @@ export function spawnDetached(scriptPath: string, args: readonly string[], optio
       windowsHide: true,
       cwd: options.cwd,
       env: options.env ?? providerEnv(),
+    });
+    // Without a listener a deferred spawn error is an uncaught exception that fires after the hook's own
+    // try/catch has returned: Node exits 1 and the host shows a hook error (spec §8.6: exit is always 0).
+    child.on("error", (error) => {
+      try {
+        options.onError?.(error);
+      } catch {
+        // the callback must not become the uncaught exception this listener exists to prevent
+      }
     });
     child.unref();
     return child.pid ?? null;

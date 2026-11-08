@@ -5,7 +5,8 @@
  * - `saveDatabaseFile`: export → `<db>.tmp-<pid>` → fsync → copy current → `.prev` → rename
  *   (5 retries, 20 ms apart; EPERM/EBUSY fall back to copy + warning).
  * - `recoverFromPrev`: keep the damaged file as `<db>.corrupt-<ts>` and restore `.prev`.
- * - `cleanOrphanTmp`: delete `*.tmp-<pid>` files older than 10 minutes next to the database and in `snapshot/`.
+ * - `cleanOrphanTmp`: delete `*.tmp-<pid>` files older than 10 minutes in every directory whose writers use
+ *   the tmp + rename convention: next to the database, `snapshot/`, `queue/`, `state/` and `raw/` (§5.8 GC, §9.4 F1).
  */
 
 import {
@@ -236,17 +237,21 @@ export function recoverFromPrev(dbPath: string, prevPath: string, options: Recov
   return { buffer: previous, corruptPath };
 }
 
+/** The directories whose writers leave `<file>.tmp-<pid>` behind when killed between write and rename. */
+export type OrphanTmpPaths = Pick<HarnessPaths, "dir" | "snapshotDir" | "queueDir" | "stateDir" | "rawDir">;
+
+export function orphanTmpDirectories(paths: OrphanTmpPaths): string[] {
+  return [...new Set([paths.dir, paths.snapshotDir, paths.queueDir, paths.stateDir, paths.rawDir])];
+}
+
 /**
- * Remove `*.tmp-<pid>` leftovers of crashed writers next to the database and in `snapshot/`.
- * Only files older than `olderThanMs` (default 10 minutes) are removed; returns the removed paths.
+ * Remove `*.tmp-<pid>` leftovers of crashed writers: the database save and `snapshot/` (store, snapshot
+ * builder), `queue/` and `state/` (hook `writeJsonAtomic`, worker import, idle sweep, notify) and `raw/`
+ * (provider cache). Only files older than `olderThanMs` (default 10 minutes) are removed; returns the removed paths.
  */
-export function cleanOrphanTmp(
-  paths: Pick<HarnessPaths, "dir" | "snapshotDir">,
-  olderThanMs: number = DEFAULT_ORPHAN_TMP_MAX_AGE_MS,
-  nowMs: number = Date.now()
-): string[] {
+export function cleanOrphanTmp(paths: OrphanTmpPaths, olderThanMs: number = DEFAULT_ORPHAN_TMP_MAX_AGE_MS, nowMs: number = Date.now()): string[] {
   const removed: string[] = [];
-  for (const directory of new Set([paths.dir, paths.snapshotDir])) {
+  for (const directory of orphanTmpDirectories(paths)) {
     let entries: string[];
     try {
       entries = readdirSync(directory);

@@ -7,6 +7,7 @@
  */
 
 import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 interface RecordedSpawn {
@@ -14,6 +15,8 @@ interface RecordedSpawn {
   args: string[];
   options: { detached?: boolean; stdio?: unknown; windowsHide?: boolean; cwd?: string; env?: Record<string, string | undefined> };
   unref: () => void;
+  /** A real emitter: `emit("error")` without a listener throws, exactly like a ChildProcess. */
+  child: EventEmitter;
 }
 
 const recorded: RecordedSpawn[] = [];
@@ -24,8 +27,11 @@ vi.mock("node:child_process", async (importOriginal) => {
     ...actual,
     spawn: (command: string, args: string[], options: RecordedSpawn["options"]) => {
       const unref = vi.fn();
-      recorded.push({ command, args, options, unref });
-      return { pid: 4242 + recorded.length, unref } as unknown as ChildProcess;
+      const child = new EventEmitter() as EventEmitter & { pid: number; unref: () => void };
+      child.unref = unref;
+      recorded.push({ command, args, options, unref, child });
+      child.pid = 4242 + recorded.length;
+      return child as unknown as ChildProcess;
     },
   };
 });
@@ -73,6 +79,9 @@ function expectDetached(call: RecordedSpawn, expectedArgs: { script: RegExp; res
   expect(call.options.stdio).toBe("ignore");
   expect(call.options.windowsHide).toBe(true);
   expect(call.unref).toHaveBeenCalledTimes(1);
+  // Deferred spawn failures (EAGAIN/EMFILE/ENOENT/EACCES) arrive as an `error` event after spawn returns;
+  // without a listener they crash the hook with exit 1 (spec §8.6: exit is always 0).
+  expect(call.child.listenerCount("error")).toBe(1);
   const env = call.options.env ?? {};
   expect(env.HARNESS_MEMORY_DISABLE).toBe("1");
   for (const key of Object.keys(env)) {
@@ -91,6 +100,21 @@ describe("detached spawns never open a console window", () => {
     expectDetached(recorded[0]!, { script: /worker\.js$/, rest: ["C:\\proj", "extract"] });
     expect(recorded[0]!.options.cwd).toBe("C:\\proj");
     expect(providerEnv().CLAUDECODE).toBeUndefined();
+  });
+
+  test("a deferred spawn failure is handled, not thrown — and a throwing onError callback is contained", () => {
+    const seen: string[] = [];
+    spawnDetached("C:\\pkg\\dist\\worker.js", ["C:\\proj", "extract"], { cwd: "C:\\proj", onError: (error) => seen.push(error.message) });
+    // EventEmitter semantics: `emit("error")` with no listener throws — the exact mechanism that used to kill the hook.
+    expect(() => recorded[0]!.child.emit("error", new Error("spawn EMFILE"))).not.toThrow();
+    expect(seen).toEqual(["spawn EMFILE"]);
+
+    spawnDetached("C:\\pkg\\dist\\worker.js", ["C:\\proj", "extract"], {
+      onError: () => {
+        throw new Error("logger exploded");
+      },
+    });
+    expect(() => recorded[1]!.child.emit("error", new Error("spawn EAGAIN"))).not.toThrow();
   });
 
   test("the hook's default worker spawn (stale snapshot at session-start → worker reindex) carries the same options", async () => {

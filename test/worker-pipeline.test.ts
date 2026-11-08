@@ -17,18 +17,20 @@ import { ledgerFile, queueFile, rawFile, resolvePaths, stateDirectories, type Ha
 import type { ProbeResult } from "../src/core/vocabulary";
 import { acquireDirLock } from "../src/db/locks";
 import { getDbGeneration, getMeta, hasWriteOp } from "../src/db/meta";
-import { EpisodeRepository } from "../src/db/repositories/episodes";
+import { EpisodeRepository, type EpisodeRecord } from "../src/db/repositories/episodes";
 import { ExtractionRunRepository } from "../src/db/repositories/runs";
 import { buildEpisodeDescriptor } from "../src/dream/episode";
 import { createReplayProvider, type ExtractionProvider, type ProviderResult } from "../src/dream/extract/providers";
 import { appendLedgerLine } from "../src/dream/ledger";
-import { composeStore, runWorker, silentWorkerLogger, type WorkerOptions } from "../src/dream/worker";
+import { composeStore, importTextFile, isEpisodeDescriptor, readEpisodeLines, rememberImportText, runWorker, silentWorkerLogger, type WorkerOptions } from "../src/dream/worker";
 import { MemoryRepository } from "../src/memory/repository";
-import { loadLedgerFixture, withOffsets } from "./helpers/ledger-fixture";
+import { assistantLine, loadLedgerFixture, promptLine, withOffsets } from "./helpers/ledger-fixture";
+import { autoMemory } from "./helpers/memory-fixtures";
 import { factFixture, outputFixture } from "./helpers/replay-run";
 
 const NOW = "2026-11-08T15:00:00.000Z";
 const s01 = loadLedgerFixture("s01-correction-only.jsonl").lines.filter((line) => line.turn_key === "p1");
+const s02 = loadLedgerFixture("s02-fail-then-resolve.jsonl").lines.filter((line) => line.turn_key === "p2");
 
 let root: string;
 let paths: HarnessPaths;
@@ -271,6 +273,117 @@ describe("worker extract", () => {
     await store.read((db) => expect(new EpisodeRepository(db).getById(descriptor.id)).toMatchObject({ status: "skipped", skipReason: "no_signal" }));
   });
 
+  test("a lease batch made only of no_signal episodes does not end the run while an eligible episode is due (R3)", async () => {
+    const readOnly = (turn: string, seq: number): LedgerLine[] => [
+      promptLine("show me the file", { seq, turn_key: turn, ts: "2026-11-08T14:00:00.000Z" }),
+      assistantLine("Here it is.", { seq: seq + 1, turn_key: turn, ts: "2026-11-08T14:00:01.000Z" }),
+    ];
+    // Three read-only turns close before the eligible one (older closed_at → leased first, LEASE_BATCH = 3).
+    clockNow = "2026-11-08T14:00:02.000Z";
+    const quiet = ["q1", "q2", "q3"].map((turn, index) => queueEpisode(readOnly(turn, 9100 + index * 10), {}, `k-quiet-${turn}`));
+    clockNow = NOW;
+    const eligible = queueEpisode(s02, {}, "k-s02");
+    expect(eligible.flags.correction).toBeUndefined();
+    expect(eligible.evidence_weight).toBe(2);
+    const provider = createReplayProvider({
+      answers: { [eligible.id]: outputFixture([factFixture({ evidence_refs: ["e2", "e4"], knowledge_kind: "failure_resolution" })]) },
+    });
+
+    const result = await worker({ provider });
+    expect(result.skipped.sort()).toEqual(quiet.map((descriptor) => descriptor.id).sort());
+    expect(result.processed.map((item) => item.episodeId)).toEqual([eligible.id]);
+    expect(result.processed[0]).toMatchObject({ status: "ok", created: [expect.any(String)] });
+    // The second lease happened inside the same lock session: one loop, no second spawn needed.
+    expect(result.loops).toBe(1);
+  });
+
+  test("a probe timeout (or garbage probe) leaves the batch queued without burning an attempt and never kills it", async () => {
+    const descriptor = queueEpisode(s01);
+    const provider = fakeProvider({ probe: "probe_timeout" });
+    const result = await worker({ provider });
+    expect(result.processed[0]).toMatchObject({ status: "timeout", episodeId: descriptor.id });
+    expect(result.waiting).toEqual({ count: 1, reason: "probe_timeout" });
+    expect(provider.extracts).toEqual([]);
+    const store = composeStore({ paths, config, logger: silentWorkerLogger, clock });
+    await store.read((db) => {
+      expect(new EpisodeRepository(db).getById(descriptor.id)).toMatchObject({ status: "queued", attemptCount: 0, nextAttemptAt: "2026-11-09T15:00:00.000Z" });
+      const run = new ExtractionRunRepository(db).getById(extractionRunId(descriptor.id))!;
+      expect(run.status).toBe("timeout");
+      expect(run.error).toContain("probe: probe_timeout");
+      expect(getMeta(db, "last_probe_result")).toBe("probe_timeout");
+    });
+
+    // Three more daily probe failures: the episode is still queued, not dead (the provider was never asked about it).
+    for (const day of ["2026-11-09T16:00:00.000Z", "2026-11-10T17:00:00.000Z", "2026-11-11T18:00:00.000Z"]) {
+      clockNow = day;
+      await worker({ provider });
+    }
+    expect(provider.probes).toBe(4);
+    expect(provider.extracts).toEqual([]);
+    await store.read((db) => expect(new EpisodeRepository(db).getById(descriptor.id)).toMatchObject({ status: "queued", attemptCount: 0 }));
+
+    // Once the provider works the waiting episode is extracted on its first real attempt.
+    clockNow = "2026-11-12T19:00:00.000Z";
+    const good = fakeProvider({ probe: "ok", extract: () => ({ status: "ok", raw: JSON.stringify(outputFixture([factFixture({ evidence_refs: ["e1"] })])) }) });
+    const recovered = await worker({ provider: good });
+    expect(recovered.processed.map((item) => item.status)).toEqual(["ok"]);
+    await store.read((db) => expect(new EpisodeRepository(db).getById(descriptor.id)).toMatchObject({ status: "extracted", attemptCount: 1 }));
+  });
+
+  test("queue files written while the worker ran are picked up after worker.lock is released (§9.3 E)", async () => {
+    const first = queueEpisode(s01);
+    const late: { descriptor: EpisodeDescriptor | null } = { descriptor: null };
+    const output = JSON.stringify(outputFixture([factFixture({ evidence_refs: ["e1"] })]));
+    const provider = fakeProvider({
+      probe: "ok",
+      extract: () => {
+        // Another session's stop hook queues an episode during the provider call (its worker exited as busy).
+        if (late.descriptor === null) late.descriptor = queueEpisode(s01, {}, "k-late");
+        return { status: "ok", raw: output };
+      },
+    });
+    const result = await worker({ provider });
+    expect(late.descriptor).not.toBeNull();
+    expect(result.exitCode).toBe(0);
+    expect(result.processed.map((item) => item.episodeId).sort()).toEqual([first.id, late.descriptor!.id].sort());
+    expect(readdirSync(paths.queueDir)).toEqual([]);
+    expect(existsSync(paths.workerLock)).toBe(false);
+    expect(existsSync(paths.workerPid)).toBe(false);
+  });
+
+  test("a queue file that is not a complete descriptor is removed instead of wedging every later lease session", async () => {
+    const partial = {
+      schema: "episode.v1",
+      id: "partial-ep",
+      host: "claude-code",
+      session_id: "s",
+      turn_key: "t",
+      closed_at: NOW,
+      ledger_ref: "ledger/claude-code-k1.jsonl#0-10",
+      scope_refs: [],
+      tools: [],
+      flags: {},
+    };
+    expect(isEpisodeDescriptor(partial)).toBe(false);
+    writeFileSync(join(paths.queueDir, "partial-ep.json"), JSON.stringify(partial));
+    const good = queueEpisode(s01);
+    expect(isEpisodeDescriptor(good)).toBe(true);
+    expect(isEpisodeDescriptor({ ...good, close_reason: "nonsense" })).toBe(false);
+    expect(isEpisodeDescriptor({ ...good, host: "github" })).toBe(false);
+    expect(isEpisodeDescriptor({ ...good, segment: -1 })).toBe(false);
+    expect(isEpisodeDescriptor({ ...good, fired: [{ enforcement: "advise" }] })).toBe(false);
+    expect(isEpisodeDescriptor({ ...good, prompt_text: undefined, correction_for: undefined })).toBe(true);
+
+    const provider = createReplayProvider({ answers: { [good.id]: outputFixture([factFixture({ evidence_refs: ["e1"] })]) } });
+    const result = await worker({ provider });
+    expect(result.exitCode).toBe(0);
+    expect(result.errors).toEqual([]);
+    expect(result.processed.map((item) => item.episodeId)).toEqual([good.id]);
+    expect(readdirSync(paths.queueDir)).toEqual([]);
+    const store = composeStore({ paths, config, logger: silentWorkerLogger, clock });
+    await store.read((db) => expect(new EpisodeRepository(db).getById("partial-ep")).toBeNull());
+  });
+
   test("the worker lock makes a second worker exit as busy", async () => {
     // Same injected clock as the worker: a wall-clock heartbeat would look stale next to the fixed NOW.
     const held = await acquireDirLock(paths.workerLock, { purpose: "test", waitMs: 0, now: clock });
@@ -296,11 +409,14 @@ describe("worker extract", () => {
 });
 
 describe("worker extract with an embedder", () => {
-  test("new rows are embedded in a separate lock session after extraction and the dense snapshot appears", async () => {
+  test("new rows are embedded outside db.lock after extraction, stored in a short lock session, and the dense snapshot appears", async () => {
     const descriptor = queueEpisode(s01);
     const provider = createReplayProvider({ answers: { [descriptor.id]: outputFixture([factFixture({ evidence_refs: ["e1"] })]) } });
     const calls: string[][] = [];
+    const lockedDuringEmbed: boolean[] = [];
     const embed = async (texts: string[]): Promise<Float32Array[]> => {
+      // §9.2: the model never runs while the writer lock is held.
+      lockedDuringEmbed.push(existsSync(paths.dbLock));
       calls.push(texts);
       return texts.map((_text, index) => Float32Array.from([1, index + 1, 0.5]));
     };
@@ -310,9 +426,9 @@ describe("worker extract with an embedder", () => {
     expect(result.exitCode).toBe(0);
     expect(result.errors).toEqual([]);
     expect(result.processed[0]?.created).toHaveLength(1);
-    // warm-up with an empty batch happens before the lock session; then exactly the new row is embedded
-    expect(calls[0]).toEqual([]);
-    expect(calls.slice(1).flat()).toHaveLength(1);
+    // exactly the new row is embedded, without the database lock
+    expect(calls.flat()).toHaveLength(1);
+    expect(lockedDuringEmbed).toEqual([false]);
     expect(existsSync(paths.snapshotDense)).toBe(true);
 
     const store = composeStore({ paths, config, logger: silentWorkerLogger, clock });
@@ -327,6 +443,45 @@ describe("worker extract with an embedder", () => {
     const rerun = await worker({ provider, embed });
     expect(rerun.processed[0]?.created ?? []).toEqual([]);
     expect(calls.length).toBe(before);
+  });
+
+  test("the backlog is embedded after the new rows, lock-free, and rows edited meanwhile are left alone", async () => {
+    const store = composeStore({ paths, config, logger: silentWorkerLogger, clock });
+    const seeded: string[] = [];
+    await store.withWriteLock("seed", 1_000, (db) => {
+      const repository = new MemoryRepository(db, { clock });
+      seeded.push(repository.create(autoMemory({ status: "active", summary: "Older row one without a vector.", createdAt: "2026-11-01T00:00:00.000Z", updatedAt: "2026-11-01T00:00:00.000Z" })).id);
+      seeded.push(repository.create(autoMemory({ status: "active", summary: "Older row two without a vector.", createdAt: "2026-11-02T00:00:00.000Z", updatedAt: "2026-11-02T00:00:00.000Z" })).id);
+      return { id: null, kind: "seed", noop: false, wrote: true };
+    });
+    const descriptor = queueEpisode(s01);
+    const provider = createReplayProvider({ answers: { [descriptor.id]: outputFixture([factFixture({ evidence_refs: ["e1"] })]) } });
+    const calls: string[][] = [];
+    const embed = async (texts: string[]): Promise<Float32Array[]> => {
+      calls.push(texts);
+      // The user edits the second seeded row while the model runs: its vector must not be stored against new text.
+      if (calls.length === 1) {
+        await store.withWriteLock("edit", 1_000, (db) => {
+          new MemoryRepository(db, { clock }).update(seeded[1]!, { summary: "Older row two, rewritten while embedding ran." });
+          return { id: null, kind: "edit", noop: false, wrote: true };
+        });
+      }
+      return texts.map((_text, index) => Float32Array.from([index + 1, 0, 0]));
+    };
+    config.embeddings.enabled = true;
+    const result = await worker({ provider, embed });
+    expect(result.errors).toEqual([]);
+    const created = result.processed[0]!.created[0]!;
+    // one batch: the created row first, then the backlog oldest first
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![0]).toContain("Run the test suite with pnpm test");
+    expect(calls[0]!.slice(1)).toEqual([expect.stringContaining("Older row one"), expect.stringContaining("Older row two without")]);
+    await store.read((db) => {
+      const repository = new MemoryRepository(db);
+      expect(repository.getById(created)?.embedding).not.toBeNull();
+      expect(repository.getById(seeded[0]!)?.embedding).not.toBeNull();
+      expect(repository.getById(seeded[1]!)?.embedding).toBeNull();
+    });
   });
 
   test("an embedder failure is reported but never fails the run", async () => {
@@ -409,5 +564,126 @@ describe("worker reindex and dream", () => {
       const row = new MemoryRepository(db).list({ sourceKind: "import" })[0]!;
       expect(row).toMatchObject({ authority: "human", importUnconfirmed: 1, status: "active", sourceRef: "import:CLAUDE.md#L1" });
     });
+  });
+});
+
+describe("import episodes: source text", () => {
+  function importRecord(ledgerRef: string, id = "import-ep-x"): EpisodeRecord {
+    return {
+      id,
+      host: "import",
+      sessionId: "import:CLAUDE.md",
+      turnKey: "t",
+      segment: 0,
+      startedAt: NOW,
+      closedAt: NOW,
+      closeReason: "import",
+      ledgerRef,
+      correctionFor: null,
+      contextRef: null,
+      scopeRefs: [],
+      tools: [],
+      failureSignatures: [],
+      flags: {},
+      fired: [],
+      evidenceWeight: 1,
+      eventCount: 1,
+      status: "queued",
+      skipReason: null,
+      leaseUntil: null,
+      attemptCount: 0,
+      nextAttemptAt: null,
+      lastError: null,
+      extractionRunId: null,
+    };
+  }
+
+  function promptText(record: EpisodeRecord): string | null {
+    const lines = readEpisodeLines(paths, record, null).lines;
+    const line = lines[0];
+    return line !== undefined && line.kind === "prompt" ? line.text : null;
+  }
+
+  test("`import:<path>` never reads a file outside the project root; relative paths resolve against the root, not cwd; credentials are redacted", () => {
+    const outside = join(tmpdir(), `hm-secret-${String(process.pid)}.txt`);
+    writeFileSync(outside, "aws_access_key_id = AKIAABCDEFGHIJKLMNOP\n", "utf8");
+    try {
+      expect(readEpisodeLines(paths, importRecord(`import:${outside.split("\\").join("/")}#L1`), null).lines).toEqual([]);
+      expect(readEpisodeLines(paths, importRecord(`import:${outside.split("\\").join("/")}`), null).lines).toEqual([]);
+      expect(readEpisodeLines(paths, importRecord("import:../outside.md#L1"), null).lines).toEqual([]);
+      expect(readEpisodeLines(paths, importRecord("import:.#L1"), null).lines).toEqual([]);
+
+      mkdirSync(join(root, "docs"), { recursive: true });
+      writeFileSync(join(root, "docs", "notes.md"), "# notes\n- Use pnpm test here; token=abcdef123456 was the old secret.\n", "utf8");
+      // process.cwd() is the repository checkout, not `root`: the project-relative path still resolves.
+      expect(process.cwd()).not.toBe(root);
+      const text = promptText(importRecord("import:docs/notes.md#L2"));
+      expect(text).toContain("Use pnpm test here");
+      expect(text).not.toContain("abcdef123456");
+      expect(readEpisodeLines(paths, importRecord("import:docs/notes.md#L9"), null).lines).toEqual([]);
+    } finally {
+      rmSync(outside, { force: true });
+    }
+  });
+
+  test("the bullet text kept when the queue file was consumed serves retries, so the source file is never re-read", () => {
+    const descriptor: EpisodeDescriptor = {
+      ...queueEpisode(s01),
+      id: "import-ep-kept",
+      host: "import",
+      session_id: "import:CLAUDE.md",
+      turn_key: "kept",
+      close_reason: "import",
+      ledger_ref: "import:/etc/passwd#L1",
+      prompt_text: "Never commit the deploy key ghp_abcdefghijklmnopqrstuvwxyz0123456789; rotate it instead.",
+    };
+    rememberImportText(paths, descriptor);
+    expect(existsSync(importTextFile(paths, descriptor.id))).toBe(true);
+    const text = promptText(importRecord(descriptor.ledger_ref, descriptor.id));
+    expect(text).toContain("Never commit the deploy key");
+    expect(text).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123456789");
+    // A ledger-backed descriptor keeps nothing.
+    rememberImportText(paths, queueEpisode(s01, {}, "k-ledger"));
+    expect(readdirSync(paths.rawDir).filter((name) => name.endsWith(".import.txt"))).toEqual([`${descriptor.id}.import.txt`]);
+  });
+
+  test("worker-level: a retried import episode is extracted from the kept text although its queue file is gone and the source file never existed", async () => {
+    const descriptor: EpisodeDescriptor = {
+      ...queueEpisode(s01),
+      id: "import-ep-retry",
+      host: "import",
+      session_id: "import:CLAUDE.md",
+      session_key: "import",
+      turn_key: "retry",
+      close_reason: "import",
+      ledger_ref: "import:CLAUDE.md#L7",
+      tools: [],
+      scope_refs: [],
+      flags: {},
+      prompt_text: "Use pnpm test; the npm scripts were removed from this repository.",
+    };
+    for (const name of readdirSync(paths.queueDir)) rmSync(join(paths.queueDir, name));
+    writeFileSync(queueFile(paths, descriptor.id), JSON.stringify(descriptor));
+    const failing = fakeProvider({ probe: "ok", extract: () => ({ status: "timeout", raw: "", error: "killed after 120 s" }) });
+    const first = await worker({ provider: failing });
+    expect(first.processed[0]).toMatchObject({ status: "timeout", episodeId: descriptor.id });
+    expect(readdirSync(paths.queueDir)).toEqual([]);
+    expect(existsSync(join(root, "CLAUDE.md"))).toBe(false);
+
+    clockNow = "2026-11-08T16:30:00.000Z";
+    const prompts: string[] = [];
+    const good: ExtractionProvider = {
+      name: "claude",
+      probe: () => Promise.resolve("ok"),
+      extract: (prompt) => {
+        prompts.push(prompt);
+        return Promise.resolve({ status: "ok", raw: JSON.stringify(outputFixture([factFixture({ evidence_refs: ["e1"], knowledge_kind: "convention", summary: "Run the suite with pnpm test; npm scripts are gone from package.json." })])) });
+      },
+    };
+    const second = await worker({ provider: good });
+    expect(second.processed[0]).toMatchObject({ status: "ok", episodeId: descriptor.id });
+    expect(second.processed[0]?.created).toHaveLength(1);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain("Use pnpm test; the npm scripts were removed from this repository.");
   });
 });

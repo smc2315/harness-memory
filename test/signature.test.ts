@@ -3,6 +3,8 @@ import { performance } from "node:perf_hooks";
 import { describe, expect, test } from "vitest";
 
 import {
+  CANONICAL_CACHE_SIZE,
+  canonicalCommandFor,
   canonicalizeCommand,
   checkRegexSafety,
   checkSpecificity,
@@ -287,5 +289,30 @@ describe("matchSignature", () => {
     expect(globMatchesPath("src", "src/db/store.ts")).toBe(true);
     expect(globMatchesPath("src/db/store.ts", "src/db/store.ts")).toBe(true);
     expect(globMatchesPath("docs/**", "src/db/store.ts")).toBe(false);
+  });
+});
+
+describe("canonicalCommandFor (memoized canonical form)", () => {
+  const pmTest = compiled(cmd("npm test"));
+
+  test("one shared canonical form per (command, dialect); null and undefined dialects share the `unknown` entry", () => {
+    const target = "cd pkg && npm test -- --watch";
+    const first = canonicalCommandFor(target, "bash");
+    expect(first).toEqual(canonicalizeCommand(target, "bash"));
+    expect(canonicalCommandFor(target, "bash")).toBe(first);
+    expect(canonicalCommandFor(target, "powershell")).not.toBe(first);
+    expect(canonicalCommandFor(target, null)).toBe(canonicalCommandFor(target, undefined));
+  });
+
+  test("matchSignature goes through the cache (LRU refresh), so N cmd signatures tokenize one target once", () => {
+    const target = "cd pkg && npm test -- --watch src/a.test.ts";
+    const first = canonicalCommandFor(target, "bash");
+    // Make `target` the oldest entry of a full cache, let matchSignature touch it, then insert enough newer
+    // entries to evict everything that was not refreshed in between.
+    const fillers = Array.from({ length: CANONICAL_CACHE_SIZE - 1 }, (_, index) => canonicalCommandFor(`echo filler-${String(index)}`, "bash"));
+    expect(matchSignature(pmTest, target, "bash")).toBe(true);
+    for (let index = 0; index < CANONICAL_CACHE_SIZE - 1; index += 1) canonicalCommandFor(`echo newer-${String(index)}`, "bash");
+    expect(canonicalCommandFor(target, "bash")).toBe(first);
+    expect(canonicalCommandFor("echo filler-0", "bash")).not.toBe(fillers[0]);
   });
 });

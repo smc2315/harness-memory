@@ -10,13 +10,16 @@
  * The matcher is `src/activation/signature.ts`, the same code that evaluates memory signatures, so a
  * derived rule and its policy memory can never disagree. Rules come either from `policy_rules` rows
  * (`PolicyRuleRepository`, CLI / tests) or from the snapshot (`PolicyEngine.fromSnapshotRules`, hooks).
- * Hooks never open SQLite: the snapshot path only touches precompiled regex sources.
+ * Hooks never open SQLite, and the snapshot path never compiles patterns: a derived rule's `arg_pattern`
+ * is matched with its policy memory's precompiled signature (`fromSnapshotRules(rules, loaded.byId)`),
+ * so a PreToolUse process loads no minimatch and runs no regex-safety sampling. Only a manual rule
+ * (memory_id NULL) that carries an `arg_pattern` is compiled lazily.
  *
  * Warning-only: nothing here blocks execution; the adapter maps `enforcement` onto §7.2.
  */
 
 import { isGlobalScope, type ShellDialect, type TriggerSignature } from "../core/vocabulary";
-import type { CompiledSignature, SnapshotRule } from "../core/snapshot-types";
+import type { CompiledSignature, SnapshotMemory, SnapshotRule } from "../core/snapshot-types";
 import { compileSignature, globMatchesPath, globRegexFlags, matchSignature } from "../activation/signature";
 import { toolGlobMatches } from "../activation/tool-vocabulary";
 import type { LifecycleTrigger } from "../db/schema/types";
@@ -30,7 +33,12 @@ import type {
 /** Anything that can list rules per trigger: the SQLite repository or an in-memory snapshot source. */
 export interface PolicyRuleSource {
   list(triggerKind?: LifecycleTrigger): PolicyRuleRecord[];
+  /** Precompiled matcher for a rule's `arg_pattern` when the source already holds one (snapshot path); undefined → compile. */
+  precompiledSignature?(rule: PolicyRuleRecord): CompiledSignature | undefined;
 }
+
+/** Snapshot memories by id (`LoadedSnapshot.byId`): a derived rule's `arg_pattern` is its policy memory's compiled signature. */
+export type SnapshotMemorySignatures = ReadonlyMap<string, Pick<SnapshotMemory, "signature">>;
 
 export function normalizeScopeRef(scopeRef: string): string {
   return scopeRef.trim().replace(/\\/g, "/").replace(/\/+/g, "/").replace(/^(\.\/)+/, "");
@@ -60,13 +68,28 @@ export function snapshotRuleToRecord(rule: SnapshotRule): PolicyRuleRecord {
 
 class SnapshotRuleSource implements PolicyRuleSource {
   private readonly rules: PolicyRuleRecord[];
+  /** rule id → the policy memory's precompiled signature (derived rules whose memory is in the snapshot). */
+  private readonly precompiled = new Map<string, CompiledSignature>();
 
-  constructor(rules: readonly SnapshotRule[]) {
+  constructor(rules: readonly SnapshotRule[], memories?: SnapshotMemorySignatures) {
     this.rules = rules.map(snapshotRuleToRecord);
+    if (memories === undefined) return;
+    for (const rule of rules) {
+      if (rule.memory_id === null || rule.pattern_kind === null || rule.arg_pattern === null) continue;
+      const signature = memories.get(rule.memory_id)?.signature ?? null;
+      // derive.ts copies the compiled pattern_kind / canonical pattern into the rule; anything else falls back to compiling.
+      if (signature !== null && signature.pattern_kind === rule.pattern_kind && signature.pattern === rule.arg_pattern) {
+        this.precompiled.set(rule.id, signature);
+      }
+    }
   }
 
   list(triggerKind?: LifecycleTrigger): PolicyRuleRecord[] {
     return triggerKind === undefined ? [...this.rules] : this.rules.filter((rule) => rule.triggerKind === triggerKind);
+  }
+
+  precompiledSignature(rule: PolicyRuleRecord): CompiledSignature | undefined {
+    return this.precompiled.get(rule.id);
   }
 }
 
@@ -105,9 +128,12 @@ export class PolicyEngine {
     this.repository = repository;
   }
 
-  /** Hook-side engine over the rules embedded in `snapshot/active.v1.json`. */
-  static fromSnapshotRules(rules: readonly SnapshotRule[]): PolicyEngine {
-    return new PolicyEngine(new SnapshotRuleSource(rules));
+  /**
+   * Hook-side engine over the rules embedded in `snapshot/active.v1.json`. With `memories` (the snapshot's
+   * `byId` map) derived rules match through their memory's precompiled signature instead of recompiling.
+   */
+  static fromSnapshotRules(rules: readonly SnapshotRule[], memories?: SnapshotMemorySignatures): PolicyEngine {
+    return new PolicyEngine(new SnapshotRuleSource(rules, memories));
   }
 
   /**
@@ -178,8 +204,8 @@ export class PolicyEngine {
     const key = `${rule.id}|${rule.toolPattern}|${rule.targetKind}|${rule.patternKind ?? ""}|${rule.argPattern ?? ""}`;
     const cached = this.compiledArgPatterns.get(key);
     if (cached !== undefined) return cached;
-    let compiled: CompiledSignature | null = null;
-    if (rule.argPattern !== null && rule.patternKind !== null) {
+    let compiled: CompiledSignature | null = this.repository.precompiledSignature?.(rule) ?? null;
+    if (compiled === null && rule.argPattern !== null && rule.patternKind !== null) {
       const signature: TriggerSignature = {
         tool: rule.toolPattern,
         target: rule.targetKind,

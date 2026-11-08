@@ -4,9 +4,12 @@
  */
 
 import { existsSync, readFileSync, statSync, utimesSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { afterEach, describe, expect, test } from "vitest";
 
+import { embedHelperSocketPath, repoHash, resolvePaths, unixSocketPathMaxBytes, unixSocketPathTooLong } from "../src/core/paths";
 import { createDenseClient, ensureHelper, queryDense, requestHelper, spawnTouchFile } from "../src/embed/client";
 import { decodeDenseSnapshot, denseTopK, encodeDenseSnapshot, readDenseSnapshot } from "../src/embed/dense-file";
 import { probeHelper, startHelper, type Embedder, type HelperHandle } from "../src/embed/helper";
@@ -179,5 +182,88 @@ describe("client fallback without a helper", () => {
   test("readDenseSnapshot tolerates a missing file", () => {
     fixture = createHarnessFixture({ memories: [] });
     expect(readDenseSnapshot(fixture.paths.snapshotDense)).toBeNull();
+  });
+});
+
+describe("socket location stays under the unix socket path limit", () => {
+  // 74 bytes of ASCII root (the macOS example from the review) and a Hangul root that is short in
+  // characters but long in UTF-8 bytes: both would overflow sun_path if the socket sat under the repo.
+  const deepAsciiRoot = "/Users/firstname.lastname/Developer/company-org/service-repository-name";
+  const deepHangulRoot = "/Users/사용자이름/개발/회사조직/서비스저장소이름/하위패키지/아주깊은디렉터리";
+  const macTmp = "/var/folders/zz/zyxvpxvq6csfxvn_n0000000000000/T";
+
+  test("Windows keeps the named pipe keyed by repoHash", () => {
+    const hash = repoHash(deepAsciiRoot);
+    expect(embedHelperSocketPath(hash, { platform: "win32", env: { XDG_RUNTIME_DIR: "/run/user/1000" } })).toBe(`\\\\.\\pipe\\harness-memory-embed-${hash}`);
+  });
+
+  test("POSIX uses $XDG_RUNTIME_DIR, else the temp dir, never a path under the repository", () => {
+    const hash = repoHash(deepAsciiRoot);
+    expect(embedHelperSocketPath(hash, { platform: "linux", env: { XDG_RUNTIME_DIR: "/run/user/1000" }, tmpDir: "/tmp" })).toBe(`/run/user/1000/harness-memory-embed-${hash}.sock`);
+    expect(embedHelperSocketPath(hash, { platform: "linux", env: { XDG_RUNTIME_DIR: "" }, tmpDir: "/tmp" })).toBe(`/tmp/harness-memory-embed-${hash}.sock`);
+    expect(embedHelperSocketPath(hash, { platform: "darwin", env: {}, tmpDir: macTmp })).toBe(`${macTmp}/harness-memory-embed-${hash}.sock`);
+    expect(embedHelperSocketPath(hash, { platform: "darwin", env: {}, tmpDir: macTmp })).not.toContain(deepAsciiRoot);
+  });
+
+  test("the socket path length does not depend on the repository path", () => {
+    for (const platform of ["linux", "darwin"] as const) {
+      const tmpDir = platform === "darwin" ? macTmp : "/tmp";
+      const shallow = embedHelperSocketPath(repoHash("/srv/app"), { platform, env: {}, tmpDir });
+      const ascii = embedHelperSocketPath(repoHash(deepAsciiRoot), { platform, env: {}, tmpDir });
+      const hangul = embedHelperSocketPath(repoHash(deepHangulRoot), { platform, env: {}, tmpDir });
+      for (const socketPath of [shallow, ascii, hangul]) {
+        expect(Buffer.byteLength(socketPath, "utf8")).toBe(Buffer.byteLength(shallow, "utf8"));
+        expect(unixSocketPathTooLong(socketPath, platform)).toBe(false);
+      }
+      expect(new Set([shallow, ascii, hangul]).size).toBe(3);
+    }
+  });
+
+  test("unixSocketPathTooLong counts UTF-8 bytes against sizeof(sun_path) - 1 per platform", () => {
+    expect(unixSocketPathMaxBytes("linux")).toBe(107);
+    expect(unixSocketPathMaxBytes("darwin")).toBe(103);
+    expect(unixSocketPathTooLong("/" + "x".repeat(106), "linux")).toBe(false);
+    expect(unixSocketPathTooLong("/" + "x".repeat(107), "linux")).toBe(true);
+    expect(unixSocketPathTooLong("/" + "x".repeat(102), "darwin")).toBe(false);
+    expect(unixSocketPathTooLong("/" + "x".repeat(103), "darwin")).toBe(true);
+    // 35 Hangul syllables are 105 bytes: too long on macOS although far under 103 characters.
+    const hangul = "/" + "가".repeat(35);
+    expect(hangul.length).toBeLessThan(103);
+    expect(unixSocketPathTooLong(hangul, "darwin")).toBe(true);
+    expect(unixSocketPathTooLong(hangul, "linux")).toBe(false);
+    // The old location would have overflowed for the review's example repository.
+    expect(unixSocketPathTooLong(`${deepAsciiRoot}/.harness-memory/locks/embed-helper.sock`, "darwin")).toBe(true);
+  });
+
+  test("resolvePaths gives a deep checkout a usable rendezvous point on this platform", () => {
+    const root = join(tmpdir(), "hm-deep", "a".repeat(60), "b".repeat(60), "c".repeat(60), "service-repository-name");
+    const paths = resolvePaths(root);
+    expect(paths.embedHelperSocket.startsWith(paths.root)).toBe(false);
+    expect(paths.embedHelperSocket).toContain(`harness-memory-embed-${repoHash(root)}`);
+    if (process.platform === "win32") {
+      expect(paths.embedHelperSocket).toMatch(/^\\\\\.\\pipe\\harness-memory-embed-[0-9a-f]{16}$/);
+    } else {
+      expect(unixSocketPathTooLong(paths.embedHelperSocket)).toBe(false);
+      expect(paths.embedHelperSocket.startsWith(process.env.XDG_RUNTIME_DIR || tmpdir())).toBe(true);
+    }
+  });
+
+  test("the helper refuses an over-long socket path loudly instead of binding to a truncated name", async () => {
+    const fixture = createHarnessFixture({ memories: [] });
+    try {
+      const exits: number[] = [];
+      const logs: string[] = [];
+      const socketPath = "/" + "x".repeat(120);
+      const handle = await startHelper({ paths: fixture.paths, config: fixture.config, embedder: fakeEmbedder, idleMs: 60_000, exit: (code) => exits.push(code), log: (line) => logs.push(line), signals: false, socketPath });
+      expect(exits).toEqual([1]);
+      expect(handle.closed).toBe(true);
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toMatch(/socket path is 121 bytes, over the \d+-byte unix socket limit/);
+      expect(logs[0]).toContain(socketPath);
+      expect(existsSync(fixture.paths.embedHelperPid)).toBe(false);
+      await handle.close();
+    } finally {
+      fixture.cleanup();
+    }
   });
 });

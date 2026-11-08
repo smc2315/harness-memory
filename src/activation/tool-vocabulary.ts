@@ -7,6 +7,7 @@
  */
 
 import { HOOK_IO_LIMITS } from "../core/hook-types";
+import { REDACTED, redactCredentials } from "../core/signals";
 import {
   CANONICAL_TOOL_FAMILIES,
   isCanonicalTool,
@@ -133,6 +134,17 @@ export function canonicalizeHostTool(host: Host, hostToolName: string): HostTool
 // ---------------------------------------------------------------------------------------------
 
 const MAX_SCOPE_REFS = 50;
+/** Per-token cap (also applied to program tokens): a longer slash-containing token is a blob (base64, JWT, minified code), not a path. */
+const MAX_SCOPE_REF_CHARS = 256;
+/** Total characters across one call's refs, so a ledger line (`scope_refs`, `failure_sig`) stays far below its 32 KB cap (§5.1). */
+const MAX_SCOPE_REFS_CHARS = 4_000;
+/**
+ * `NAME=value` where NAME smells like a credential (`AWS_SECRET_ACCESS_KEY=…`, `GH_TOKEN=…`): the value is never a
+ * repository path. The shared ledger redaction only catches bare `secret=` / `token=` style names.
+ */
+const SECRET_ASSIGNMENT = /\b([A-Za-z_][A-Za-z0-9_]*(?:secret|token|passw(?:or)?d|pwd|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth)[A-Za-z0-9_]*)(\s*=\s*)(["']?)[^\s"'&;,|]+\3/gi;
+/** Delimiter-free stand-in for `<redacted>` (`<` / `>` split tokens); the `$` keeps whatever it is glued to out of the refs. */
+const REDACTED_TOKEN = "$redacted$";
 const URL_TOKEN = /^[a-z][a-z0-9+.-]*:\/\//i;
 const DRIVE_PATH = /^[A-Za-z]:\//;
 const GIT_BASH_DRIVE = /^\/([A-Za-z])\/(.*)$/;
@@ -226,19 +238,35 @@ function stripGlobTail(value: string): string {
   return segments.slice(0, firstMagic).join("/");
 }
 
+/** `host:path`, `image:tag`, `Header: value` tokens are not repository paths; only a Windows drive prefix may carry `:`. */
+function hasForeignColon(value: string): boolean {
+  const colon = value.indexOf(":");
+  if (colon === -1) return false;
+  return !(DRIVE_PATH.test(value) && value.indexOf(":", 2) === -1);
+}
+
 /**
  * Repository-relative, forward-slash, path-like tokens in free text (commands, JSON tool input).
  * Quotes, `./`, flags, trailing punctuation and `:line:col` suffixes are stripped; URLs, variables,
  * `..` segments and absolute paths outside `root` are dropped; glob tails are cut (`src/**` → `src`).
+ * The text is redacted first exactly like a ledger line (plus `NAME=value` secrets), so a credential can
+ * never surface as a ref; tokens over 256 chars, `host:path`-style tokens and refs past a 4,000-char
+ * total are dropped so the refs stay bounded (§5.1 line cap).
  */
 export function extractScopeRefs(text: string, root?: string): string[] {
   const refs: string[] = [];
   const seen = new Set<string>();
-  for (const raw of splitTokens(text)) {
+  let totalChars = 0;
+  const scrubbed = redactCredentials(text)
+    .replaceAll(REDACTED, REDACTED_TOKEN)
+    .replace(SECRET_ASSIGNMENT, (_match, name: string, assign: string) => `${name}${assign}${REDACTED_TOKEN}`);
+  for (const raw of splitTokens(scrubbed)) {
     const token = cleanToken(raw);
-    if (token.length === 0 || token.startsWith("-") || token.includes("$") || URL_TOKEN.test(token)) continue;
+    if (token.length === 0 || token.length > MAX_SCOPE_REF_CHARS) continue;
+    if (token.startsWith("-") || token.includes("$") || URL_TOKEN.test(token)) continue;
     const hadSlash = /[\\/]/.test(token);
     let value = normalizeSlashes(token);
+    if (hasForeignColon(value)) continue;
     if (isAbsoluteLike(value)) {
       if (value.startsWith("~")) continue;
       const relative = relativizeToRoot(value, root);
@@ -261,11 +289,18 @@ export function extractScopeRefs(text: string, root?: string): string[] {
       if (base.length <= 1 && ext.length <= 1) continue; // `e.g`, `i.e`
     }
     if (seen.has(value)) continue;
+    if (totalChars + value.length > MAX_SCOPE_REFS_CHARS) continue;
     seen.add(value);
     refs.push(value);
+    totalChars += value.length;
     if (refs.length >= MAX_SCOPE_REFS) break;
   }
   return refs;
+}
+
+/** Program tokens share the scope-ref cap: a longer first token is a pasted blob, not a program. */
+function clipProgramToken(token: string | null): string | null {
+  return token !== null && token.length > MAX_SCOPE_REF_CHARS ? token.slice(0, MAX_SCOPE_REF_CHARS) : token;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -276,8 +311,9 @@ export interface PickedTarget {
   kind: SignatureTarget;
   /** Command text (≤ 4,000 chars), repository-relative path, URL or JSON digest (≤ 2,000 chars). */
   target: string | null;
+  /** Redacted, ≤ 50 refs of ≤ 256 chars each (see `extractScopeRefs`). */
   scopeRefs: string[];
-  /** Canonical program token for commands (`pm test`, `git`), null for other tools. */
+  /** Canonical program token for commands (`pm test`, `git`, ≤ 256 chars), null for other tools. */
   programToken: string | null;
 }
 
@@ -326,7 +362,7 @@ export function pickTarget(canonical: CanonicalTool, toolInput: unknown, options
         kind: "command",
         target,
         scopeRefs: extractScopeRefs(command, options.root),
-        programToken: primaryProgramToken(command, options.dialect ?? null),
+        programToken: clipProgramToken(primaryProgramToken(command, options.dialect ?? null)),
       };
     }
     case "edit":

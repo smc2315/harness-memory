@@ -6,7 +6,8 @@
  *   3 migrate       user_version < 21 → copy to .bak-v<N> → runMigrationsOnDb → hooks.postMigrate (default runPostMigrate)
  *   4 apply         BEGIN; op = fn(db, ctx); noop without writes → ROLLBACK (nothing saved);
  *                   otherwise hooks.deriveRules → meta.db_generation += 1 → write_ops(op.id) → quick_check → COMMIT
- *   5 save          export → .tmp-<pid> → fsync → copy current → .prev → rename (retries, copy fallback)
+ *   5 save          lock.stillHeld() (fence: a lock lost to another writer → LockBusyError, nothing written);
+ *                   export → .tmp-<pid> → fsync → copy current → .prev → rename (retries, copy fallback)
  *   6 snapshot      hooks.buildSnapshot(db, ctx); finally release the lock
  *
  * The module depends on nothing above `src/db`: the composition root (worker / CLI) injects
@@ -16,7 +17,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import type { Database as SqlJsDatabase } from "sql.js";
 
-import { DatabaseNewerThanCodeError } from "../core/errors";
+import { DatabaseNewerThanCodeError, LockBusyError } from "../core/errors";
 import { nowIso } from "../core/ids";
 import { stateDirectories, TARGET_USER_VERSION, type HarnessPaths } from "../core/paths";
 import {
@@ -29,7 +30,7 @@ import {
   verifySqliteHeader,
   type FileLogger,
 } from "./db-file";
-import { acquireDirLock, type LockHandle } from "./locks";
+import { acquireDirLock, readLockOwner, type LockHandle } from "./locks";
 import { getDbGeneration, hasWriteOp, insertWriteOp, setDbGeneration } from "./meta";
 import { getCurrentVersion, runMigrationsOnDb, type MigrationReport } from "./migrator";
 import { runPostMigrate } from "./post-migrate";
@@ -193,6 +194,10 @@ export class Store {
       now: this.clock,
     });
 
+    if (lock.takenOver) {
+      this.logger.log(`stale db.lock taken over for ${purpose} (previous writer died or stopped heartbeating)`);
+    }
+
     let db: SqlJsDatabase | null = null;
     try {
       const nowMs = Date.parse(now);
@@ -277,9 +282,16 @@ export class Store {
       const generation = committed && !op.noop ? ctx.generation : generationBefore;
       const finalCtx: WriteContext = { ...ctx, generation };
 
-      // step 5: save
+      // step 5: save — fencing first: a lock lost to another writer must never overwrite that writer's file
       let saved = false;
       if (committed || mustSave) {
+        if (!lock.stillHeld()) {
+          const holder = readLockOwner(this.paths.dbLock);
+          this.logger.warn(
+            `db.lock was taken over by ${holder === null ? "an unknown writer" : `${holder.purpose} (pid ${holder.pid})`} during ${purpose}; nothing saved`
+          );
+          throw new LockBusyError(this.paths.dbLock, holder);
+        }
         await saveDatabaseFile(db, this.paths.db, { pid: this.pid, logger: this.logger, prevPath: this.paths.dbPrev });
         db.run("PRAGMA foreign_keys = ON");
         saved = true;

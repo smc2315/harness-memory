@@ -8,7 +8,8 @@
  *   (3) auto candidates older than retention.candidate_days → rejected(expiry); proposals past expires_at → expired
  *       (an expired revalidate stales its row)
  *   (5) auto↔auto near-duplicates (Jaccard ≥ 0.8 or cosine ≥ 0.92) → `merge` proposal only
- *   (6) embedding backfill through an injected `embed(texts)`
+ *   (6) embedding backfill through an injected `embed(texts)` (inside the dream lock session, §5.8; the
+ *       extract path uses the lock-free selectEmbeddingBacklog → embedBacklog → applyEmbeddings split instead)
  *   (7) idle-turn sweep of state/*.json (ledger idle > 1 h → close as `idle`, enqueue) and GC
  *       (ledger segments 14 d, raw 24 h, tmp 10 min, audit_log 30 d)
  *   (8) snapshot — done by Store.withWriteLock after the commit
@@ -26,7 +27,7 @@ import { compileSignature } from "../activation/signature";
 import type { HarnessConfig } from "../core/config";
 import type { EpisodeDescriptor } from "../core/episode-types";
 import { createDeterministicId } from "../core/ids";
-import type { SessionState } from "../core/ledger-types";
+import type { LedgerLine, SessionState, ToolFailLine, ToolOkLine } from "../core/ledger-types";
 import { ledgerFile, queueFile, type HarnessPaths } from "../core/paths";
 import { LIVE_STATUSES } from "../core/vocabulary";
 import { cleanOrphanTmp } from "../db/db-file";
@@ -140,6 +141,7 @@ function ttlExpiry(db: SqlJsDatabase, repository: MemoryRepository, config: Harn
         createdBy: "consolidator",
         now,
         expiresInDays: config.retention.proposal_days,
+        // A rejected revalidate stales the row (decideProposal), so the row leaves this query; no skip needed.
         rejectSkipDays: 0,
       });
       if (opened.created && opened.proposalId !== null) {
@@ -225,7 +227,7 @@ function fixSignatureProposals(db: SqlJsDatabase, repository: MemoryRepository, 
       createdBy: "consolidator",
       now,
       expiresInDays: config.retention.proposal_days,
-      rejectSkipDays: 0,
+      // default rejectSkipDays (§7.5, 30 d): a human who rejected the fix is not asked again at every dream
     });
     if (opened.created && opened.proposalId !== null) {
       report.fixSignatureProposals.push(opened.proposalId);
@@ -278,10 +280,69 @@ export async function backfillEmbeddings(repository: MemoryRepository, options: 
   return result;
 }
 
-/** `WriteOp` form of the backfill for a dedicated lock session (`worker extract` after new rows were created). */
-export async function backfillEmbeddingsOp(db: SqlJsDatabase, options: BackfillEmbeddingsOptions): Promise<WriteOp & { result: BackfillEmbeddingsResult }> {
-  const result = await backfillEmbeddings(new MemoryRepository(db), options);
-  return { id: null, kind: "embed", noop: result.embedded === 0, wrote: result.embedded > 0, result };
+/** One row awaiting a vector; `contentHash` lets the writer skip rows edited while the model ran. */
+export interface EmbeddingBacklogItem {
+  id: string;
+  text: string;
+  contentHash: string;
+}
+
+/**
+ * Live rows without a vector, `preferIds` (the rows this run created) first, then the oldest backlog up to
+ * `limit`. Read without the write lock by `worker extract`; the model then runs lock-free on the result.
+ */
+export function selectEmbeddingBacklog(repository: MemoryRepository, options: { preferIds?: ReadonlySet<string>; limit?: number } = {}): EmbeddingBacklogItem[] {
+  const prefer = options.preferIds ?? new Set<string>();
+  const missing = repository.list({ status: LIVE_STATUSES }).filter((memory) => memory.embedding === null);
+  const preferred = missing.filter((memory) => prefer.has(memory.id));
+  let rest = missing.filter((memory) => !prefer.has(memory.id)).sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  if (options.limit !== undefined) rest = rest.slice(0, Math.max(0, options.limit));
+  return [...preferred, ...rest].map((memory) => ({ id: memory.id, text: `${memory.summary}\n${memory.details}`, contentHash: memory.contentHash }));
+}
+
+export interface EmbedBacklogResult {
+  vectors: Map<string, Float32Array>;
+  errors: string[];
+}
+
+/** Runs the embedder over `items` in batches of EMBED_BATCH (no database access); stops at the first embedder error. */
+export async function embedBacklog(embed: EmbedFn, items: readonly EmbeddingBacklogItem[], logger?: DreamLogger): Promise<EmbedBacklogResult> {
+  const result: EmbedBacklogResult = { vectors: new Map(), errors: [] };
+  for (let start = 0; start < items.length; start += EMBED_BATCH) {
+    const batch = items.slice(start, start + EMBED_BATCH);
+    let vectors: Float32Array[];
+    try {
+      vectors = await embed(batch.map((item) => item.text));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger?.warn(`embedding pass stopped: ${message}`);
+      result.errors.push(`embed: ${message}`);
+      break;
+    }
+    batch.forEach((item, index) => {
+      const vector = vectors[index];
+      if (vector !== undefined && vector.length > 0) result.vectors.set(item.id, vector);
+    });
+  }
+  return result;
+}
+
+/**
+ * Writes vectors computed outside the lock: a row that vanished, left the live statuses, changed its text
+ * (`content_hash`) or got a vector meanwhile is skipped. Returns the number of rows updated.
+ */
+export function applyEmbeddings(repository: MemoryRepository, items: readonly EmbeddingBacklogItem[], vectors: ReadonlyMap<string, Float32Array>): number {
+  let written = 0;
+  for (const item of items) {
+    const vector = vectors.get(item.id);
+    if (vector === undefined) continue;
+    const current = repository.getById(item.id);
+    if (current === null || !(LIVE_STATUSES as readonly string[]).includes(current.status)) continue;
+    if (current.contentHash !== item.contentHash || current.embedding !== null) continue;
+    repository.updateEmbedding(item.id, vector);
+    written += 1;
+  }
+  return written;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -305,11 +366,52 @@ export interface IdleSweepResult {
   errors: string[];
 }
 
+export interface IdleSweepOptions {
+  /** Test seam: runs after a session was read and judged idle, right before its state is re-checked and advanced. */
+  beforeAdvance?: (stateFile: string) => void;
+}
+
+function readStateFile(file: string): SessionState | null {
+  const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
+  return isSessionState(parsed) ? parsed : null;
+}
+
+/** Same test as the hooks' closeSegment: a segment of only assistant / marker lines is not an episode. */
+function hasEpisodeContent(lines: readonly LedgerLine[]): boolean {
+  return lines.some((line) => line.kind === "prompt" || line.kind === "tool_ok" || line.kind === "tool_fail" || line.kind === "fired");
+}
+
+function isToolLine(line: LedgerLine): line is ToolOkLine | ToolFailLine {
+  return line.kind === "tool_ok" || line.kind === "tool_fail";
+}
+
+/** True when another writer (the session's own prompt/stop hook) changed the state or the ledger since `seen`. */
+function sessionMoved(file: string, ledger: string, seen: SessionState, ledgerSize: number): boolean {
+  let current: SessionState | null;
+  try {
+    current = readStateFile(file);
+  } catch {
+    return true;
+  }
+  if (current === null) return true;
+  if (current.updated_at !== seen.updated_at || current.turn_key !== seen.turn_key || current.turn_start_offset !== seen.turn_start_offset || current.segment !== seen.segment) return true;
+  try {
+    return statSync(ledger).size !== ledgerSize;
+  } catch {
+    return true;
+  }
+}
+
 /**
  * Closes open turns whose ledger has been idle for more than `idleMs` as `close_reason = 'idle'` and
- * writes their queue files (§5.8 (7), §9.4 F7). The state file is advanced tmp+rename like the hooks do.
+ * writes their queue files (§5.8 (7), §9.4 F7). Selection and the resulting state follow the hooks'
+ * closeSegment (src/adapters/hook-core.ts): only a segment with episode content is closed, `turn_key` is kept,
+ * `segment` advances and `turn_start_offset` moves past the appended `idle_close` marker, so a session that
+ * resumes afterwards closes its continuation as the next segment and its prompt hook sees the swept turn
+ * through `last_episode_range`. The state is re-read right before it is advanced: when the session's own hook
+ * moved it meanwhile (the user resumed), the sweep leaves it alone (§9.1: hooks own state/*.json).
  */
-export function sweepIdleTurns(paths: HarnessPaths, now: string, idleMs: number = IDLE_TURN_MS): IdleSweepResult {
+export function sweepIdleTurns(paths: HarnessPaths, now: string, idleMs: number = IDLE_TURN_MS, options: IdleSweepOptions = {}): IdleSweepResult {
   const result: IdleSweepResult = { closed: [], errors: [] };
   let entries: string[];
   try {
@@ -322,47 +424,53 @@ export function sweepIdleTurns(paths: HarnessPaths, now: string, idleMs: number 
     if (!name.endsWith(".json") || name.endsWith(".notify.json") || /\.tmp-\d+$/.test(name)) continue;
     const file = join(paths.stateDir, name);
     try {
-      const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
-      if (!isSessionState(parsed) || parsed.turn_key === null) continue;
+      const parsed = readStateFile(file);
+      if (parsed === null || parsed.turn_key === null) continue;
       const ledger = ledgerFile(paths, parsed.host, parsed.session_key);
       if (!existsSync(ledger)) continue;
       const stat = statSync(ledger);
-      if (nowMs - stat.mtimeMs < idleMs) continue;
+      if (parsed.turn_start_offset >= stat.size || nowMs - stat.mtimeMs < idleMs) continue;
 
       const range = readLedgerRangeLines(ledger, parsed.turn_start_offset, stat.size);
-      let descriptor: EpisodeDescriptor | null = null;
-      if (range.lines.length > 0) {
-        descriptor = buildEpisodeDescriptor({
-          host: parsed.host,
-          sessionId: parsed.session_id,
-          sessionKey: parsed.session_key,
-          turnKey: parsed.turn_key,
-          segment: parsed.segment,
-          lines: range.lines,
-          byteStart: parsed.turn_start_offset,
-          byteEnd: stat.size,
-          ledgerFileName: basename(ledger),
-          closeReason: "idle",
-          now,
-          correctionFor: parsed.correction_for ?? null,
-        });
-        mkdirSync(paths.queueDir, { recursive: true });
-        writeJsonAtomic(queueFile(paths, descriptor.id), descriptor);
-        result.closed.push(descriptor);
+      if (!hasEpisodeContent(range.lines)) continue;
+
+      let contextLines: LedgerLine[] | null = null;
+      const previous = parsed.last_episode_range;
+      if (parsed.correction_for !== undefined && previous !== undefined && previous.end > previous.start) {
+        contextLines = readLedgerRangeLines(ledger, previous.start, previous.end).lines.filter(isToolLine);
       }
-      const appended = appendLedgerLine(ledger, { kind: "marker", ts: now, seq: makeSeq(nowMs), turn_key: parsed.turn_key, marker: "idle_close", detail: descriptor?.id });
+      const descriptor = buildEpisodeDescriptor({
+        host: parsed.host,
+        sessionId: parsed.session_id,
+        sessionKey: parsed.session_key,
+        turnKey: parsed.turn_key,
+        segment: parsed.segment,
+        lines: range.lines,
+        byteStart: parsed.turn_start_offset,
+        byteEnd: stat.size,
+        ledgerFileName: basename(ledger),
+        closeReason: "idle",
+        now,
+        correctionFor: parsed.correction_for ?? null,
+        contextLines,
+      });
+
+      // The session's prompt hook may have closed this turn itself while we read: then nothing here is ours.
+      options.beforeAdvance?.(file);
+      if (sessionMoved(file, ledger, parsed, stat.size)) continue;
+
+      mkdirSync(paths.queueDir, { recursive: true });
+      writeJsonAtomic(queueFile(paths, descriptor.id), descriptor);
+      result.closed.push(descriptor);
+      const appended = appendLedgerLine(ledger, { kind: "marker", ts: now, seq: makeSeq(nowMs), turn_key: parsed.turn_key, marker: "idle_close", detail: descriptor.id });
       const next: SessionState = {
         ...parsed,
-        turn_key: null,
-        segment: 0,
+        segment: parsed.segment + 1,
         turn_start_offset: stat.size + appended,
+        last_episode_id: descriptor.id,
+        last_episode_range: { start: parsed.turn_start_offset, end: stat.size },
         updated_at: now,
       };
-      delete next.correction_for;
-      if (descriptor !== null) {
-        next.last_episode_id = descriptor.id;
-        next.last_episode_range = { start: parsed.turn_start_offset, end: stat.size };
-      }
       writeJsonAtomic(file, next);
     } catch (error) {
       result.errors.push(`${name}: ${error instanceof Error ? error.message : String(error)}`);
@@ -405,6 +513,9 @@ function openLedgerFiles(paths: HarnessPaths): Set<string> {
 }
 
 /** Ledger files idle for `ledger_days` (not referenced by an open turn), stale state files, raw cache > `raw_hours`, tmp orphans. */
+/** `hm import` writes its descriptor list next to the database and removes it afterwards; a crash leaves it behind. */
+const IMPORT_DESCRIPTOR_FILE = /^import-[0-9]+-[0-9a-z]+\.json$/;
+
 export function garbageCollectFiles(paths: HarnessPaths, config: HarnessConfig, now: string): GcResult {
   const nowMs = Date.parse(now);
   const result: GcResult = { ledgers: 0, states: 0, raw: 0, tmp: 0 };
@@ -455,7 +566,20 @@ export function garbageCollectFiles(paths: HarnessPaths, config: HarnessConfig, 
   } catch {
     // no raw dir
   }
-  result.tmp = cleanOrphanTmp(paths, undefined, nowMs).length;
+  try {
+    const rawMaxMs = config.retention.raw_hours * 60 * 60 * 1000;
+    for (const name of readdirSync(paths.dir)) {
+      if (!IMPORT_DESCRIPTOR_FILE.test(name)) continue;
+      const file = join(paths.dir, name);
+      if (olderThan(file, nowMs, rawMaxMs)) {
+        rmSync(file, { force: true });
+        result.tmp += 1;
+      }
+    }
+  } catch {
+    // no harness dir
+  }
+  result.tmp += cleanOrphanTmp(paths, undefined, nowMs).length;
   return result;
 }
 

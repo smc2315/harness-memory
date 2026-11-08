@@ -4,10 +4,13 @@
  *   A  worker.lock (one per repository, 5 s jittered wait; busy → exit quietly, the holder rescans in E)
  *   B  lock session 1 (≤ 1 s): queue/*.json → episodes INSERT OR IGNORE, fire roll-up only for newly inserted
  *      episodes, expired leases / due retries back to queued, daily cap (corrections excluded), probe cache,
- *      lease ≤ 3 episodes correction-first, prompt inputs (intersecting memories, live ids, corrected episode)
- *   C  no lock: raw/<run_id>.json (V1-valid) is reused, else probe (daily) → provider (≤ 120 s) → raw cache
+ *      lease ≤ 3 episodes correction-first (an all-ineligible batch is skipped and the lease repeated), prompt
+ *      inputs (intersecting memories, live ids, corrected episode)
+ *   C  no lock: raw/<run_id>.json (V1-valid) is reused, else probe (daily) → provider (≤ 120 s) → raw cache;
+ *      a failed probe never burns an episode attempt (the batch waits like `no_provider`)
  *   D  lock session 2 (≤ 2 s): write_ops(run_id) → extracted; else V1–V11 → reconcile → commit (§9.2)
- *   E  queue files deleted; loop ≤ 10 times while eligible episodes remain; worker.lock released
+ *   E  queue files deleted; loop ≤ 10 times while eligible episodes remain; worker.lock released, then queue/
+ *      is rescanned and the loop re-entered when a hook queued more while this worker ran (a loser exited)
  *
  * `reindex` only rebuilds the snapshot; `dream` empties the queue first and then runs consolidate (§5.8);
  * `import` copies the given descriptor(s) into queue/ and runs the extract loop.
@@ -15,7 +18,7 @@
 
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 
 import type { Database as SqlJsDatabase } from "sql.js";
 
@@ -28,7 +31,8 @@ import { EXTRACTION_SCHEMA_JSON, EXTRACTOR_VERSION } from "../core/extraction-ty
 import { extractionRunId, sha256Hex } from "../core/ids";
 import type { LedgerLine } from "../core/ledger-types";
 import { queueFile, rawFile, type HarnessPaths } from "../core/paths";
-import { LIVE_STATUSES, type ProbeResult, type RunStatus } from "../core/vocabulary";
+import { redactCredentials } from "../core/signals";
+import { CLOSE_REASONS, HOSTS, LIVE_STATUSES, type ProbeResult, type RunStatus } from "../core/vocabulary";
 import { acquireDirLock, type LockHandle } from "../db/locks";
 import { runPostMigrate } from "../db/post-migrate";
 import { EpisodeRepository, episodeRecordToDescriptor, type EpisodeRecord } from "../db/repositories/episodes";
@@ -38,9 +42,9 @@ import { selectOne } from "../db/sql";
 import { Store, type StoreHooks, type StoreLogger, type WriteContext, type WriteOp } from "../db/store";
 import { MemoryNotFoundError, MemoryRepository } from "../memory/repository";
 import { derivePolicyRules } from "../policy/derive";
-import { backfillEmbeddingsOp, runDream, type DreamReport, type EmbedFn } from "./consolidate";
+import { applyEmbeddings, embedBacklog, runDream, selectEmbeddingBacklog, type DreamReport, type EmbedFn } from "./consolidate";
 import { isEligibleForExtraction } from "./episode";
-import { buildExtractionPrompt, type PromptMemory } from "./extract/prompt";
+import { buildExtractionPrompt, eventIdMap, type PromptMemory } from "./extract/prompt";
 import { parseExtractionOutput } from "./extract/schema";
 import { validateRawExtraction } from "./extract/validate";
 import {
@@ -63,6 +67,12 @@ export const WORKER_LOCK_WAIT_MS = 5_000;
 export const DB_LOCK_WAIT_MS = 30_000;
 export const MAX_LOOPS_PER_RUN = 10;
 export const LEASE_BATCH = 3;
+/** Lease rounds inside one lock session when every leased episode turns out ineligible (3 skips per round). */
+export const MAX_SKIP_ROUNDS = 10;
+/** Post-release queue rescans per run (§9.3 E): a hook that queued while this worker held worker.lock is served here. */
+export const MAX_RESCANS_PER_RUN = 3;
+/** Rows embedded per `worker extract` beyond the rows the run created; `worker dream` drains the rest. */
+export const EMBED_BACKLOG_PER_RUN = 64;
 export const PROVIDER_WALL_CLOCK_MS = 120_000;
 export const EXIT_OK = 0;
 export const EXIT_ERROR = 1;
@@ -243,21 +253,58 @@ export interface QueueEntry {
   descriptor: EpisodeDescriptor;
 }
 
+const HOST_SET: ReadonlySet<string> = new Set(HOSTS);
+const CLOSE_REASON_SET: ReadonlySet<string> = new Set(CLOSE_REASONS);
+
+function isNonNegativeInt(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function isOptionalString(value: unknown): boolean {
+  return value === undefined || value === null || typeof value === "string";
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The whole `EpisodeDescriptor` contract that `EpisodeRepository.insertIfAbsent` and the fire roll-up rely on
+ * (not just the id fields): a file that passes here can be inserted, so a malformed one is removed instead of
+ * wedging every later lease session on the same throw.
+ */
 export function isEpisodeDescriptor(value: unknown): value is EpisodeDescriptor {
-  if (typeof value !== "object" || value === null) return false;
-  const record = value as Record<string, unknown>;
+  if (!isPlainObject(value)) return false;
+  const record = value;
   return (
     record.schema === EPISODE_SCHEMA &&
     typeof record.id === "string" &&
+    record.id.length > 0 &&
     typeof record.host === "string" &&
+    HOST_SET.has(record.host) &&
     typeof record.session_id === "string" &&
+    typeof record.session_key === "string" &&
     typeof record.turn_key === "string" &&
+    isNonNegativeInt(record.segment) &&
+    typeof record.started_at === "string" &&
     typeof record.closed_at === "string" &&
+    typeof record.close_reason === "string" &&
+    CLOSE_REASON_SET.has(record.close_reason) &&
     typeof record.ledger_ref === "string" &&
+    isOptionalString(record.correction_for) &&
+    isOptionalString(record.context_ref) &&
     Array.isArray(record.scope_refs) &&
     Array.isArray(record.tools) &&
-    typeof record.flags === "object" &&
-    record.flags !== null
+    Array.isArray(record.failure_signatures) &&
+    record.failure_signatures.every(isPlainObject) &&
+    isPlainObject(record.flags) &&
+    Array.isArray(record.fired) &&
+    record.fired.every((entry) => isPlainObject(entry) && typeof entry.memory_id === "string") &&
+    typeof record.evidence_weight === "number" &&
+    Number.isFinite(record.evidence_weight) &&
+    isNonNegativeInt(record.event_count) &&
+    isOptionalString(record.prompt_text) &&
+    isOptionalString(record.last_assistant_message)
   );
 }
 
@@ -304,6 +351,8 @@ export interface LeaseSessionResult {
   rolledUp: number;
   leased: LeasedWork[];
   skipped: string[];
+  /** Queue files whose insert threw (quarantined as `<file>.bad` by the loop instead of failing the session). */
+  rejected: string[];
   moreDue: boolean;
   probeCache: ProbeCache | null;
   needProbe: boolean;
@@ -381,22 +430,35 @@ export function leaseSession(
   const runs = new ExtractionRunRepository(db);
   const repository = new MemoryRepository(db, { clock: () => now });
   const queuedById = new Map<string, EpisodeDescriptor>();
+  const rejected: string[] = [];
   let wrote = false;
   let inserted = 0;
   let rolledUp = 0;
 
-  for (const entry of queued) {
-    queuedById.set(entry.descriptor.id, entry.descriptor);
-    if (episodes.insertIfAbsent(entry.descriptor, now)) {
-      inserted += 1;
-      wrote = true;
-      rolledUp += rollUpFires(repository, entry.descriptor);
+  queued.forEach((entry, index) => {
+    // One savepoint per file: a descriptor the validator let through but the repository rejects is quarantined
+    // by the loop; it must not roll back the other inserts or abort the session (§9.3 B).
+    const savepoint = `sp_queue_${String(index)}`;
+    db.run(`SAVEPOINT ${savepoint}`);
+    try {
+      if (episodes.insertIfAbsent(entry.descriptor, now)) {
+        inserted += 1;
+        wrote = true;
+        rolledUp += rollUpFires(repository, entry.descriptor);
+      }
+      queuedById.set(entry.descriptor.id, entry.descriptor);
+      db.run(`RELEASE ${savepoint}`);
+    } catch (error) {
+      db.run(`ROLLBACK TO ${savepoint}`);
+      db.run(`RELEASE ${savepoint}`);
+      rejected.push(entry.file);
+      options.logger.warn(`queue file ${basename(entry.file)} could not be inserted (${error instanceof Error ? error.message : String(error)}); quarantined`);
     }
-  }
+  });
   if (episodes.releaseExpiredLeases(now) > 0) wrote = true;
   if (episodes.requeueDueFailures(now) > 0) wrote = true;
 
-  const result: LeaseSessionResult = { inserted, rolledUp, leased: [], skipped: [], moreDue: false, probeCache: null, needProbe: false, waiting: null };
+  const result: LeaseSessionResult = { inserted, rolledUp, leased: [], skipped: [], rejected, moreDue: false, probeCache: null, needProbe: false, waiting: null };
   const due = countDue(db, now);
   const dueTotal = due.corrections + due.plain;
 
@@ -420,31 +482,38 @@ export function leaseSession(
 
   const usedToday = runs.countSince(startOfUtcDay(now), { excludeCorrection: true });
   const remainingDaily = Math.max(0, config.extraction.max_runs_per_day - usedToday);
-  const take = Math.min(LEASE_BATCH, due.corrections + Math.min(due.plain, remainingDaily));
-  if (take === 0) {
-    if (due.plain > 0 && remainingDaily === 0) result.waiting = { count: due.plain, reason: "daily_cap" };
-    return { ...result, op: { id: null, kind: "extract:lease", noop: true, wrote } };
-  }
 
-  const leased = episodes.lease(take, { leaseSeconds: config.extraction.lease_seconds, now, correctionFirst: true });
-  if (leased.length > 0) wrote = true;
-
-  for (const record of leased) {
-    const queuedDescriptor = queuedById.get(record.id) ?? null;
-    const eligibility = isEligibleForExtraction(episodeRecordToDescriptor(record));
-    if (!eligibility.eligible) {
-      episodes.markSkipped(record.id, eligibility.reason);
-      result.skipped.push(record.id);
-      continue;
+  // The lease SQL knows nothing about eligibility (§5.3): a batch made only of no_signal episodes is marked
+  // skipped and the lease repeated, so ineligible rows never end a run while eligible ones are still due (R3).
+  for (let round = 0; round < MAX_SKIP_ROUNDS && result.leased.length === 0; round += 1) {
+    const pending = round === 0 ? due : countDue(db, now);
+    const take = Math.min(LEASE_BATCH, pending.corrections + Math.min(pending.plain, remainingDaily));
+    if (take === 0) {
+      if (pending.plain > 0 && remainingDaily === 0) result.waiting = { count: pending.plain, reason: "daily_cap" };
+      break;
     }
-    const descriptor = queuedDescriptor ?? episodeRecordToDescriptor(record);
-    const correctionFor = record.correctionFor === null ? null : episodes.getById(record.correctionFor);
-    result.leased.push({
-      record,
-      queued: queuedDescriptor,
-      existingMemories: selectPromptMemories(repository, descriptor),
-      correctionFor,
-    });
+
+    const leased = episodes.lease(take, { leaseSeconds: config.extraction.lease_seconds, now, correctionFirst: true });
+    if (leased.length === 0) break;
+    wrote = true;
+
+    for (const record of leased) {
+      const queuedDescriptor = queuedById.get(record.id) ?? null;
+      const eligibility = isEligibleForExtraction(episodeRecordToDescriptor(record));
+      if (!eligibility.eligible) {
+        episodes.markSkipped(record.id, eligibility.reason);
+        result.skipped.push(record.id);
+        continue;
+      }
+      const descriptor = queuedDescriptor ?? episodeRecordToDescriptor(record);
+      const correctionFor = record.correctionFor === null ? null : episodes.getById(record.correctionFor);
+      result.leased.push({
+        record,
+        queued: queuedDescriptor,
+        existingMemories: selectPromptMemories(repository, descriptor),
+        correctionFor,
+      });
+    }
   }
 
   const after = countDue(db, now);
@@ -464,7 +533,56 @@ export interface EpisodeLines {
   badLines: number;
 }
 
-/** Reads the byte range named by `ledger_ref`; import episodes synthesize a prompt line from the source file / queue descriptor. */
+/** `raw/<episode_id>.import.txt`: the bullet text of an import episode, kept so a retry never re-reads the source file. */
+export function importTextFile(paths: Pick<HarnessPaths, "rawDir">, episodeId: string): string {
+  return join(paths.rawDir, `${episodeId}.import.txt`);
+}
+
+/** Lock-free: written when the queue file is consumed (the descriptor carried the text), removed by the raw GC. */
+export function rememberImportText(paths: Pick<HarnessPaths, "rawDir">, descriptor: EpisodeDescriptor): void {
+  if (descriptor.host !== "import" || descriptor.prompt_text === null || descriptor.prompt_text === undefined) return;
+  mkdirSync(paths.rawDir, { recursive: true });
+  const file = importTextFile(paths, descriptor.id);
+  const tmp = `${file}.tmp-${String(process.pid)}`;
+  writeFileSync(tmp, descriptor.prompt_text, "utf8");
+  renameSync(tmp, file);
+}
+
+function readStoredImportText(paths: Pick<HarnessPaths, "rawDir">, episodeId: string): string | null {
+  try {
+    return readFileSync(importTextFile(paths, episodeId), "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `import:<path>` resolved against the project root; null for anything outside it. The path comes from a queue
+ * file (`ledger_ref`), which is untrusted input: the worker never reads an arbitrary file named by one.
+ */
+export function resolveImportSource(paths: Pick<HarnessPaths, "root">, importPath: string): string | null {
+  const resolved = resolve(paths.root, importPath);
+  const rel = relative(paths.root, resolved);
+  if (rel.length === 0 || rel.startsWith("..") || isAbsolute(rel)) return null;
+  return resolved;
+}
+
+function readImportSourceLine(paths: Pick<HarnessPaths, "root">, importPath: string, lineNo: number | null): string | null {
+  const source = resolveImportSource(paths, importPath);
+  if (source === null) return null;
+  try {
+    const content = readFileSync(source, "utf8");
+    return lineNo === null ? content : (content.split(/\r?\n/)[lineNo - 1] ?? null);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reads the byte range named by `ledger_ref`; import episodes synthesize a prompt line from the queue descriptor,
+ * the text kept by `rememberImportText`, or (inside the project root only) the source file. The synthesized line
+ * goes through the same credential redaction as ledger lines (§5.1).
+ */
 export function readEpisodeLines(paths: HarnessPaths, record: EpisodeRecord, queued: EpisodeDescriptor | null): EpisodeLines {
   const ledgerMatch = LEDGER_REF.exec(record.ledgerRef);
   if (ledgerMatch !== null) {
@@ -474,22 +592,11 @@ export function readEpisodeLines(paths: HarnessPaths, record: EpisodeRecord, que
   }
   let text = queued?.prompt_text ?? null;
   const importMatch = IMPORT_REF.exec(record.ledgerRef);
-  if (text === null && importMatch !== null) {
-    try {
-      const content = readFileSync(importMatch[1]!, "utf8");
-      if (importMatch[2] !== undefined) {
-        const lineNo = Number(importMatch[2]);
-        text = content.split(/\r?\n/)[lineNo - 1] ?? null;
-      } else {
-        text = content;
-      }
-    } catch {
-      text = null;
-    }
-  }
+  if (text === null && importMatch !== null) text = readStoredImportText(paths, record.id);
+  if (text === null && importMatch !== null) text = readImportSourceLine(paths, importMatch[1]!, importMatch[2] === undefined ? null : Number(importMatch[2]));
   if (text === null) return { lines: [], badLines: 0 };
   return {
-    lines: [{ kind: "prompt", ts: record.startedAt, seq: 1, turn_key: record.turnKey, text, correction: record.flags.correction ?? 0, remember: record.flags.remember ?? 0 }],
+    lines: [{ kind: "prompt", ts: record.startedAt, seq: 1, turn_key: record.turnKey, text: redactCredentials(text), correction: record.flags.correction ?? 0, remember: record.flags.remember ?? 0 }],
     badLines: 0,
   };
 }
@@ -521,6 +628,8 @@ export interface ExtractedWork {
   run: ReconcileRunInfo;
   result: ProviderResult;
   fromCache: boolean;
+  /** The failure is the provider's (probe), not this episode's: lock session 2 requeues it without burning an attempt. */
+  providerUnavailable: boolean;
 }
 
 function probeFailureStatus(result: ProbeResult): Exclude<RunStatus, "started" | "ok"> {
@@ -589,13 +698,15 @@ export async function unlockedPhase(batch: readonly LeasedWork[], options: Unloc
       rawOutputRef: null,
     };
 
-    // Raw cache reuse (V1-valid only).
+    // Raw cache reuse (V1-valid only). The cached output cites event ids of an earlier render, which may have
+    // dropped other lines than this one: resolve its refs over every event id of the episode (ids are positional
+    // over the full line list, so the same id names the same ledger line in both renders).
     const cached = rawFile(paths, runId);
     if (existsSync(cached)) {
       try {
         const raw = readFileSync(cached, "utf8");
         if (parseExtractionOutput(raw).ok) {
-          extracted.push({ work, descriptor, runId, seqMap: built.seqMap, run: { ...run, rawOutputRef: `raw/${basename(cached)}` }, result: { status: "ok", raw, model: "cache" }, fromCache: true });
+          extracted.push({ work, descriptor, runId, seqMap: eventIdMap(lines), run: { ...run, rawOutputRef: `raw/${basename(cached)}` }, result: { status: "ok", raw, model: "cache" }, fromCache: true, providerUnavailable: false });
           logger.line("cache_reuse", { episode: descriptor.id, run: runId });
           continue;
         }
@@ -611,8 +722,10 @@ export async function unlockedPhase(batch: readonly LeasedWork[], options: Unloc
       logger.line("probe", { provider: provider.name, result: probe.result, cached: probe.fromCache });
     }
     if (probeResult !== null && probeResult.result !== "ok") {
+      // A failed probe says nothing about this episode: it is recorded for `doctor` but waits like `no_provider`
+      // (§9.4 F3 "N episodes waiting") instead of consuming one of its three attempts.
       const status = probeFailureStatus(probeResult.result);
-      extracted.push({ work, descriptor, runId, seqMap: built.seqMap, run, result: { status, raw: "", error: `probe: ${probeResult.result}` }, fromCache: false });
+      extracted.push({ work, descriptor, runId, seqMap: built.seqMap, run, result: { status, raw: "", error: `probe: ${probeResult.result}` }, fromCache: false, providerUnavailable: true });
       continue;
     }
 
@@ -640,7 +753,7 @@ export async function unlockedPhase(batch: readonly LeasedWork[], options: Unloc
       }
     }
     logger.line("provider", { episode: descriptor.id, run: runId, provider: provider.name, status: result.status, chars: built.prompt.length });
-    extracted.push({ work, descriptor, runId, seqMap: built.seqMap, run: { ...run, rawOutputRef, model: result.model ?? run.model }, result, fromCache: false });
+    extracted.push({ work, descriptor, runId, seqMap: built.seqMap, run: { ...run, rawOutputRef, model: result.model ?? run.model }, result, fromCache: false, providerUnavailable: false });
   }
 
   return { extracted, probeResult };
@@ -671,6 +784,7 @@ export function reconcileSession(db: SqlJsDatabase, ctx: WriteContext, item: Ext
       error: item.result.error ?? item.result.status,
       now,
       attemptCount: item.work.record.attemptCount,
+      providerUnavailable: item.providerUnavailable,
     });
     options.logger.line("failed", { episode: item.descriptor.id, run: item.runId, status: item.result.status, disposition: failure.disposition, next: failure.nextAttemptAt });
     return { ...failure.op, status: item.result.status, outcomes: 0, created: [], activated: [], proposals: [] };
@@ -738,6 +852,17 @@ interface LoopContext {
   logger: WorkerLogger;
   clock: () => string;
   result: WorkerResult;
+  /** `result.processed` entries before this index were already offered to the embedding pass. */
+  embedCursor: number;
+}
+
+function quarantineQueueFile(file: string, logger: WorkerLogger): void {
+  try {
+    renameSync(file, `${file}.bad`);
+  } catch (error) {
+    logger.warn(`queue file ${basename(file)} could not be quarantined (${error instanceof Error ? error.message : String(error)}); removed`);
+    rmSync(file, { force: true });
+  }
 }
 
 async function extractLoop(ctx: LoopContext): Promise<void> {
@@ -747,7 +872,7 @@ async function extractLoop(ctx: LoopContext): Promise<void> {
   let probeToCache: ProbeCache | null = null;
 
   for (let loop = 0; loop < maxLoops; loop += 1) {
-    ctx.result.loops = loop + 1;
+    ctx.result.loops += 1;
     const queued = scanQueue(options.paths, logger);
 
     let lease!: LeaseSessionResult;
@@ -756,12 +881,28 @@ async function extractLoop(ctx: LoopContext): Promise<void> {
       lease = session;
       return session.op;
     });
-    for (const entry of queued) rmSync(entry.file, { force: true });
+    for (const entry of queued) {
+      if (lease.rejected.includes(entry.file)) {
+        quarantineQueueFile(entry.file, logger);
+        continue;
+      }
+      try {
+        rememberImportText(options.paths, entry.descriptor);
+      } catch (error) {
+        logger.warn(`import text for ${entry.descriptor.id} not kept: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      rmSync(entry.file, { force: true });
+    }
     ctx.result.inserted += lease.inserted;
     ctx.result.skipped.push(...lease.skipped);
-    logger.line("lease", { loop, queued: queued.length, inserted: lease.inserted, fires: lease.rolledUp, leased: lease.leased.length, skipped: lease.skipped.length, waiting: lease.waiting?.reason ?? null });
+    logger.line("lease", { loop, queued: queued.length, inserted: lease.inserted, fires: lease.rolledUp, leased: lease.leased.length, skipped: lease.skipped.length, rejected: lease.rejected.length, waiting: lease.waiting?.reason ?? null });
     if (lease.waiting !== null) ctx.result.waiting = lease.waiting;
-    if (lease.leased.length === 0 || provider === null) break;
+    if (provider === null) break;
+    if (lease.leased.length === 0) {
+      // Only ineligible rows were leased this time and eligible ones are still due: lease again (R3).
+      if (lease.skipped.length > 0 && lease.moreDue) continue;
+      break;
+    }
 
     const unlocked = await unlockedPhase(lease.leased, {
       paths: options.paths,
@@ -800,33 +941,49 @@ async function extractLoop(ctx: LoopContext): Promise<void> {
 
 /**
  * Post-extraction embedding pass (§4.8 dense leg): when the worker has an embedder and this run created rows,
- * embed every live row that still lacks a vector in its own lock session. The embedder is warmed with an empty
- * batch first so the database lock is not held while the model loads. Failures are logged, never fatal.
+ * embed them (plus up to EMBED_BACKLOG_PER_RUN older rows without a vector; `worker dream` drains the rest).
+ * The rows are read and the model runs WITHOUT the database lock (§9.2: a lock session lasts seconds and never
+ * wraps a model call); a short lock session then stores the vectors of rows whose text did not change meanwhile.
+ * Failures are logged, never fatal.
  */
 async function embedNewRows(ctx: LoopContext): Promise<void> {
   const embed = ctx.options.embed ?? null;
   if (embed === null) return;
-  const created = ctx.result.processed.reduce((count, item) => count + item.created.length, 0);
-  if (created === 0) return;
+  const fresh = ctx.result.processed.slice(ctx.embedCursor);
+  ctx.embedCursor = ctx.result.processed.length;
+  const createdIds = new Set(fresh.flatMap((item) => item.created));
+  if (createdIds.size === 0) return;
   try {
-    await embed([]);
+    const items = await ctx.options.store.read((db) => selectEmbeddingBacklog(new MemoryRepository(db), { preferIds: createdIds, limit: EMBED_BACKLOG_PER_RUN }));
+    if (items.length === 0) return;
+    const computed = await embedBacklog(embed, items, ctx.logger);
+    ctx.result.errors.push(...computed.errors);
     let embedded = 0;
-    let errors: string[] = [];
-    const write = await ctx.options.store.withWriteLock("embed", ctx.options.dbLockWaitMs ?? DB_LOCK_WAIT_MS, async (db) => {
-      const op = await backfillEmbeddingsOp(db, { embed, logger: ctx.logger });
-      embedded = op.result.embedded;
-      errors = op.result.errors;
-      return op;
-    });
-    if (write.snapshotBuilt) ctx.result.snapshotBuilt = true;
-    ctx.result.errors.push(...errors);
-    ctx.logger.line("embed", { embedded, errors: errors.length });
+    if (computed.vectors.size > 0) {
+      const write = await ctx.options.store.withWriteLock("embed", ctx.options.dbLockWaitMs ?? DB_LOCK_WAIT_MS, (db) => {
+        embedded = applyEmbeddings(new MemoryRepository(db), items, computed.vectors);
+        return { id: null, kind: "embed", noop: embedded === 0, wrote: embedded > 0 };
+      });
+      if (write.snapshotBuilt) ctx.result.snapshotBuilt = true;
+    }
+    ctx.logger.line("embed", { selected: items.length, embedded, errors: computed.errors.length });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     ctx.result.errors.push(`embed: ${message}`);
     ctx.logger.warn(`embedding pass skipped: ${message}`);
   }
 }
+
+function queueHasDescriptors(paths: HarnessPaths): boolean {
+  try {
+    return readdirSync(paths.queueDir).some((name) => name.endsWith(".json"));
+  } catch {
+    return false;
+  }
+}
+
+/** Commands whose run ends with the §9.3 E rescan of queue/ (`reindex` touches no episodes). */
+const RESCAN_COMMANDS: ReadonlySet<WorkerCommand> = new Set<WorkerCommand>(["extract", "dream", "import"]);
 
 function writePidFile(paths: HarnessPaths, pid: number): void {
   try {
@@ -877,77 +1034,100 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
   const dirs = [options.paths.dir, options.paths.queueDir, options.paths.rawDir, options.paths.locksDir, options.paths.logsDir, options.paths.snapshotDir, options.paths.stateDir, options.paths.ledgerDir];
   for (const dir of dirs) mkdirSync(dir, { recursive: true });
 
-  let lock: LockHandle;
+  let provider: ExtractionProvider | null;
   try {
-    lock = await acquireDirLock(options.paths.workerLock, { purpose: `worker:${options.command}`, waitMs: options.workerLockWaitMs ?? WORKER_LOCK_WAIT_MS, now: clock });
-  } catch (error) {
-    if (error instanceof LockBusyError) {
-      logger.line("busy", { lock: options.paths.workerLock });
-      return { ...result, busy: true };
-    }
-    throw error;
-  }
-  writePidFile(options.paths, pid);
-  logger.line("start", { command: options.command, pid });
-
-  try {
-    const provider = options.provider === undefined ? selectProvider(options.config, { paths: options.paths }) : options.provider;
-    const loopCtx: LoopContext = { options, provider, logger, clock, result };
-
-    switch (options.command) {
-      case "reindex": {
-        const write = await options.store.rebuildSnapshot(options.dbLockWaitMs ?? DB_LOCK_WAIT_MS);
-        result.snapshotBuilt = write.snapshotBuilt;
-        break;
-      }
-      case "import": {
-        const file = options.args?.[0];
-        if (file === undefined) throw new Error("import needs a descriptor file");
-        const descriptors = readImportDescriptors(file);
-        for (const descriptor of descriptors) {
-          const target = queueFile(options.paths, descriptor.id);
-          const tmp = `${target}.tmp-${String(pid)}`;
-          writeFileSync(tmp, JSON.stringify(descriptor), "utf8");
-          renameSync(tmp, target);
-        }
-        logger.line("import", { file, descriptors: descriptors.length });
-        await extractLoop(loopCtx);
-        await embedNewRows(loopCtx);
-        break;
-      }
-      case "extract": {
-        await extractLoop(loopCtx);
-        await embedNewRows(loopCtx);
-        break;
-      }
-      case "dream": {
-        await extractLoop(loopCtx);
-        const write = await options.store.withWriteLock("dream", options.dbLockWaitMs ?? DB_LOCK_WAIT_MS, async (db, wctx) => {
-          const op = await runDream(db, { paths: options.paths, config: options.config, now: wctx.now, embed: options.embed ?? null, logger });
-          result.dream = op.report;
-          return op;
-        });
-        result.snapshotBuilt = write.snapshotBuilt;
-        logger.line("dream", {
-          staled: result.dream?.staled.length ?? 0,
-          rejected: result.dream?.rejectedCandidates.length ?? 0,
-          expired: result.dream?.expiredProposals.length ?? 0,
-          merges: result.dream?.mergeProposals.length ?? 0,
-          idle: result.dream?.idleClosed.length ?? 0,
-          errors: result.dream?.errors.length ?? 0,
-        });
-        break;
-      }
-    }
+    provider = options.provider === undefined ? selectProvider(options.config, { paths: options.paths }) : options.provider;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     result.errors.push(message);
-    result.exitCode = error instanceof LockBusyError ? EXIT_LOCK_BUSY : EXIT_ERROR;
+    result.exitCode = EXIT_ERROR;
     logger.error(`${options.command} failed: ${message}`);
-  } finally {
-    removePidFile(options.paths, pid);
-    lock.release();
-    logger.line("end", { command: options.command, exit: result.exitCode, processed: result.processed.length, errors: result.errors.length });
+    return result;
+  }
+  const loopCtx: LoopContext = { options, provider, logger, clock, result, embedCursor: 0 };
+
+  // §9.3 A/E: a worker that finds worker.lock busy exits because the holder rescans queue/ after releasing it.
+  // Round 0 runs the command; later rounds re-enter the extract loop for files queued while the lock was held.
+  for (let round = 0; round <= MAX_RESCANS_PER_RUN; round += 1) {
+    let lock: LockHandle;
+    try {
+      lock = await acquireDirLock(options.paths.workerLock, { purpose: `worker:${options.command}`, waitMs: round === 0 ? (options.workerLockWaitMs ?? WORKER_LOCK_WAIT_MS) : 0, now: clock });
+    } catch (error) {
+      if (!(error instanceof LockBusyError)) throw error;
+      if (round === 0) {
+        logger.line("busy", { lock: options.paths.workerLock });
+        return { ...result, busy: true };
+      }
+      // Another worker took over between our release and the rescan; it scans the queue itself.
+      logger.line("rescan_busy", { round });
+      break;
+    }
+    writePidFile(options.paths, pid);
+    logger.line(round === 0 ? "start" : "rescan", { command: options.command, pid, round });
+
+    try {
+      if (round > 0) {
+        await extractLoop(loopCtx);
+        await embedNewRows(loopCtx);
+      } else {
+        switch (options.command) {
+          case "reindex": {
+            const write = await options.store.rebuildSnapshot(options.dbLockWaitMs ?? DB_LOCK_WAIT_MS);
+            result.snapshotBuilt = write.snapshotBuilt;
+            break;
+          }
+          case "import": {
+            const file = options.args?.[0];
+            if (file === undefined) throw new Error("import needs a descriptor file");
+            const descriptors = readImportDescriptors(file);
+            for (const descriptor of descriptors) {
+              const target = queueFile(options.paths, descriptor.id);
+              const tmp = `${target}.tmp-${String(pid)}`;
+              writeFileSync(tmp, JSON.stringify(descriptor), "utf8");
+              renameSync(tmp, target);
+            }
+            logger.line("import", { file, descriptors: descriptors.length });
+            await extractLoop(loopCtx);
+            await embedNewRows(loopCtx);
+            break;
+          }
+          case "extract": {
+            await extractLoop(loopCtx);
+            await embedNewRows(loopCtx);
+            break;
+          }
+          case "dream": {
+            await extractLoop(loopCtx);
+            const write = await options.store.withWriteLock("dream", options.dbLockWaitMs ?? DB_LOCK_WAIT_MS, async (db, wctx) => {
+              const op = await runDream(db, { paths: options.paths, config: options.config, now: wctx.now, embed: options.embed ?? null, logger });
+              result.dream = op.report;
+              return op;
+            });
+            result.snapshotBuilt = write.snapshotBuilt;
+            logger.line("dream", {
+              staled: result.dream?.staled.length ?? 0,
+              rejected: result.dream?.rejectedCandidates.length ?? 0,
+              expired: result.dream?.expiredProposals.length ?? 0,
+              merges: result.dream?.mergeProposals.length ?? 0,
+              idle: result.dream?.idleClosed.length ?? 0,
+              errors: result.dream?.errors.length ?? 0,
+            });
+            break;
+          }
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      result.errors.push(message);
+      result.exitCode = error instanceof LockBusyError ? EXIT_LOCK_BUSY : EXIT_ERROR;
+      logger.error(`${options.command} failed: ${message}`);
+    } finally {
+      removePidFile(options.paths, pid);
+      lock.release();
+      logger.line("end", { command: options.command, exit: result.exitCode, processed: result.processed.length, errors: result.errors.length, round });
+    }
+
+    if (result.exitCode !== EXIT_OK || !RESCAN_COMMANDS.has(options.command) || !queueHasDescriptors(options.paths)) break;
   }
   return result;
 }

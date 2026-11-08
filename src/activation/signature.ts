@@ -5,6 +5,8 @@
  *
  * Pure module: no database, no file I/O. `minimatch` is loaded lazily through `createRequire` so
  * the hook bundle, which only calls `matchSignature` on precompiled regex sources, never pays for it.
+ * The canonical form of a command is memoized per (text, dialect) (`canonicalCommandFor`) because one
+ * hook call matches every `cmd` signature and rule against the same target.
  */
 
 import { createRequire } from "node:module";
@@ -286,12 +288,38 @@ export function canonicalizeCommand(command: string, dialect: ShellDialect | nul
   };
 }
 
+/** Entries kept by `canonicalCommandFor`: a hook call canonicalizes one target (plus the unsliced command). */
+export const CANONICAL_CACHE_SIZE = 8;
+const CANONICAL_CACHE = new Map<string, CanonicalCommand>();
+
+/**
+ * `canonicalizeCommand` memoized per (command, dialect) with least-recently-used eviction. A PreToolUse
+ * call matches every `cmd` signature and policy rule against the same ≤ 4 KB target, so the tokenizer
+ * runs once per process instead of once per signature. The result is shared: callers must not mutate it.
+ */
+export function canonicalCommandFor(command: string, dialect: ShellDialect | null | undefined): CanonicalCommand {
+  const key = `${dialect ?? "unknown"}\u0000${command}`;
+  const cached = CANONICAL_CACHE.get(key);
+  if (cached !== undefined) {
+    CANONICAL_CACHE.delete(key);
+    CANONICAL_CACHE.set(key, cached);
+    return cached;
+  }
+  const canonical = canonicalizeCommand(command, dialect);
+  CANONICAL_CACHE.set(key, canonical);
+  if (CANONICAL_CACHE.size > CANONICAL_CACHE_SIZE) {
+    const oldest = CANONICAL_CACHE.keys().next().value;
+    if (oldest !== undefined) CANONICAL_CACHE.delete(oldest);
+  }
+  return canonical;
+}
+
 /**
  * Program token used by ledger lines and failure signatures: the first segment that is not a shell
  * navigation builtin (`cd x && npm test` → `pm test`), falling back to the first segment.
  */
 export function primaryProgramToken(command: string, dialect: ShellDialect | null | undefined): string | null {
-  const { segments, programTokens } = canonicalizeCommand(command, dialect);
+  const { segments, programTokens } = canonicalCommandFor(command, dialect);
   for (let i = 0; i < segments.length; i += 1) {
     if (!SHELL_NAVIGATION.has(segments[i]![0]!)) return programTokens[i]!;
   }
@@ -898,9 +926,9 @@ function segmentMatches(segment: readonly string[], tokens: readonly string[], c
 }
 
 /**
- * cmd: canonicalize the target with the call's dialect; any segment whose program equals the first
- * pattern token and contains every remaining token matches. glob/regex: precompiled RegExp on the
- * target. substring: case-insensitive includes. `negate` inverts the result.
+ * cmd: canonicalize the target with the call's dialect (memoized, see `canonicalCommandFor`); any segment
+ * whose program equals the first pattern token and contains every remaining token matches. glob/regex:
+ * precompiled RegExp on the target. substring: case-insensitive includes. `negate` inverts the result.
  */
 export function matchSignature(compiled: CompiledSignature, target: string, dialect: ShellDialect | null | undefined): boolean {
   const text = target.length > MATCH_TARGET_CHARS ? target.slice(0, MATCH_TARGET_CHARS) : target;
@@ -913,7 +941,7 @@ export function matchSignature(compiled: CompiledSignature, target: string, dial
         break;
       }
       const caseInsensitive = dialect === "powershell" || dialect === "cmd";
-      result = canonicalizeCommand(text, dialect).segments.some((segment) => segmentMatches(segment, tokens, caseInsensitive));
+      result = canonicalCommandFor(text, dialect).segments.some((segment) => segmentMatches(segment, tokens, caseInsensitive));
       break;
     }
     case "glob": {

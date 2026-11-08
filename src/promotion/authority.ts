@@ -1,8 +1,10 @@
 /**
  * Pure authority rules: default enforcement per §7.3 and the automatic tier decision per §7.4.
- * No database; the worker's reconcile step feeds it the row it just created or reinforced.
+ * No database; the worker's reconcile step feeds it the row it just created or reinforced. The only
+ * dependency above core is the pure tool vocabulary (tool-glob resolution shared with the hooks and V11).
  */
 
+import { toolGlobFamilies } from "../activation/tool-vocabulary";
 import type { HarnessConfig } from "../core/config";
 import {
   PRE_TOOL_HOOKED_FAMILIES,
@@ -18,7 +20,7 @@ import {
 export const ACTIVATION_MIN_CONFIDENCE = 0.7;
 export const ACTIVATION_MIN_EVIDENCE = 2;
 
-/** Same numbers as src/promotion/revalidate.ts (kept duplicated so this module depends on nothing above core). */
+/** Same numbers as src/promotion/revalidate.ts (kept duplicated so this module does not depend on the A2 layer). */
 export function baseTtlDays(kind: KnowledgeKind | null | undefined): number {
   return kind === "correction" || kind === "failure_resolution" ? 30 : 7;
 }
@@ -125,15 +127,13 @@ export interface TierDecision {
 
 const HOOKED_FAMILIES: ReadonlySet<string> = new Set(PRE_TOOL_HOOKED_FAMILIES);
 
+/**
+ * V11's tool-glob test, resolved with the same `toolGlobFamilies` the extractor's validator and the
+ * PreToolUse matcher use (spec §4.6 / §10: one glob semantics on the write and read side). A glob such
+ * as `wr*` or `*sh` reaches the hook because it matches `write` / `bash`, exactly as it would at match time.
+ */
 function toolGlobReachesHook(toolGlob: string): boolean {
-  return toolGlob
-    .split("|")
-    .map((alternative) => alternative.trim().toLowerCase())
-    .some((alternative) => {
-      if (alternative === "*" || alternative === "mcp" || alternative.startsWith("mcp:")) return true;
-      const family = alternative.includes("*") ? alternative.split("*")[0]! : alternative;
-      return HOOKED_FAMILIES.has(family);
-    });
+  return toolGlobFamilies(toolGlob).some((family) => HOOKED_FAMILIES.has(family));
 }
 
 /** V11 as a predicate on the stored row: at least one trigger that the hooks can actually deliver. */

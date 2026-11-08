@@ -5,7 +5,10 @@
  *   another episode upserts a support row; derived counts are recomputed in the same savepoint;
  *   a claim rejected within 30 days is skipped (`skipped_recent_reject`).
  * - `decideProposal`: accept / reject with the per-kind side effects, every status change through
- *   `transitionMemory` (human decisions make the row human; auto_rule never touches human rows).
+ *   `transitionMemory` (human decisions make the row human; auto_rule never touches human rows). An accept
+ *   that could not do what the proposal says (fix_* without a payload, supersede whose replacement is no
+ *   longer live) throws `ProposalNotApplicableError` before anything is written and the proposal stays open.
+ *   Rejecting a `revalidate` answers the TTL question like the proposal's expiry would: stale(ttl_expired).
  * - `evaluateAutoDemotion`: the §5.7 step 6 rule that lets two sessions demote an auto row.
  * - `expireProposals`: open → expired; an expired `revalidate` sends its auto row to stale(ttl_expired).
  */
@@ -33,6 +36,26 @@ import { transitionMemory } from "./transitions";
 
 export const RECENT_REJECT_SKIP_DAYS = 30;
 export const AUTO_DEMOTION_MIN_SESSIONS = 2;
+
+export type ProposalNotApplicableCode = "payload_missing" | "candidate_not_live";
+
+/**
+ * Accepting the proposal would not do what it says (no payload to apply, replacement row no longer live).
+ * Thrown before anything is written, so the proposal stays open and the rows are untouched. It extends
+ * InvalidMemoryTransitionError on purpose: the requested change is a memory transition that cannot happen,
+ * and the CLI renders that family as one error line (exit 1) instead of a stack trace.
+ */
+export class ProposalNotApplicableError extends InvalidMemoryTransitionError {
+  constructor(
+    public readonly proposalId: string,
+    public readonly kind: ProposalKind,
+    public readonly code: ProposalNotApplicableCode,
+    detail: string
+  ) {
+    super(`Proposal ${proposalId} (${kind}) cannot be accepted: ${detail}`);
+    this.name = "ProposalNotApplicableError";
+  }
+}
 
 /** Marker that separates the human-readable rationale from a JSON payload (fix_scope / fix_signature). */
 export const PROPOSAL_PAYLOAD_MARKER = "\n@payload ";
@@ -179,7 +202,7 @@ export interface DecideProposalInput {
 
 export interface DecideProposalResult {
   proposal: ProposalRecord;
-  /** Human-readable side-effect log (`target:superseded`, `replacement:active`, `payload_missing` …). */
+  /** Human-readable side-effect log (`target:superseded`, `replacement:active`, `target:stale(ttl_expired)` …). */
   effects: string[];
   memories: MemoryRecord[];
 }
@@ -194,13 +217,17 @@ function isLive(status: MemoryRecord["status"]): boolean {
 
 /**
  * Applies a decision with its side effects (§7.5):
- * - supersede → target superseded by the candidate; the candidate row is promoted (human decisions make it human)
+ * - supersede → target superseded by the candidate; the candidate row is promoted (human decisions make it human);
+ *   a candidate that is no longer live (rejected / superseded) cannot replace anything → ProposalNotApplicableError
  * - stale → target stale
  * - activate_policy / activate_global → target active with authority human (human decider only)
- * - fix_scope / fix_signature → payload applied through setScope, needs_scope cleared (human → setAuthority human)
+ * - fix_scope / fix_signature → payload applied through setScope, needs_scope cleared (human → setAuthority human);
+ *   without a payload there is nothing to apply → ProposalNotApplicableError (the proposal stays open)
  * - revalidate → TTL extended; a stale target returns to active
  * - merge → survivor = older row, enforcement = max, aliases merged; loser superseded (human only)
- * Rejecting a supersede by a human also rejects the still-candidate replacement row.
+ * Rejecting a supersede by a human also rejects the still-candidate replacement row. Rejecting a revalidate
+ * ("let it go stale", §5.8 (2)) sends the active target to stale(ttl_expired) like the proposal's expiry would,
+ * so the consolidator does not re-open the same question at the next dream.
  */
 export function decideProposal(db: SqlJsDatabase, input: DecideProposalInput): DecideProposalResult {
   const proposals = new ProposalRepository(db);
@@ -228,6 +255,14 @@ export function decideProposal(db: SqlJsDatabase, input: DecideProposalInput): D
           if (candidate === null) {
             effects.push("candidate_missing");
             break;
+          }
+          if (!isLive(candidate.status)) {
+            throw new ProposalNotApplicableError(
+              proposal.id,
+              proposal.kind,
+              "candidate_not_live",
+              `replacement ${candidate.id} is ${candidate.status}, so there is nothing live to activate in place of ${target.id}; reject the proposal (hm proposals:reject) or restore the replacement first`
+            );
           }
           if (isLive(target.status)) {
             remember(
@@ -296,30 +331,36 @@ export function decideProposal(db: SqlJsDatabase, input: DecideProposalInput): D
         case "fix_signature": {
           const payload = parseProposalPayload(proposal.rationale);
           if (payload === null) {
-            effects.push("payload_missing");
-          } else {
-            let signature: TriggerSignature | null | undefined = payload.trigger_signature;
-            let signatureKey: string | undefined;
-            if (signature !== undefined && signature !== null) {
-              const compiled = compileSignature(signature);
-              if (compiled.ok) {
-                signatureKey = compiled.compiled.signature_key;
-              } else {
-                effects.push(`signature_dropped:${compiled.code}`);
-                signature = null;
-              }
-            }
-            remember(
-              repository.setScope(target.id, {
-                scopeGlob: payload.scope_glob ?? target.scopeGlob,
-                lifecycleTriggers: payload.lifecycle_triggers,
-                triggerSignature: signature,
-                signatureKey,
-                updatedAt: input.now,
-              })
+            // Migration 019 and the consolidator write plain prose: without a payload an accept would only
+            // clear needs_scope and seal the row as human while its scope / signature stay as they are.
+            throw new ProposalNotApplicableError(
+              proposal.id,
+              proposal.kind,
+              "payload_missing",
+              "its rationale carries no @payload (scope_glob / lifecycle_triggers / trigger_signature), so accepting would change nothing but clear needs_scope and make the row human; reject or skip it, or re-create the row with `hm memory:add --scope … --signature … --active` and demote the old one"
             );
-            effects.push("target:scope_applied");
           }
+          let signature: TriggerSignature | null | undefined = payload.trigger_signature;
+          let signatureKey: string | undefined;
+          if (signature !== undefined && signature !== null) {
+            const compiled = compileSignature(signature);
+            if (compiled.ok) {
+              signatureKey = compiled.compiled.signature_key;
+            } else {
+              effects.push(`signature_dropped:${compiled.code}`);
+              signature = null;
+            }
+          }
+          remember(
+            repository.setScope(target.id, {
+              scopeGlob: payload.scope_glob ?? target.scopeGlob,
+              lifecycleTriggers: payload.lifecycle_triggers,
+              triggerSignature: signature,
+              signatureKey,
+              updatedAt: input.now,
+            })
+          );
+          effects.push("target:scope_applied");
           remember(repository.setFlags(target.id, { needsScope: 0, updatedAt: input.now }));
           if (input.decidedBy === "human" && target.authority !== "human") {
             remember(repository.setAuthority(target.id, "human", input.now));
@@ -367,6 +408,27 @@ export function decideProposal(db: SqlJsDatabase, input: DecideProposalInput): D
   } else if (proposal.kind === "supersede" && candidate !== null && candidate.status === "candidate" && input.decidedBy === "human") {
     remember(transitionMemory(db, { memoryId: candidate.id, to: "rejected", actor: "human", reason: "proposal:supersede rejected", now: input.now, proposalId: proposal.id }));
     effects.push("replacement:rejected");
+  } else if (proposal.kind === "revalidate" && target !== null && target.status === "active") {
+    // §5.8 (2): the proposal asks "confirm the memory still holds or let it go stale"; a reject is the second
+    // answer, so the row ends where the proposal's expiry would have sent it. A human may say so at any time;
+    // any other decider only once the TTL has actually passed, and only for the auto rows it is allowed to touch.
+    const staleActor: TransitionActor = input.decidedBy === "human" ? "human" : "expiry";
+    const ttlPassed = target.ttlExpiresAt !== null && Date.parse(target.ttlExpiresAt) <= Date.parse(input.now);
+    if (staleActor === "human" || (target.authority === "auto" && ttlPassed)) {
+      remember(
+        transitionMemory(db, {
+          memoryId: target.id,
+          to: "stale",
+          actor: staleActor,
+          reason: "proposal:revalidate rejected",
+          now: input.now,
+          proposalId: proposal.id,
+          statusReason: target.authority === "auto" ? "ttl_expired" : undefined,
+          runId: input.runId ?? null,
+        })
+      );
+      effects.push(`target:stale(${target.authority === "auto" ? "ttl_expired" : "human"})`);
+    }
   }
 
   const decided = proposals.decide(proposal.id, {
@@ -411,12 +473,18 @@ export function evaluateAutoDemotion(db: SqlJsDatabase, input: AutoDemotionInput
   const proposal = proposals.getById(input.proposalId);
   if (proposal === null || proposal.status !== "open") return { applied: false, reason: "not_open" };
   if (proposal.kind !== "supersede" && proposal.kind !== "stale") return { applied: false, reason: "kind" };
-  const target = new MemoryRepository(db, { clock: () => input.now }).getById(proposal.targetMemoryId);
+  const repository = new MemoryRepository(db, { clock: () => input.now });
+  const target = repository.getById(proposal.targetMemoryId);
   if (target === null) return { applied: false, reason: "target_missing" };
   if (target.authority !== "auto") return { applied: false, reason: "human_target" };
   if (target.type === "policy") return { applied: false, reason: "policy" };
   if (target.status !== "active") return { applied: false, reason: `status:${target.status}` };
   if (proposal.supportSessions < AUTO_DEMOTION_MIN_SESSIONS) return { applied: false, reason: "support_sessions" };
+  if (proposal.kind === "supersede" && proposal.candidateMemoryId !== null) {
+    // A replacement that expired or was rejected while the proposal gathered support cannot take the target's place.
+    const candidate = repository.getById(proposal.candidateMemoryId);
+    if (candidate !== null && !isLive(candidate.status)) return { applied: false, reason: "candidate_not_live" };
+  }
 
   const supports: ProposalSupportRecord[] = proposals.listSupport(proposal.id);
   const originEpisodeIds = new ProvenanceRepository(db)

@@ -286,21 +286,39 @@ export function compareVersions(left: string, right: string): number {
 
 export type VersionDetector = () => string | null;
 
+export interface VersionSpawn {
+  command: string;
+  args: string[];
+  shell: boolean;
+}
+
+/**
+ * How `<binary> --version` is spawned. Directly when possible. Windows `.cmd`/`.bat` shims (an npm install of
+ * Claude Code) cannot be spawned without a shell (Node refuses them with EINVAL), so they go to cmd.exe as one
+ * quoted command string: never a bare path plus an args array, which cmd.exe would split at the first space
+ * (`C:\Program Files\…` runs `C:\Program`) and which Node deprecates (DEP0190).
+ */
+export function claudeVersionSpawn(binary: string, viaShell: boolean): VersionSpawn {
+  return viaShell ? { command: `"${binary}" --version`, args: [], shell: true } : { command: binary, args: ["--version"], shell: false };
+}
+
+export function isWindowsShim(binary: string, platform: NodeJS.Platform = process.platform): boolean {
+  return platform === "win32" && /\.(?:cmd|bat)$/i.test(binary);
+}
+
 /** `claude --version` → `2.1.172`; null when the binary is missing or does not answer within 5 s. */
 export function detectClaudeVersion(): string | null {
   const binary = resolveClaudeBinary();
   if (binary === null) return null;
-  const attempt = (useShell: boolean): string | null => {
-    try {
-      const run = spawnSync(binary, ["--version"], { encoding: "utf8", timeout: 5_000, windowsHide: true, shell: useShell });
-      const text = `${run.stdout ?? ""}\n${run.stderr ?? ""}`;
-      const match = text.match(/(\d+\.\d+\.\d+)/);
-      return match === null ? null : match[1]!;
-    } catch {
-      return null;
-    }
-  };
-  return attempt(false) ?? (process.platform === "win32" && /\.(?:cmd|bat)$/i.test(binary) ? attempt(true) : null);
+  const spawn = claudeVersionSpawn(binary, isWindowsShim(binary));
+  try {
+    const run = spawnSync(spawn.command, spawn.args, { encoding: "utf8", timeout: 5_000, windowsHide: true, shell: spawn.shell });
+    const text = `${run.stdout ?? ""}\n${run.stderr ?? ""}`;
+    const match = text.match(/(\d+\.\d+\.\d+)/);
+    return match === null ? null : match[1]!;
+  } catch {
+    return null;
+  }
 }
 
 /** `auto`: exec form unless the detected version is older than EXEC_FORM_MIN_VERSION (unknown → exec, m0-facts #10). */

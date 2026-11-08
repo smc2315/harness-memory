@@ -19,6 +19,7 @@ v1 빌드에서 동작하는 것:
 - 벡터 검색은 `before_model`(UserPromptSubmit)에서 유지됩니다: 상주형(idle 종료) 임베딩 helper 프로세스 + 추출기가 뽑아준 한국어/영어 **aliases**의 어휘 색인.
 - CLI 33개 명령 중 32개가 동작합니다(`eval:live`만 이후 릴리스). `hm review`(제안·후보·미확인 import 일괄 처리), `hm import --from CLAUDE.md`(bullet → 사람 메모리), `hm memory:why --tool Bash --target "npm test"`(무엇이 왜 발화하는지 설명) 포함.
 - **평가 스위트가 실제 결함을 잡았습니다.** `hm eval:replay`(녹화된 12개 시나리오를 실제 훅과 worker로 재생, 314개 검사)가 "추출 프롬프트의 이벤트 id가 16자리 ledger seq라서 스키마 `^e[0-9]{1,4}$`에 전부 걸린다 → 실제 에피소드에서는 사실이 하나도 저장되지 않는다"는 blocker를 찾아냈고, 이벤트를 `e1..eN` 순번으로 바꿔 고쳤습니다(§3.3). 단위 테스트는 4자리 seq 픽스처만 써서 놓쳤던 것입니다 — v0.5가 "배선" 때문에 죽었다는 진단이 v0.6에서도 재현될 뻔했고, 이번엔 끝까지 도는 평가가 막았습니다.
+- **Phase D 적대적 리뷰를 통과했습니다.** 5개 차원(쓰기 경로 정합성, 훅 핫패스 안전성, 동시성·크래시, 보안, 모듈 간 일관성)에서 47건이 제기되어 각각 독립 반박 2회를 거쳐 34건이 살아남았고, 전부 고쳤습니다(§13, `phase-d-notes.md`). 가장 컸던 것 셋: 자격 증명 마스킹이 `DB_PASSWORD=` 같은 가장 흔한 형태를 놓치던 blocker, `db.lock` 탈취가 원자적이지 않아 두 writer가 동시에 잠금을 쥘 수 있던 문제, PolicyEngine이 훅 프로세스마다 minimatch를 로드하고 regex 안전성 샘플링을 돌려 지연 게이트를 넘기던 문제(고친 뒤 p95 84–87 ms로 게이트 통과).
 
 동작하지만 **이 머신에서 끝까지 검증하지 못한 것** 하나: 실제 `claude -p` 추출입니다. 이 PC의 `claude` CLI가 로그인되어 있지 않아(`/login` 필요) 추출 provider probe가 `not_logged_in`을 돌려줍니다. 그래서 추출 파이프라인은 녹화된 fixture를 재생하는 **replay provider**로 테스트했고, 실제 probe 실패 → 24 h 대기 → `hm status` 안내 경로는 실기로 확인했습니다(§9, §10).
 
@@ -186,7 +187,7 @@ v0.5 행은 017에서 `promotion_source='auto' OR status='candidate' → authori
 
 당신이 말한 대로 dense 검색은 이 도구의 핵심입니다. v0.5에서도 실제로 dense를 쓴 곳은 `before_model`뿐이었고(`before_tool`은 scope 매칭만), v1도 거기에 맞췄습니다.
 
-- **helper 프로세스** (`dist/embed-helper.js`): 첫 before_model 호출이 `node dist/embed-helper.js <root>`를 detached로 띄웁니다. helper는 `@xenova/transformers`로 `Xenova/multilingual-e5-small`(양자화)을 한 번 로드하고 named pipe(`\\.\pipe\harness-memory-embed-<repoHash>`, POSIX는 `locks/embed-helper.sock`)에서 `ping | embed | topk` 요청을 받습니다. 15분 유휴면 스스로 종료합니다. 쿼리 접두어 `query: `.
+- **helper 프로세스** (`dist/embed-helper.js`): 첫 before_model 호출이 `node dist/embed-helper.js <root>`를 detached로 띄웁니다. helper는 `@xenova/transformers`로 `Xenova/multilingual-e5-small`(양자화)을 한 번 로드하고 named pipe(`\\.\pipe\harness-memory-embed-<repoHash>`, POSIX는 `$XDG_RUNTIME_DIR`(없으면 임시 디렉터리)의 `harness-memory-embed-<repoHash>.sock` — 저장소 밖이라 깊은 경로에서도 Unix 소켓 길이 제한에 걸리지 않습니다)에서 `ping | embed | topk` 요청을 받습니다. 15분 유휴면 스스로 종료합니다. 쿼리 접두어 `query: `.
 - **훅 쪽** (`src/embed/client.ts`): 프롬프트 텍스트를 `topk` 요청으로 보내고 `before_model.dense_timeout_ms`(기본 80 ms) 안에 답이 오면 어휘 결과와 RRF로 합칩니다. 늦거나 helper가 없으면 조용히 어휘 검색만 씁니다(에러 아님). 첫 호출은 helper 기동 중이라 보통 어휘만 씁니다.
 - **worker 쪽**: 추출로 새 행이 생기면 `extract` 명령이 **별도 잠금 세션**에서 빈 행의 임베딩을 채웁니다(`passage: ` 접두어, 모델 로드는 잠금 밖에서 워밍업). `dream`도 백필합니다. 그러면 다음 스냅샷에 `dense.v1.bin`이 포함되고 helper가 그것을 읽습니다.
 - **aliases**: 추출 스키마에 `aliases: string[]`(≤ 8, 한국어 포함)을 넣어 LLM이 "테스트 명령", "vitest", "pnpm test" 같은 별칭을 뽑게 했습니다. 스냅샷 토크나이저는 camelCase 분리 + 한국어 조사(을/를/은/는/이/가/에서/으로…) 제거를 해서 "테스트를"로도 "테스트"가 잡힙니다.
@@ -248,12 +249,15 @@ hm eval:latency   # 300 메모리 픽스처에 pre-tool 훅 50회 스폰, p95 �
 3. Codex 호스트 어댑터(0.6.1)와 OpenCode V2(0.6.2)는 미포함. Codex **provider**(`codex exec --json`)는 포함되어 있으나 Codex가 설치되지 않아 미검증.
 4. Windows에서 worker 재귀 방지의 2차 가드(ppid 체인)는 no-op입니다. 1차 가드(`HARNESS_MEMORY_DISABLE=1`)가 모든 플랫폼을 막습니다.
 5. 임베딩 helper의 dense 왕복 기본 80 ms는 이 PC 기준 추정입니다. 느린 CPU에서는 자주 늦어 어휘 검색만 쓰게 됩니다(동작은 정상). `before_model.dense_timeout_ms`로 조정.
-5-1. **훅 지연 게이트(p95 ≤ 90 ms)가 이 PC에서는 2–5 ms 차이로 실패합니다.** `hm eval:latency` 실측: min 73 / p50 81–83 / p95 93–96 ms. 분해하면 Node 기동 자체가 ≈ 50 ms(`node -e 0`; 설계 당시 같은 PC에서 33 ms였는데 지금은 50 ms), 런처 + 148 KB 번들 로드 ≈ 15 ms, 설정·ledger 꼬리 읽기 ≈ 5 ms, 300행 스냅샷 파싱·결정 ≈ 10 ms입니다. 우리가 줄일 수 있는 부분은 30 ms 남짓이고 그중 scope regex 지연 컴파일은 이미 적용했습니다. 측정으로 확인한 후속 후보: ESM 대신 CommonJS 엔트리(−5 ms), V8 startup snapshot(번들 로드 제거, Node 버전마다 재생성 필요). 둘 다 v1에는 넣지 않았습니다. macOS/Linux나 Node 기동이 30 ms대인 PC에서는 p95 ≈ 70 ms로 게이트 안입니다.
+5-1. **훅 지연 게이트(p95 ≤ 90 ms)는 Phase D 뒤 이 PC에서 통과합니다**: `hm eval:latency` 3회 실측 p95 84.5 / 85.8 / 87.0 ms(min 73–74, p50 77–78, max 89–91). Phase C 시점에는 93–96 ms로 실패했는데, 원인의 대부분은 PolicyEngine이 훅 프로세스마다 파생 규칙의 시그니처를 다시 컴파일하면서 minimatch를 로드하고 타이밍 기반 regex 안전성 샘플링을 돌린 것이었습니다 — 스냅샷에 이미 들어 있는 컴파일 결과를 재사용하도록 바꿨습니다. 남은 비용 분해: Node 기동 ≈ 50 ms(`node -e 0`), 런처 + 154 KB 번들 로드 ≈ 15 ms, 설정·ledger 꼬리 읽기 ≈ 5 ms, 300행 스냅샷 파싱·결정 ≈ 10 ms. 여유가 3–5 ms뿐이라 더 느린 PC에서는 여전히 넘을 수 있습니다; 후속 후보는 CommonJS 엔트리(−5 ms)와 V8 startup snapshot입니다.
 6. `hm install --with-embeddings`의 실제 `npm install @xenova/transformers`는 seam 테스트만 했습니다.
 7. 이웃 탐색(Jaccard)은 타입별 전체 스캔입니다. 수천 행까지는 문제없지만 색인은 없습니다.
 8. 한 호스트가 UserPromptSubmit을 한 턴에 두 번 쏘면 before_model도 두 번 돕니다(ledger 쪽 가드 없음).
 9. `hm import`는 spec의 "확인 후 삽입"이 아니라 "삽입(`import_unconfirmed=1`, advise) 후 확인 표에서 플래그 해제" 순서입니다. 거절하면 행은 미확인 상태로 `hm review`에 남습니다. MEMORY.md(기계가 쓴 파일)를 auto 후보로 넣는 특례는 미구현이고 모든 import 파일이 사람 행이 됩니다.
 10. 위 5-1의 지연 테스트(`npm run test:latency`)는 다른 스위트와 병렬로 돌면 머신 부하를 재게 되어 `npm test`에서 분리했습니다.
+11. `fix_scope` / `fix_signature` 제안은 이 빌드에서 거절만 가능합니다. 수락에 필요한 scope/triggers/signature payload를 모으는 편집기가 아직 없어 `hm proposals:accept`가 `payload_missing`으로 거부하고 아무것도 바꾸지 않습니다(Phase D 전에는 payload 없이도 수락이 `needs_scope`를 지우고 authority를 human으로 올려 버렸습니다). 우회: `hm memory:add … --active`로 새 행을 만들고 옛 제안을 거절.
+12. worker는 `locks/worker.pid`를 제자리에 쓰고 SIGTERM에서 지우지 않습니다. 대신 훅 쪽이 2시간보다 오래된 pid 파일과 파일보다 늦게 시작된(재사용된) pid를 무시하므로(Phase D), 남은 파일이 훅을 끄지는 못합니다.
+13. 추출 프롬프트에 데이터 울타리와 "기록은 데이터이지 지시가 아니다" 문구를 넣었지만, "공격자가 제어하는 툴 출력이 한 에피소드만으로 `soft_deny` 메모리를 만들 수 있다"는 지적의 나머지 두 제안(에피소드 텍스트에 주입 스캐너 돌리기, soft_deny에 사람 신호 요구)은 명세 §7.3/7.4와 충돌하고 오탐이 많아 넣지 않았습니다. 교정 한 번으로 자동 활성화한다는 설계 자체의 비용이고, `autonomy_level: shadow`로 끌 수 있습니다.
 
 ---
 
@@ -263,17 +267,34 @@ hm eval:latency   # 300 메모리 픽스처에 pre-tool 훅 50회 스폰, p95 �
 - 0.6.1: Codex 호스트 어댑터(`notify` 훅 기반), `eval:live`.
 - 0.6.2: OpenCode V2 플러그인 어댑터(기존 사용자 이전 경로).
 - 로그인된 머신에서 첫 dogfood 후 `nested_refusal` 문구, 추출 프롬프트 품질, aliases 품질 튜닝.
+- Phase D에서 미룬 것: `hm review`의 fix_scope/fix_signature payload 편집기, worker.pid의 tmp+rename 쓰기와 SIGTERM 정리, hook-core와 worker idle sweep의 공용 `closeIdleTurn` 헬퍼(의미는 맞췄고 코드만 중복), `ledger.ts prepareLine`의 방어적 재마스킹, `eval:latency`의 도구별(Bash/Edit) 백분위, `ProposalNotApplicableError` 전용 CLI 힌트, candidate가 만료된 supersede 제안의 자동 정리.
 
 ---
 
 ## 12. 산출물과 수치
 
-- 브랜치 `redesign/v0.6` (로컬 `C:\Users\choey\harness-memory-repo`). 커밋: Phase 0 `4bfb770` → A `894c73f` → B `6e1b680`, `c7a802a` → C `f482547`, `ecfdfc4` → D (아래 갱신).
-- 문서: `docs/redesign/spec-v0.6.md`(설계 명세, 15장), `core-review-v0.5.md`(v0.5 결함 분석), `implementation-plan.md`(단계·파일 소유권), `m0-facts.md`(호스트 실측 사실), `phase-a/b/c-notes.md`(모듈별 API·요청·명세 이탈 기록), `upgrade-from-0.5.md`, `CHANGELOG.md`.
-- 품질 게이트 (Phase C 통합 시점; Phase D 뒤 최종 갱신):
+- 브랜치 `redesign/v0.6` (로컬 `C:\Users\choey\harness-memory-repo`). 커밋: Phase 0 `4bfb770` → A `894c73f` → B `6e1b680`, `c7a802a` → C `f482547`, `ecfdfc4`, `50f22b3` → D (이 문서가 포함된 커밋).
+- 문서: `docs/redesign/spec-v0.6.md`(설계 명세, 15장), `core-review-v0.5.md`(v0.5 결함 분석), `implementation-plan.md`(단계·파일 소유권), `m0-facts.md`(호스트 실측 사실), `phase-a/b/c-notes.md`(모듈별 API·요청·명세 이탈 기록), `phase-d-notes.md`(리뷰 결과 47건의 생존·반박, 영역별 수정, 통합, 최종 게이트), `upgrade-from-0.5.md`, `CHANGELOG.md`.
+- 품질 게이트 (최종, Phase D 통합 뒤 2026-11-08):
   - `tsc --noEmit`: 0 errors
-  - `npm test`: 68 files / 839 tests; `npm run test:latency`: 9 tests
-  - `npm run build`: dist/hook.js 0.3 KB, hook-bundle.js 148 KB, worker.js 357 KB, embed-helper.js 21 KB, bin/harness-memory.js 765 KB
+  - `npm test`: 73 files / 990 tests (Phase C 839 → Phase D 수정마다 붙은 테스트와 새 파일 5개: core-signals, core-process, policy-engine-snapshot, cli-paths, cli-registry); `npm run test:latency`: 9 tests
+  - `npm run build`: dist/hook.js 0.4 KB, hook-bundle.js 154 KB, worker.js 379 KB, embed-helper.js 22 KB, bin/harness-memory.js 799 KB
   - `hm eval:replay`: 12/12 시나리오, 314/314 검사, 훅 호출 178회 (≈ 2.1 s)
-  - `hm eval:latency`: 300 메모리 × 50회 — min 73 / p50 81 / p95 93–96 / max 97 ms (게이트 90 ms, §10 5-1 참고); 훅 내부 시간(Node 기동 제외)은 hooks.log 기준 p95 9 ms
-  - 임시 프로젝트 실기: `hm install` → 훅 9종 → episode → worker 스폰 → probe `not_logged_in` → `hm status` 안내까지 한 바퀴 확인 (§3)
+  - `hm eval:latency`: 300 메모리 × 50회를 3번 — min 72.6–74.0 / p50 77.1–78.2 / p95 84.5–87.0 / max 88.7–90.8 ms (게이트 90 ms 통과; Phase C 때 93–96); 훅 내부 시간(Node 기동 제외)은 hooks.log 기준 p95 9 ms
+  - 임시 프로젝트 실기(Phase D 빌드): `hm install`(훅 9종, `.harness-memory/.gitignore`, exclude 줄, probe `not_logged_in` 안내, self-test 79 ms) → 훅 12회 호출 전부 exit 0(실패 턴 + 교정 턴 → episode 2개, weight 1·2) → worker 3회 스폰·`not_logged_in` 대기(attempt 소모 없음) → `hm status`/`queue`/`doctor`(15 ok, 2 warn, 0 fail) → `git status`에 `.harness-memory/` 안 보임 → `hm uninstall`로 원복
+
+---
+
+## 13. Phase D: 적대적 리뷰에서 무엇이 나왔고 어떻게 고쳤나
+
+진행 방식: 차원별 리뷰어 5명 → 결과 47건 → 결과마다 독립 반박자 2명(한 명이라도 반박하면 탈락) → 34건 생존 → 영역별 fixer 8명(파일 소유권 엄격, 영역 밖은 요청으로만) → 영역 밖 요청 6건은 제가 직접 반영하고 테스트 추가 → 최종 게이트(§12). 상세는 `docs/redesign/phase-d-notes.md`.
+
+살아남은 34건(blocker 1, major 12, minor 21)의 핵심:
+
+- **보안 (blocker 1 + major 3)**: `redactCredentials`의 키 경계가 `\b`라서 `_`가 들어간 키(`DB_PASSWORD=`, `AWS_SECRET_ACCESS_KEY=`, `$env:DB_PASSWORD =`)를 전부 놓쳤습니다 → 식별자 인식 경계로 바꾸고 JSON/YAML 따옴표 키, camelCase(`accessToken`), 모든 스킴의 URL 자격 증명, `Authorization: Basic`, `curl -u`, `--password`, `mysql -p`, Stripe/GitHub fine-grained/GitLab/npm/Slack app 토큰을 추가했습니다(32개 형태 + 19개 보존 케이스 테스트, 200 KB 적대 입력 선형 시간 가드 — 처음 시도한 무제한 스킴 패턴은 25초가 걸려 폐기). 스캐너(V6)도 같은 경계를 쓰고 한국어 주입 문구(스캔 텍스트가 NFKD라 패턴도 NFKD로 빌드 — NFC 패턴은 절대 안 맞는 것을 확인)와 제어 문자를 막습니다. `scope_refs`/`failure_sig`/`program_token`은 마스킹을 우회하고 길이 상한이 없었습니다 → 마스킹 + 토큰 256자/합계 4,000자 상한. `.harness-memory/`(프롬프트·툴 출력·DB)가 git에 올라갈 수 있었습니다 → install이 `.gitignore`(`*`)를 쓰고 doctor가 이미 추적된 파일을 경고. worker가 `import:<절대경로>`를 그대로 읽어 추출기에 넘겼습니다 → 프로젝트 루트 밖 거부, bullet 텍스트는 raw/에 보관해 재시도. 추출 프롬프트는 기록·직전 턴·마지막 assistant 메시지·기존 메모리 목록을 데이터 울타리로 감쌉니다.
+- **쓰기 경로 (major 3)**: propose_supersede의 2세션 규칙이 도달 불가였습니다(두 번째 세션의 같은 주장이 기존 후보 행으로 접히면서 stale 제안으로 변질, 대체 행은 영원히 후보) → 접힌 쌍둥이가 열린 제안을 지지하고, 수락되면 대상은 superseded·대체 행은 활성. provider 레벨 probe 실패(`not_logged_in`, timeout)가 episode attempt를 소모해 3일이면 dead → 대기만 하고 attempt는 되돌림. import 모드의 propose_supersede가 사람 행을 바로 활성 삽입 → create 전용으로 relabel.
+- **동시성 (major 1)**: `db.lock` 탈취가 "검사 → 디렉터리 삭제 → 재생성"이라 두 경쟁자가 동시에 잠금을 쥘 수 있었습니다(fixer가 옛 번들로 재현: 6×15회 중 중첩 1회, 이중 탈취 14회, ENOENT 종료 29회) → `owner.json`에 대한 compare-and-swap(rename + 바이트 동일성 확인 + 배타적 생성)으로 교체하고 `Store`는 저장 직전 `stillHeld()`로 울타리(잃었으면 아무것도 안 쓰고 exit 75). 수정 후 같은 스트레스에서 0 중첩. 임베딩 백필이 `db.lock`을 쥔 채 모델 추론을 돌리던 것 → 잠금 밖에서 계산, 짧은 세션으로 저장(한 번에 64행).
+- **핫패스 (major 1 + minor)**: PolicyEngine이 훅마다 파생 규칙 시그니처를 재컴파일(minimatch 로드 + regex 안전성 샘플링) → 스냅샷의 컴파일 결과 재사용(§10 5-1의 p95 개선). 그 외: 메모리 없는 매뉴얼 규칙도 once-per-turn(`rule:<code>|tool`), 명령 정규화 메모이즈, 런처·`spawnDetached`의 비동기 에러 흡수(훅이 exit 1로 보이지 않게), resume/compact 마커 뒤에 오는 교정의 신호 유실 수정, POSIX에서 오래되거나 재사용된 `worker.pid`가 훅을 끄지 못하게.
+- **제안·일관성**: revalidate 거절이 아무 일도 안 하고 다음 dream에 다시 열리던 것 → 거절 = stale 전이; candidate가 죽은 supersede 수락과 payload 없는 fix_* 수락 → 쓰기 전 거부(`ProposalNotApplicableError`); 거절된 fix_signature는 30일 재제안 금지; V11 도달성의 tool-glob 의미를 검증기·스냅샷·매처에서 통일; idle sweep 두 구현(hook-core/worker)의 상태 불일치 정렬과 경쟁 중인 prompt 훅 보호; 불완전한 queue 파일이 모든 lease를 막던 것 → `.bad`로 격리; `hm <cmd> --help`의 usage 문자열과 실제 옵션 불일치 → 테스트로 고정.
+
+나머지 13건은 탈락했고 반박 사유 12건을 노트에 남겼습니다(예: "1 MB stdin 상한이 큰 Write를 fail-open으로 만든다", "heartbeat가 탈취당한 잠금을 다시 찍는다", "snapshot 빌드 시 떨어진 시그니처가 scope 전체 규칙이 된다" — 코드가 이미 다르게 동작함을 반박자가 보였습니다). fixer들이 영역 밖이라 넘긴 요청 중 제가 반영한 것: ledger `firedKeys`에 규칙 키, reconcile `decideTier`에 스캐너 판정(`scanSafe`) 배선(legacy 후보의 저장 텍스트가 스캔에 걸리면 강화는 되어도 자동 활성화 안 됨), consolidate의 fix_signature 30일 스킵과 고아 `import-*.json` GC, doctor의 helper 소켓 경로·길이 경고, 런처의 `uncaughtException`/`unhandledRejection` 가드, 그리고 README/CHANGELOG/업그레이드 문서의 해당 문구. 미룬 것은 §11.

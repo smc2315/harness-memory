@@ -17,9 +17,10 @@ import { META_KEYS, MetaRepository } from "../src/db/repositories/meta";
 import { ProposalRepository } from "../src/db/repositories/proposals";
 import { TransitionRepository } from "../src/db/repositories/transitions";
 import { selectAll } from "../src/db/sql";
-import { garbageCollectFiles, runDream, sweepIdleTurns } from "../src/dream/consolidate";
+import { applyEmbeddings, embedBacklog, garbageCollectFiles, runDream, selectEmbeddingBacklog, sweepIdleTurns } from "../src/dream/consolidate";
 import { appendLedgerLine, parseLedger } from "../src/dream/ledger";
 import { MemoryRepository } from "../src/memory/repository";
+import { decideProposal } from "../src/promotion/proposals";
 import { createTestDb } from "./helpers/create-test-db";
 import { assistantLine, promptLine, toolFailLine } from "./helpers/ledger-fixture";
 import { T0, autoMemory, humanMemory, isoPlus } from "./helpers/memory-fixtures";
@@ -152,6 +153,21 @@ describe("proposals opened by the consolidator", () => {
     expect(result.report.fixSignatureProposals).toHaveLength(1);
     expect(new ProposalRepository(db).listOpen({ kind: "fix_signature", targetId: row.id })).toHaveLength(1);
   });
+
+  test("a fix_signature proposal a human rejected is not re-opened for 30 days (§7.5), then proposed again", async () => {
+    const row = memories.create(humanMemory({ type: "pitfall", lifecycleTriggers: ["before_tool", "before_model"], triggerSignature: { tool: "bash", target: "command", pattern_kind: "regex", pattern: "(a+)+$" } }));
+    const first = await dream(isoPlus(T0, { hours: 1 }));
+    const proposalId = first.report.fixSignatureProposals[0]!;
+    decideProposal(db, { proposalId, decidedBy: "human", accept: false, now: isoPlus(T0, { hours: 2 }) });
+    expect(memories.getById(row.id)).toMatchObject({ status: "active", triggerSignature: expect.objectContaining({ pattern: "(a+)+$" }) });
+
+    const nextDay = await dream(isoPlus(T0, { days: 1 }));
+    expect(nextDay.report.fixSignatureProposals).toEqual([]);
+    expect(new ProposalRepository(db).listOpen({ kind: "fix_signature", targetId: row.id })).toHaveLength(0);
+
+    const later = await dream(isoPlus(T0, { days: 31 }));
+    expect(later.report.fixSignatureProposals).toHaveLength(1);
+  });
 });
 
 describe("embedding backfill", () => {
@@ -172,6 +188,39 @@ describe("embedding backfill", () => {
     expect(memories.getById(b.id)?.embedding).not.toBeNull();
     const again = await dream(isoPlus(T0, { hours: 2 }), { embed });
     expect(again.report.embedded).toBe(0);
+  });
+
+  test("lock-free split: selectEmbeddingBacklog orders this run's rows first, embedBacklog never touches the db, applyEmbeddings skips rows that moved", async () => {
+    const older = memories.create(autoMemory({ status: "active", summary: "Older backlog row", createdAt: T0, updatedAt: T0 }));
+    const newer = memories.create(autoMemory({ status: "active", summary: "Newer backlog row", createdAt: isoPlus(T0, { hours: 1 }), updatedAt: isoPlus(T0, { hours: 1 }) }));
+    const created = memories.create(autoMemory({ status: "candidate", summary: "Row created by this run", createdAt: isoPlus(T0, { hours: 2 }), updatedAt: isoPlus(T0, { hours: 2 }) }));
+    const vectored = memories.create(autoMemory({ status: "active", summary: "Already has a vector" }));
+    memories.updateEmbedding(vectored.id, new Float32Array([1, 1, 1]));
+    memories.create(autoMemory({ status: "rejected", summary: "Terminal row is never embedded" }));
+
+    const items = selectEmbeddingBacklog(memories, { preferIds: new Set([created.id]) });
+    expect(items.map((item) => item.id)).toEqual([created.id, older.id, newer.id]);
+    expect(items[0]!.text).toBe(`${created.summary}\n${created.details}`);
+    expect(selectEmbeddingBacklog(memories, { preferIds: new Set([created.id]), limit: 1 }).map((item) => item.id)).toEqual([created.id, older.id]);
+    expect(selectEmbeddingBacklog(memories, { limit: 0 })).toEqual([]);
+
+    // The model runs on the selected texts only (no repository involved); a failure stops the pass and is reported.
+    const computed = await embedBacklog(async (texts) => texts.map((_text, index) => new Float32Array([index + 1, 0, 0])), items);
+    expect(computed.errors).toEqual([]);
+    expect([...computed.vectors.keys()]).toEqual([created.id, older.id, newer.id]);
+    const failed = await embedBacklog(async () => {
+      throw new Error("model gone");
+    }, items);
+    expect(failed.vectors.size).toBe(0);
+    expect(failed.errors).toEqual(["embed: model gone"]);
+
+    // Between the two phases the user rewrote `newer` and `older` got a vector elsewhere: both are skipped.
+    memories.update(newer.id, { summary: "Newer backlog row, rewritten" });
+    memories.updateEmbedding(older.id, new Float32Array([9, 9, 9]));
+    expect(applyEmbeddings(memories, items, computed.vectors)).toBe(1);
+    expect(Array.from(memories.getById(created.id)!.embedding!)).toEqual([1, 0, 0]);
+    expect(Array.from(memories.getById(older.id)!.embedding!)).toEqual([9, 9, 9]);
+    expect(memories.getById(newer.id)!.embedding).toBeNull();
   });
 });
 
@@ -209,19 +258,82 @@ describe("idle sweep and GC (file system)", () => {
     expect(readdirSync(paths.queueDir)).toEqual([`${descriptor.id}.json`]);
 
     const state = JSON.parse(readFileSync(file, "utf8")) as SessionState;
-    expect(state.turn_key).toBeNull();
-    expect(state.segment).toBe(0);
+    // Same shape as the hooks' closeSegment: the turn stays open on its next segment, so a session that resumes
+    // closes its continuation as an episode and its prompt hook reads the swept turn through last_episode_range.
+    expect(state.turn_key).toBe("p2");
+    expect(state.segment).toBe(1);
+    expect(state.correction_for).toBe("ep-prev");
     expect(state.last_episode_id).toBe(descriptor.id);
-    // The prompt hook renders a corrected episode's tool lines from this range (SessionState.last_episode_range).
     expect(state.last_episode_range).toEqual({ start, end: Number(descriptor.ledger_ref.split("-").pop()) });
-    expect(state.correction_for).toBeUndefined();
+    expect(state.updated_at).toBe(now);
     const lines = parseLedger(readFileSync(ledger)).lines;
     const marker = lines[lines.length - 1]!;
     expect(marker.kind).toBe("marker");
     expect(marker.kind === "marker" && marker.marker).toBe("idle_close");
     expect(state.turn_start_offset).toBe(readFileSync(ledger).byteLength);
 
+    // Nothing after the marker: the next sweep (and the hooks' sweep) leave the session alone.
     expect(sweepIdleTurns(paths, isoPlus(now, { hours: 1 })).closed).toEqual([]);
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(state);
+    expect(parseLedger(readFileSync(ledger)).lines).toHaveLength(lines.length);
+  });
+
+  test("a turn the stop hook already closed, or a tail without episode content, is left alone (no marker, no state write)", () => {
+    const now = isoPlus(T0, { hours: 3 });
+    const old = new Date(Date.parse(now) - 2 * 60 * 60 * 1000);
+    const closedLedger = ledgerFile(paths, "claude-code", "k-closed");
+    appendLedgerLine(closedLedger, promptLine("fix it", { seq: 300, turn_key: "p1" }));
+    appendLedgerLine(closedLedger, assistantLine("Done.", { seq: 301, turn_key: "p1" }));
+    utimesSync(closedLedger, old, old);
+    // After a Stop, turn_key is kept and turn_start_offset == EOF (hook-core closeSegment).
+    const closedState: SessionState = { schema: "state.v1", host: "claude-code", session_id: "sess-c", session_key: "k-closed", turn_key: "p1", turn_start_offset: readFileSync(closedLedger).byteLength, segment: 1, last_episode_id: "ep-c", updated_at: T0 };
+    const closedFile = writeState(closedState);
+
+    const tailLedger = ledgerFile(paths, "claude-code", "k-tail");
+    appendLedgerLine(tailLedger, promptLine("hello", { seq: 400, turn_key: "p1" }));
+    const tailStart = readFileSync(tailLedger).byteLength;
+    appendLedgerLine(tailLedger, assistantLine("Only an assistant line follows the close.", { seq: 401, turn_key: "p1" }));
+    utimesSync(tailLedger, old, old);
+    const tailState: SessionState = { schema: "state.v1", host: "claude-code", session_id: "sess-t", session_key: "k-tail", turn_key: "p1", turn_start_offset: tailStart, segment: 1, updated_at: T0 };
+    const tailFile = writeState(tailState);
+
+    const result = sweepIdleTurns(paths, now);
+    expect(result.errors).toEqual([]);
+    expect(result.closed).toEqual([]);
+    expect(readdirSync(paths.queueDir)).toEqual([]);
+    expect(JSON.parse(readFileSync(closedFile, "utf8"))).toEqual(closedState);
+    expect(JSON.parse(readFileSync(tailFile, "utf8"))).toEqual(tailState);
+    expect(parseLedger(readFileSync(closedLedger)).lines).toHaveLength(2);
+    expect(parseLedger(readFileSync(tailLedger)).lines).toHaveLength(2);
+  });
+
+  test("a session resumed while the sweep was reading it keeps the state its prompt hook wrote (§9.1)", () => {
+    const now = isoPlus(T0, { hours: 3 });
+    const ledger = ledgerFile(paths, "claude-code", "k-race");
+    appendLedgerLine(ledger, promptLine("fix the build", { seq: 500, turn_key: "p1" }));
+    appendLedgerLine(ledger, toolFailLine("npm test", "Exit code 1\nfails", { seq: 501, turn_key: "p1", program_token: "pm test", exit_code: 1, failure_class: "exit_1" }));
+    const old = new Date(Date.parse(now) - 2 * 60 * 60 * 1000);
+    utimesSync(ledger, old, old);
+    const file = writeState({ schema: "state.v1", host: "claude-code", session_id: "sess-r", session_key: "k-race", turn_key: "p1", turn_start_offset: 0, segment: 0, updated_at: T0 });
+
+    // Between the sweep's read and its write the user resumes: the prompt hook closes p1 itself and opens p2.
+    let resumed: SessionState | null = null;
+    const result = sweepIdleTurns(paths, now, undefined, {
+      beforeAdvance: (stateFile) => {
+        const eof = readFileSync(ledger).byteLength;
+        appendLedgerLine(ledger, promptLine("try again with pnpm", { seq: 600, turn_key: "p2" }));
+        resumed = { schema: "state.v1", host: "claude-code", session_id: "sess-r", session_key: "k-race", turn_key: "p2", turn_start_offset: eof, segment: 0, last_episode_id: "ep-by-hook", updated_at: isoPlus(now, { seconds: 1 }) };
+        writeFileSync(stateFile, JSON.stringify(resumed));
+      },
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.closed).toEqual([]);
+    expect(readdirSync(paths.queueDir)).toEqual([]);
+    // The hook's state survives untouched and no idle_close marker was appended after the new prompt line.
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(resumed);
+    const lines = parseLedger(readFileSync(ledger)).lines;
+    expect(lines).toHaveLength(3);
+    expect(lines[2]!.kind).toBe("prompt");
   });
 
   test("a recently active ledger is left alone", () => {
@@ -233,7 +345,7 @@ describe("idle sweep and GC (file system)", () => {
     expect(readdirSync(paths.queueDir)).toEqual([]);
   });
 
-  test("GC removes old ledgers (not referenced by an open turn), raw cache, tmp orphans and audit rows", async () => {
+  test("GC removes old ledgers (not referenced by an open turn), raw cache, tmp orphans, orphan import descriptors and audit rows", async () => {
     const now = isoPlus(T0, { days: 30 });
     const nowMs = Date.parse(now);
     const oldDate = new Date(nowMs - 20 * 24 * 60 * 60 * 1000);
@@ -259,8 +371,18 @@ describe("idle sweep and GC (file system)", () => {
     writeFileSync(tmp, "x");
     utimesSync(tmp, oldDate, oldDate);
 
+    const twoDaysAgo = new Date(nowMs - 2 * 24 * 60 * 60 * 1000);
+    const oldImport = join(paths.dir, "import-4242-abc123.json");
+    const freshImport = join(paths.dir, "import-4243-def456.json");
+    writeFileSync(oldImport, "[]");
+    writeFileSync(freshImport, "[]");
+    utimesSync(oldImport, twoDaysAgo, twoDaysAgo);
+    utimesSync(freshImport, fresh, fresh);
+
     const gc = garbageCollectFiles(paths, DEFAULT_CONFIG, now);
-    expect(gc).toEqual({ ledgers: 1, states: 1, raw: 1, tmp: 1 });
+    expect(gc).toEqual({ ledgers: 1, states: 1, raw: 1, tmp: 2 });
+    expect(existsSync(oldImport)).toBe(false);
+    expect(existsSync(freshImport)).toBe(true);
     expect(existsSync(openLedger)).toBe(true);
     expect(existsSync(closedLedger)).toBe(false);
     expect(existsSync(freshLedger)).toBe(true);

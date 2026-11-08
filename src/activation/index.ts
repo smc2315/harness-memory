@@ -63,6 +63,7 @@ export {
   renderItemText,
   renderReason,
   renderSystemMessage,
+  stripControlCharacters,
   type BudgetedInjection,
   type InjectedItem,
   type InjectionSource,
@@ -100,6 +101,8 @@ export {
 } from "./session-start";
 export { selectAfterToolHints, type AfterToolParams, type AfterToolResult } from "./after-tool";
 export {
+  CANONICAL_CACHE_SIZE,
+  canonicalCommandFor,
   canonicalizeCommand,
   checkSpecificity,
   compileGlobSource,

@@ -1,17 +1,20 @@
 /**
  * `hm install` / `hm uninstall` into a temp project: settings merge (idempotent, foreign hooks kept),
- * .git/info/exclude, install-manifest.json, config.json, migrated database + snapshot, the real hook
- * self-test against a fake dist/hook.js, --user scope, --with-embeddings via the npm seam, shell form for
- * an old host, probe guidance; uninstall strips exactly our entries, --purge keeps the backups.
+ * .git/info/exclude (plain checkout, worktree pointer, unresolvable pointer), `.harness-memory/.gitignore`,
+ * install-manifest.json, config.json, migrated database + snapshot, the real hook self-test against a fake
+ * dist/hook.js, --user scope, --with-embeddings via the npm seam (and the shell-free npm spawn plan), shell
+ * form for an old host, probe guidance; uninstall strips exactly our entries, --purge keeps the backups.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
-import type { InstallReport } from "../src/cli/commands/install";
+import { bundledNpmCli, planNpmSpawn, type InstallReport } from "../src/cli/commands/install";
 import type { UninstallReport } from "../src/cli/commands/uninstall";
 import type { InstallManifest } from "../src/cli/lib/manifest";
+import { GIT_EXCLUDE_LINE, STATE_GITIGNORE_CONTENT } from "../src/cli/lib/paths";
 import { listHarnessHooks } from "../src/cli/lib/settings";
 import { TARGET_USER_VERSION } from "../src/core/paths";
 import type { ProbeResult } from "../src/core/vocabulary";
@@ -59,6 +62,7 @@ describe("hm install --host claude", () => {
     expect(report.database.snapshot_built).toBe(true);
     expect(report.snapshot_counts).toEqual({ active: 0, candidates: 0, unreachable: 0 });
     expect(report.git_exclude).toEqual({ path: join(project.root, ".git", "info", "exclude"), added: true, already: false });
+    expect(report.git_ignore).toEqual({ path: join(project.paths.dir, ".gitignore"), created: true });
     expect(report.probe.skipped).toBe(false);
     expect(report.probe.provider).toBeNull();
     expect("skipped" in report.self_test).toBe(false);
@@ -77,6 +81,9 @@ describe("hm install --host claude", () => {
     expect(settings.hooks.SessionStart![0]!.matcher).toBeUndefined();
 
     expect(readFileSync(join(project.root, ".git", "info", "exclude"), "utf8")).toBe(".claude/settings.local.json\n");
+    // Ledgers, memory.sqlite, raw provider output and logs live here: ignored from inside the directory so no `git add -A` can publish them.
+    expect(readFileSync(join(project.paths.dir, ".gitignore"), "utf8")).toBe(STATE_GITIGNORE_CONTENT);
+    expect(STATE_GITIGNORE_CONTENT.split("\n")).toContain("*");
     expect(existsSync(project.paths.snapshotActive)).toBe(true);
     expect(existsSync(project.paths.snapshotLexical)).toBe(true);
     expect(readJson(project.paths.config).schema).toBe("config.v1");
@@ -92,7 +99,8 @@ describe("hm install --host claude", () => {
     expect(manifest.settings_file).toBe(settingsFile);
     expect(manifest.scope).toBe("project");
     expect(manifest.claude_version).toBe("2.1.172");
-    expect(manifest.files.map((file) => file.role).sort()).toEqual(["config", "git_exclude", "hook_script", "settings", "worker_script"]);
+    expect(manifest.files.map((file) => file.role).sort()).toEqual(["config", "git_exclude", "git_ignore", "hook_script", "settings", "worker_script"]);
+    expect(manifest.files.find((file) => file.role === "git_ignore")).toMatchObject({ path: join(project.paths.dir, ".gitignore"), created: true });
     expect(manifest.files.find((file) => file.role === "settings")!.sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(manifest.files.find((file) => file.role === "settings")!.created).toBe(true);
   });
@@ -104,11 +112,15 @@ describe("hm install --host claude", () => {
     const old = { type: "command", command: "/old/node", args: ["/old/harness-memory/dist/hook.js", "pre-tool"], timeout: 5 };
     writeFileSync(settingsFile, JSON.stringify({ permissions: { allow: ["Bash(ls)"] }, hooks: { PreToolUse: [{ matcher: "Bash", hooks: [foreign, old] }] } }, null, 2));
     writeFileSync(join(project.root, ".git", "info", "exclude"), "node_modules\n.claude/settings.local.json\n");
+    mkdirSync(project.paths.dir, { recursive: true });
+    writeFileSync(join(project.paths.dir, ".gitignore"), "*\n!skills/\n");
 
     const first = await runHm(project, ["install", "--host", "claude", "--skip-probe", "--skip-self-test", "--json"]);
     expect(first.code).toBe(0);
     expect(first.json<InstallReport>().replaced_entries).toBe(1);
     expect(first.json<InstallReport>().git_exclude).toEqual({ path: join(project.root, ".git", "info", "exclude"), added: false, already: true });
+    expect(first.json<InstallReport>().git_ignore).toEqual({ path: join(project.paths.dir, ".gitignore"), created: false });
+    expect(readFileSync(join(project.paths.dir, ".gitignore"), "utf8")).toBe("*\n!skills/\n");
     const afterFirst = readFileSync(settingsFile, "utf8");
     const parsed = JSON.parse(afterFirst) as { permissions: unknown; hooks: Record<string, Array<{ matcher?: string; hooks: unknown[] }>> };
     expect(parsed.permissions).toEqual({ allow: ["Bash(ls)"] });
@@ -132,10 +144,53 @@ describe("hm install --host claude", () => {
     expect(report.scope).toBe("user");
     expect(report.settings_file).toBe(join(project.configDir, "settings.json"));
     expect(report.git_exclude).toBeNull();
+    expect(report.warnings.filter((warning) => warning.includes(GIT_EXCLUDE_LINE))).toEqual([]);
     expect(existsSync(join(project.root, ".claude", "settings.local.json"))).toBe(false);
     expect(listHarnessHooks(readJson(join(project.configDir, "settings.json")))).toHaveLength(9);
     expect(existsSync(join(project.root, ".git", "info", "exclude"))).toBe(false);
+    // The state directory is still created in the project, so its .gitignore is written regardless of scope.
+    expect(report.git_ignore.created).toBe(true);
+    expect(readFileSync(join(project.paths.dir, ".gitignore"), "utf8")).toBe(STATE_GITIGNORE_CONTENT);
     expect(readJson<InstallManifest>(project.paths.manifest).scope).toBe("user");
+  });
+
+  test("follows a worktree's .git pointer to the repository's info/exclude, which uninstall then cleans", async () => {
+    const main = join(project.root, "..", "main");
+    const worktreeGitDir = join(main, ".git", "worktrees", "project");
+    mkdirSync(join(main, ".git", "info"), { recursive: true });
+    mkdirSync(worktreeGitDir, { recursive: true });
+    writeFileSync(join(worktreeGitDir, "commondir"), "../..\n");
+    rmSync(join(project.root, ".git"), { recursive: true, force: true });
+    writeFileSync(join(project.root, ".git"), `gitdir: ${worktreeGitDir}\n`);
+    const sharedExclude = join(main, ".git", "info", "exclude");
+
+    const result = await runHm(project, ["install", "--host", "claude", "--skip-probe", "--skip-self-test", "--json"]);
+    expect(result.code).toBe(0);
+    const report = result.json<InstallReport>();
+    expect(report.warnings.filter((warning) => warning.includes(GIT_EXCLUDE_LINE))).toEqual([]);
+    expect(report.git_exclude).toEqual({ path: sharedExclude, added: true, already: false });
+    expect(readFileSync(sharedExclude, "utf8")).toBe(`${GIT_EXCLUDE_LINE}\n`);
+    expect(readJson<InstallManifest>(project.paths.manifest).git_exclude).toEqual({ path: sharedExclude, line: GIT_EXCLUDE_LINE, added: true });
+
+    const uninstall = await runHm(project, ["uninstall", "--json"]);
+    expect(uninstall.code).toBe(0);
+    expect(uninstall.json<UninstallReport>().git_exclude_removed).toBe(true);
+    expect(readFileSync(sharedExclude, "utf8")).toBe("\n");
+  });
+
+  test("warns instead of silently skipping the exclude when the .git pointer cannot be resolved", async () => {
+    rmSync(join(project.root, ".git"), { recursive: true, force: true });
+    writeFileSync(join(project.root, ".git"), "gitdir: ../gone/.git/worktrees/project\n");
+
+    const result = await runHm(project, ["install", "--host", "claude", "--skip-probe", "--skip-self-test", "--json"]);
+    expect(result.code).toBe(0);
+    const report = result.json<InstallReport>();
+    expect(report.git_exclude).toBeNull();
+    const excludeWarnings = report.warnings.filter((warning) => warning.includes(GIT_EXCLUDE_LINE));
+    expect(excludeWarnings).toHaveLength(1);
+    expect(excludeWarnings[0]).toContain("could not be resolved");
+    expect(existsSync(join(project.root, ".claude", "settings.local.json"))).toBe(true);
+    expect(readJson<InstallManifest>(project.paths.manifest).git_exclude).toBeNull();
   });
 
   test("writes shell form with powershell when the host is older than the exec-form minimum and Git Bash is absent", async () => {
@@ -183,6 +238,24 @@ describe("hm install --host claude", () => {
     } finally {
       failing.cleanup();
     }
+  });
+
+  test("--with-embeddings never runs npm in the project when the package directory is unknown", async () => {
+    const result = await runHm(project, ["install", "--host", "claude", "--with-embeddings", "--skip-probe", "--skip-self-test", "--json"], {
+      packageRoot: null,
+      seams: {
+        runNpm: () => {
+          throw new Error("npm must not run without a package root");
+        },
+      },
+    });
+    expect(result.code).toBe(1);
+    const report = result.json<InstallReport>();
+    expect(report.ok).toBe(false);
+    expect(report.embeddings).toEqual({ requested: true, installed: false, output: null });
+    expect(report.config.embeddings_enabled).toBe(false);
+    expect(report.warnings.some((warning) => warning.startsWith("npm install @xenova/transformers skipped"))).toBe(true);
+    expect(existsSync(project.paths.manifest)).toBe(true);
   });
 
   test("probes the provider, caches the result in meta and prints the not_logged_in guidance", async () => {
@@ -260,11 +333,23 @@ describe("hm uninstall", () => {
     expect(report.settings[0]!.deleted_file).toBe(true);
     expect(existsSync(join(project.root, ".claude", "settings.local.json"))).toBe(false);
     expect(report.purged).toBe(true);
-    expect(report.kept).toEqual([project.paths.dbBackup(9)]);
+    // The backup is a full database, so the .gitignore that keeps the directory out of git stays with it.
+    expect([...report.kept].sort()).toEqual([join(project.paths.dir, ".gitignore"), project.paths.dbBackup(9)].sort());
     expect(existsSync(project.paths.db)).toBe(false);
     expect(existsSync(project.paths.snapshotDir)).toBe(false);
     expect(existsSync(join(project.paths.dir, ".conversation-buffer.json"))).toBe(false);
     expect(readFileSync(project.paths.dbBackup(9), "utf8")).toBe("backup bytes");
+    expect(readFileSync(join(project.paths.dir, ".gitignore"), "utf8")).toBe(STATE_GITIGNORE_CONTENT);
+  });
+
+  test("--purge without backups removes the whole directory, .gitignore included", async () => {
+    expect((await runHm(project, ["install", "--host", "claude", "--skip-probe", "--skip-self-test"])).code).toBe(0);
+    const result = await runHm(project, ["uninstall", "--purge", "--json"]);
+    expect(result.code).toBe(0);
+    const report = result.json<UninstallReport>();
+    expect(report.kept).toEqual([]);
+    expect(report.removed_paths).toContain(project.paths.dir);
+    expect(existsSync(project.paths.dir)).toBe(false);
   });
 
   test("without a manifest it still strips the project settings file", async () => {
@@ -277,5 +362,54 @@ describe("hm uninstall", () => {
     expect(report.manifest_found).toBe(false);
     expect(report.settings[0]!.removed).toBe(1);
     expect(readJson(settingsFile)).toEqual({});
+  });
+});
+
+describe("npm spawn plan (--with-embeddings)", () => {
+  let base: string;
+
+  beforeEach(() => {
+    base = realpathSync(mkdtempSync(join(tmpdir(), "hm-npm-")));
+  });
+
+  afterEach(() => {
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  test("prefers the npm-cli.js bundled with the running node, through node itself and without a shell", () => {
+    const nodeDir = join(base, "node dir");
+    const npmCli = join(nodeDir, "node_modules", "npm", "bin", "npm-cli.js");
+    mkdirSync(join(nodeDir, "node_modules", "npm", "bin"), { recursive: true });
+    writeFileSync(npmCli, "// npm\n");
+    const execPath = join(nodeDir, "node.exe");
+    expect(bundledNpmCli(execPath)).toBe(npmCli);
+    expect(planNpmSpawn(["install", "@xenova/transformers"], { execPath, platform: "win32" })).toEqual({ file: execPath, args: [npmCli, "install", "@xenova/transformers"], shell: false });
+
+    const posixPrefix = join(base, "usr local");
+    const posixCli = join(posixPrefix, "lib", "node_modules", "npm", "bin", "npm-cli.js");
+    mkdirSync(join(posixPrefix, "bin"), { recursive: true });
+    mkdirSync(join(posixPrefix, "lib", "node_modules", "npm", "bin"), { recursive: true });
+    writeFileSync(posixCli, "// npm\n");
+    expect(bundledNpmCli(join(posixPrefix, "bin", "node"))).toBe(posixCli);
+
+    const here = bundledNpmCli();
+    if (here !== null) expect(existsSync(here)).toBe(true);
+  });
+
+  test("without a bundled npm, Windows gets PATH's npm.cmd as one quoted command string (never a bare name cmd.exe would look up in the cwd)", () => {
+    const bareNode = join(base, "bare", "node.exe");
+    mkdirSync(join(base, "bare"), { recursive: true });
+    const shimDir = join(base, "Program Files", "nodejs");
+    mkdirSync(shimDir, { recursive: true });
+    writeFileSync(join(shimDir, "npm.cmd"), "@echo off\n");
+    const env = { PATH: [join(base, "elsewhere"), shimDir].join(delimiter) };
+
+    expect(planNpmSpawn(["install", "@xenova/transformers"], { execPath: bareNode, platform: "win32", env })).toEqual({
+      file: `"${join(shimDir, "npm.cmd")}" install @xenova/transformers`,
+      args: [],
+      shell: true,
+    });
+    expect(planNpmSpawn(["install", "@xenova/transformers"], { execPath: bareNode, platform: "win32", env: { PATH: join(base, "elsewhere") } })).toBeNull();
+    expect(planNpmSpawn(["install", "@xenova/transformers"], { execPath: bareNode, platform: "linux", env })).toEqual({ file: "npm", args: ["install", "@xenova/transformers"], shell: false });
   });
 });

@@ -1,3 +1,5 @@
+import { CREDENTIAL_VALUE_NOT_REFERENCE, credentialKeySource } from "../core/signals";
+
 export interface ScanThreat {
   pattern: string;
   severity: "block" | "warn";
@@ -36,12 +38,54 @@ const MAX_MATCH_LENGTH = 100;
 
 const INVISIBLE_UNICODE_REGEX = /[\u200B\u200C\u200D\uFEFF\u202A-\u202E\u2060\u2066-\u2069\u00AD\u200E\u200F]/g;
 
+/** C0/C1 controls other than tab/newline/CR: terminal escapes and other invisible payloads have no place in memory text. */
+const CONTROL_CHARACTER_REGEX = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g;
+
+/**
+ * Scanning happens on NFKD-normalized text, which decomposes Hangul syllables into conjoining jamo, so a
+ * Korean pattern must be decomposed the same way or it never matches. No `\b` (meaningless for Hangul).
+ */
+function koreanPattern(source: string): RegExp {
+  return new RegExp(source.normalize("NFKD"), "g");
+}
+
 const PROMPT_INJECTION_PATTERNS: readonly RegexThreatPattern[] = [
   {
     name: "ignore_previous_instructions",
     category: "prompt_injection",
     severity: "block",
-    regex: /\b(?:ignore\s+previous\s+instructions|ignore\s+all\s+previous|disregard\s+your\s+rules)\b/gi,
+    regex:
+      /\b(?:(?:ignore|disregard|forget)\s+(?:all\s+|any\s+|the\s+|your\s+)?(?:previous|prior|preceding|earlier|above)\s+(?:instructions|directions|guidelines|prompts?|constraints)|ignore\s+all\s+previous|disregard\s+your\s+rules)\b/gi,
+  },
+  {
+    name: "ignore_previous_instructions_ko",
+    category: "prompt_injection",
+    severity: "block",
+    regex: koreanPattern("(?:\uC774\uC804|\uC55E\uC120|\uC55E\uC758|\uC704\uC758|\uC704\uC5D0|\uBAA8\uB4E0|\uAE30\uC874|\uC2DC\uC2A4\uD15C)\\s*(?:\uC9C0\uC2DC|\uC9C0\uCE68|\uBA85\uB839|\uADDC\uCE59|\uD504\uB86C\uD504\uD2B8)(?:\uC0AC\uD56D|\uB4E4)?(?:\uC744|\uB97C|\uC740|\uB294)?\\s*(?:\uBB34\uC2DC|\uC78A)"),
+  },
+  {
+    name: "user_override",
+    category: "prompt_injection",
+    severity: "block",
+    regex: /\bdo\s+not\s+(?:follow|obey|listen\s+to)\s+the\s+user\b/gi,
+  },
+  {
+    name: "identity_override_ko",
+    category: "prompt_injection",
+    severity: "block",
+    regex: koreanPattern("(?:\uC9C0\uAE08\uBD80\uD130|\uC774\uC81C\uBD80\uD130)\\s*(?:\uB108|\uB2F9\uC2E0|\uB10C)(?:\uB294|\uC740)|(?:\uB108|\uB2F9\uC2E0)(?:\uB294|\uC740)\\s*(?:\uC774\uC81C|\uC9C0\uAE08)(?:\uBD80\uD130)?\\s"),
+  },
+  {
+    name: "concealment_instruction_ko",
+    category: "prompt_injection",
+    severity: "block",
+    regex: koreanPattern("\uC0AC\uC6A9\uC790(?:\uC5D0\uAC8C|\uD55C\uD14C)\\s*[^\\n\\r]{0,24}?(?:\uC54C\uB9AC\uC9C0|\uB9D0\uD558\uC9C0|\uBCF4\uACE0\uD558\uC9C0|\uC228\uAE30|\uC228\uACA8|\uAC10\uCD94)"),
+  },
+  {
+    name: "reveal_system_instructions_ko",
+    category: "prompt_injection",
+    severity: "block",
+    regex: koreanPattern("\uC2DC\uC2A4\uD15C\\s*\uD504\uB86C\uD504\uD2B8(?:\uB97C|\uC744)?\\s*[^\\n\\r]{0,24}?(?:\uBCF4\uC5EC|\uCD9C\uB825|\uACF5\uAC1C|\uB178\uCD9C|\uC54C\uB824|\uB9D0\uD574)"),
   },
   {
     name: "identity_override",
@@ -81,6 +125,15 @@ const PROMPT_INJECTION_PATTERNS: readonly RegexThreatPattern[] = [
   },
 ];
 
+/**
+ * `<key> = <value>` with the identifier-aware key boundary shared with the ledger redactor, so env-var
+ * style keys (`DB_PASSWORD=`, `JWT_SECRET=`) and quoted JSON keys (`"password": "…"`) are caught; a
+ * `$VAR` reference is not a secret and stays allowed.
+ */
+function assignmentPattern(keywords: string): RegExp {
+  return new RegExp(`${credentialKeySource(keywords)}${CREDENTIAL_VALUE_NOT_REFERENCE}\\S+`, "gi");
+}
+
 const CREDENTIAL_PATTERNS: readonly RegexThreatPattern[] = [
   {
     name: "openai_api_key",
@@ -110,19 +163,25 @@ const CREDENTIAL_PATTERNS: readonly RegexThreatPattern[] = [
     name: "generic_password_assignment",
     category: "credential_pattern",
     severity: "block",
-    regex: /\bpassword\s*[:=]\s*\S+/gi,
+    regex: assignmentPattern("password|passwd"),
   },
   {
     name: "generic_secret_assignment",
     category: "credential_pattern",
     severity: "block",
-    regex: /\bsecret\s*[:=]\s*\S+/gi,
+    regex: assignmentPattern("secret"),
   },
   {
     name: "generic_token_assignment",
     category: "credential_pattern",
     severity: "block",
-    regex: /\btoken\s*[:=]\s*\S+/gi,
+    regex: assignmentPattern("token"),
+  },
+  {
+    name: "generic_api_key_assignment",
+    category: "credential_pattern",
+    severity: "block",
+    regex: assignmentPattern("api[_-]?key|access[_-]?key|private[_-]?key"),
   },
   {
     name: "bearer_token",
@@ -209,6 +268,12 @@ const BLOCK_REGEX_PATTERNS: readonly RegexThreatPattern[] = [
     severity: "block",
     regex: INVISIBLE_UNICODE_REGEX,
   },
+  {
+    name: "control_character",
+    category: "invisible_unicode",
+    severity: "block",
+    regex: CONTROL_CHARACTER_REGEX,
+  },
   ...PROMPT_INJECTION_PATTERNS,
   ...CREDENTIAL_PATTERNS,
   ...MALICIOUS_INSTRUCTION_PATTERNS,
@@ -232,7 +297,8 @@ function addRegexThreats(field: FieldName, text: string, threats: ScanThreat[]):
         pattern: pattern.name,
         severity: pattern.severity,
         category: pattern.category,
-        match: prefixedMatch(field, matchResult[0]),
+        // NFC so a match on decomposed Hangul reads as text (identity for ASCII).
+        match: prefixedMatch(field, matchResult[0].normalize("NFC")),
       });
 
       matchResult = pattern.regex.exec(text);

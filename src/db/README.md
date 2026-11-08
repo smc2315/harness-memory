@@ -11,9 +11,9 @@ every writer goes through one protocol. Spec: `docs/redesign/spec-v0.6.md` §4, 
 | `migrations/NNN_*.sql` | Schema, tracked by `PRAGMA user_version` (001–016 are v0.5; 017–021 are the v0.6 redesign, final `user_version = 21`). |
 | `migrator.ts` | `runMigrationsOnDb(db, {logger?, target?})` applies pending files on an open connection (no transaction); `runMigrations(dbPath, …)` is the lock-free CLI path with `.bak-v<from>` backup, post-migrate and atomic save. |
 | `post-migrate.ts` | `runPostMigrate(db, {now})`: one-time data fix-ups after 021 (reject DreamWorker template candidates, backfill `semantic_key`, open `merge` proposals for live collisions). Idempotent via `meta.semantic_key_backfill`. |
-| `locks.ts` | `acquireDirLock(lockDir, {purpose, waitMs, …})`: `mkdirSync` directory lock with `owner.json`, 5 s heartbeat, stale/dead-owner takeover, jittered wait, `LockBusyError`. |
+| `locks.ts` | `acquireDirLock(lockDir, {purpose, waitMs, …})`: `mkdirSync` directory lock with `owner.json`, 5 s heartbeat, stale/dead-owner takeover (compare-and-swap on `owner.json`: rename the stale record aside, verify, exclusive `wx` publish; the directory is never removed), `stillHeld()` fencing, jittered wait, `LockBusyError`. |
 | `store.ts` | `Store.withWriteLock(purpose, waitMs, fn)` = §9.2 steps 1–6; `Store.read(fn)` = lock-free read without migrations; `Store.rebuildSnapshot()`. Hooks (`postMigrate`, `deriveRules`, `buildSnapshot`) are injected by the composition root. |
-| `db-file.ts` | Header check, atomic save (`.tmp-<pid>` → fsync → `.prev` → rename with retries), `.prev` recovery (`.corrupt-<ts>`), orphan tmp cleanup. |
+| `db-file.ts` | Header check, atomic save (`.tmp-<pid>` → fsync → `.prev` → rename with retries), `.prev` recovery (`.corrupt-<ts>`), orphan tmp cleanup (db dir, `snapshot/`, `queue/`, `state/`, `raw/`). |
 | `meta.ts` | `meta` key/value helpers (`db_generation`) and the `write_ops` idempotency ledger. |
 | `sql.ts` | prepare/bind/step/free helpers (`selectAll`, `selectOne`, `selectValue`, `selectCount`, `tableExists`, `quickCheck`). |
 | `sqlite.ts` | `loadSqlJs()` (cached WASM runtime), plain `openSqlJsDatabase` / `saveSqlJsDatabase` for tooling. |
@@ -24,7 +24,8 @@ every writer goes through one protocol. Spec: `docs/redesign/spec-v0.6.md` §4, 
 
 ```
 1 lock      acquireDirLock(locks/db.lock): owner.json {pid, hostname, purpose, started_at, heartbeat_at};
-            takeover when heartbeat_at is older than 120 s or the owner pid on this host is dead;
+            takeover when heartbeat_at is older than 120 s or the owner pid on this host is dead
+            (rename the stale owner.json aside, verify it is the inspected record, publish ours with `wx`);
             otherwise jittered 25–250 ms waits until waitMs → LockBusyError (CLI exit 75)
 2 load      readFileSync → header "SQLite format 3\0" + PRAGMA quick_check(1);
             damaged → keep as memory.sqlite.corrupt-<ts>, restore memory.sqlite.prev
@@ -34,7 +35,8 @@ every writer goes through one protocol. Spec: `docs/redesign/spec-v0.6.md` §4, 
             op.noop && op.wrote  → quick_check, COMMIT (no derive / generation / write_ops)
             otherwise            → hooks.deriveRules, meta.db_generation += 1, INSERT write_ops(op.id), quick_check, COMMIT
             any exception        → ROLLBACK, rethrow; an op.id already in write_ops → changes rolled back, reported as noop
-5 save      db.export() → memory.sqlite.tmp-<pid> → fsync → copy current → .prev → rename
+5 save      lock.stillHeld() (owner.json still ours, else LockBusyError and nothing is written) →
+            db.export() → memory.sqlite.tmp-<pid> → fsync → copy current → .prev → rename
             (5 attempts, 20 ms apart; EPERM/EBUSY → copy fallback + warning)
 6 snapshot  hooks.buildSnapshot(db, ctx) when the file was saved (or alwaysSnapshot); finally release the lock
 ```

@@ -1,7 +1,8 @@
 /**
  * Hook-side client for the embedding helper (plan §4 B2, deviation note in §1 of the plan): connect to
- * the named pipe / socket, send one `topk` request, wait at most `timeoutMs` (default 30 ms) and
- * return null on any failure. When nothing is listening (ECONNREFUSED / ENOENT) the helper is spawned
+ * the named pipe / socket (`paths.embedHelperSocket`, keyed by `repoHash` and never under the repository
+ * so its length cannot exceed `sun_path`), send one `topk` request, wait at most `timeoutMs` (default
+ * 30 ms) and return null on any failure. When nothing is listening (ECONNREFUSED / ENOENT) the helper is spawned
  * detached at most once per 60 s through the `locks/embed-helper.spawn` touch file; the current hook
  * simply proceeds without a dense leg.
  *

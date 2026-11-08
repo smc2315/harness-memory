@@ -1,11 +1,12 @@
 /**
  * `hm install --host claude [--user] [--with-embeddings]` (spec §8.7, §11; m0-facts #1, #3, #10, #15–#17).
  *
- *  1 `.harness-memory/` directories + `config.json` defaults (`--with-embeddings` → npm install + enabled)
+ *  1 `.harness-memory/` directories, its `.gitignore` (`*`: ledgers and the database are never committed)
+ *    + `config.json` defaults (`--with-embeddings` → npm install in the package root + enabled)
  *  2 migrate (backup first) + `meta.installed_version` + snapshot build, under the store's lock
  *  3 hooks into `.claude/settings.local.json` (`--user`: `~/.claude/settings.json`), exec form
  *    `{command: <node>, args: [<dist/hook.js>, <event>], timeout}` per §8.2, idempotent merge
- *  4 `.claude/settings.local.json` in `.git/info/exclude`
+ *  4 `.claude/settings.local.json` in `.git/info/exclude` (a worktree's / submodule's pointer is followed)
  *  5 `install-manifest.json` (files touched + sha256, node path, version)
  *  6 provider probe (cached in meta) → `not_logged_in` guidance when needed
  *  7 self-test: `node dist/hook.js session-start` with synthetic stdin → one hooks.log line
@@ -13,7 +14,7 @@
 
 import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { DEFAULT_CONFIG, loadConfig, mergeConfig, type HarnessConfig } from "../../core/config";
 import { EXIT_CODES } from "../../core/errors";
@@ -27,7 +28,18 @@ import { flagBoolean, flagString, type OptionSpecs } from "../lib/args";
 import { probeGuidance, readSnapshotFacts } from "../lib/diagnostics";
 import { sha256File, writeManifest, type InstallManifest, type ManifestFile } from "../lib/manifest";
 import { formatMs } from "../lib/output";
-import { GIT_EXCLUDE_LINE, gitExcludeFile, projectSettingsFile, resolveHookScript, siblingScripts, userSettingsFile } from "../lib/paths";
+import {
+  ensureStateGitignore,
+  findExecutable,
+  GIT_EXCLUDE_LINE,
+  gitDirectory,
+  gitExcludeFile,
+  hasGitExcludeLine,
+  projectSettingsFile,
+  resolveHookScript,
+  siblingScripts,
+  userSettingsFile,
+} from "../lib/paths";
 import { runHookSelfTest, type SelfTestResult } from "../lib/selftest";
 import {
   chooseHookForm,
@@ -71,16 +83,50 @@ export interface InstallReport {
   database: { path: string; user_version: number; migrated_from: number | null; backup: string | null; snapshot_built: boolean };
   snapshot_counts: { active: number; candidates: number; unreachable: number } | null;
   git_exclude: { path: string; added: boolean; already: boolean } | null;
+  /** `.harness-memory/.gitignore` (`*`), written for every scope and checkout layout; `created` is false when a file was already there. */
+  git_ignore: { path: string; created: boolean };
   manifest: string;
   probe: { provider: string | null; result: ProbeResult | null; skipped: boolean; guidance: string | null };
   self_test: SelfTestResult | { skipped: true; reason: string };
   warnings: string[];
 }
 
+export interface NpmSpawnPlan {
+  file: string;
+  args: string[];
+  shell: boolean;
+}
+
+/** The `npm-cli.js` bundled with the node binary at `execPath` (`<dir>/node_modules/npm/…` on Windows, `<dir>/../lib/node_modules/npm/…` elsewhere), or null. */
+export function bundledNpmCli(execPath: string = process.execPath): string | null {
+  const dir = dirname(execPath);
+  for (const candidate of [join(dir, "node_modules", "npm", "bin", "npm-cli.js"), resolve(dir, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js")]) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * How `npm <args>` is spawned: the npm bundled with the running node, through node itself (absolute paths,
+ * no shell); otherwise PATH's `npm`. On Windows that is the `npm.cmd` shim, which needs cmd.exe and gets its
+ * absolute path as one quoted command string: a bare `npm.cmd` would be looked up in the cwd before PATH, and
+ * an args array next to `shell: true` is deprecated (DEP0190). Null when no npm can be found.
+ */
+export function planNpmSpawn(args: readonly string[], options: { execPath?: string; platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv } = {}): NpmSpawnPlan | null {
+  const execPath = options.execPath ?? process.execPath;
+  const bundled = bundledNpmCli(execPath);
+  if (bundled !== null) return { file: execPath, args: [bundled, ...args], shell: false };
+  if ((options.platform ?? process.platform) !== "win32") return { file: "npm", args: [...args], shell: false };
+  const shim = findExecutable(["npm.cmd"], options.env ?? process.env);
+  if (shim === null) return null;
+  return { file: `"${shim}" ${args.join(" ")}`, args: [], shell: true };
+}
+
 function defaultRunNpm(args: readonly string[], cwd: string): NpmRunResult {
-  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+  const plan = planNpmSpawn(args);
+  if (plan === null) return { ok: false, output: "npm not found: no npm-cli.js next to the running node and no npm.cmd on PATH" };
   try {
-    const run = spawnSync(npm, [...args], { cwd, encoding: "utf8", shell: process.platform === "win32", windowsHide: true, timeout: 10 * 60_000 });
+    const run = spawnSync(plan.file, plan.args, { cwd, encoding: "utf8", shell: plan.shell, windowsHide: true, timeout: 10 * 60_000 });
     const output = `${run.stdout ?? ""}${run.stderr ?? ""}`.trim();
     return { ok: run.status === 0, output: run.error === undefined ? output : `${run.error.message}\n${output}`.trim() };
   } catch (error) {
@@ -112,7 +158,11 @@ export function ensureConfigFile(paths: HarnessPaths, patch: Record<string, unkn
   return { created, config: mergeConfig(DEFAULT_CONFIG, next) };
 }
 
-/** Adds `.claude/settings.local.json` to `.git/info/exclude` (m0-facts #17); null when the project has no `.git/` directory. */
+/**
+ * Adds `.claude/settings.local.json` to git's exclude file (m0-facts #17): `.git/info/exclude`, or the
+ * repository's for a worktree / submodule checkout. Null when the project has no `.git`, or its pointer
+ * file cannot be resolved (the caller warns).
+ */
 export function ensureGitExclude(root: string): { path: string; added: boolean; already: boolean } | null {
   const file = gitExcludeFile(root);
   if (file === null) return null;
@@ -122,11 +172,7 @@ export function ensureGitExclude(root: string): { path: string; added: boolean; 
   } catch {
     content = "";
   }
-  const present = content.split(/\r?\n/).some((line) => {
-    const trimmed = line.trim();
-    return trimmed === GIT_EXCLUDE_LINE || trimmed === `/${GIT_EXCLUDE_LINE}`;
-  });
-  if (present) return { path: file, added: false, already: true };
+  if (hasGitExcludeLine(content)) return { path: file, added: false, already: true };
   mkdirSync(dirname(file), { recursive: true });
   const prefix = content.length === 0 || content.endsWith("\n") ? "" : "\n";
   appendFileSync(file, `${prefix}${GIT_EXCLUDE_LINE}\n`, "utf8");
@@ -192,6 +238,7 @@ export function renderInstallReport(report: InstallReport): string[] {
   if (report.git_exclude !== null) {
     lines.push(`  git         ${GIT_EXCLUDE_LINE} ${report.git_exclude.added ? "added to" : "already in"} ${report.git_exclude.path}`);
   }
+  lines.push(`  git         ${report.git_ignore.path} ${report.git_ignore.created ? "written" : "kept"} (nothing under .harness-memory/ is ever committed)`);
   if (report.probe.skipped) lines.push("  provider    probe skipped");
   else if (report.probe.provider === null) lines.push(`  provider    none found — ${report.probe.guidance ?? ""}`.trimEnd());
   else lines.push(`  provider    ${report.probe.provider} — probe ${report.probe.result ?? "?"}${report.probe.guidance === null ? "" : `; ${report.probe.guidance}`}`);
@@ -234,19 +281,26 @@ export async function runInstall(ctx: CommandContext): Promise<number> {
     if (!existsSync(file)) warnings.push(`${name} bundle missing next to the hook script: ${file}`);
   }
 
-  // 1 directories + config
+  // 1 directories (+ .gitignore) + config
   for (const dir of stateDirectories(ctx.paths)) mkdirSync(dir, { recursive: true });
+  const gitIgnore = ensureStateGitignore(ctx.paths);
   const embeddings = { requested: withEmbeddings, installed: false, output: null as string | null };
   let configPatch: Record<string, unknown> | null = null;
   if (withEmbeddings) {
-    const runNpm = ctx.seams.runNpm ?? defaultRunNpm;
-    const cwd = ctx.packageRoot ?? ctx.paths.root;
-    ctx.out.line(`installing @xenova/transformers in ${cwd} …`);
-    const npm = runNpm(["install", "@xenova/transformers"], cwd);
-    embeddings.installed = npm.ok;
-    embeddings.output = npm.output.length === 0 ? null : npm.output.slice(-2000);
-    if (npm.ok) configPatch = { embeddings: { enabled: true } };
-    else warnings.push(`npm install @xenova/transformers failed; embeddings stay disabled (${npm.output.split("\n").slice(-1)[0] ?? "no output"})`);
+    if (ctx.packageRoot === null) {
+      // Never npm-install in the project directory: that runs the project's lifecycle scripts and .npmrc,
+      // and the package that must receive the dependency is unknown anyway (plan §4 B3: the package root).
+      warnings.push("npm install @xenova/transformers skipped: the harness-memory package directory was not found (run it inside the package yourself); embeddings stay disabled");
+    } else {
+      const runNpm = ctx.seams.runNpm ?? defaultRunNpm;
+      const cwd = ctx.packageRoot;
+      ctx.out.line(`installing @xenova/transformers in ${cwd} …`);
+      const npm = runNpm(["install", "@xenova/transformers"], cwd);
+      embeddings.installed = npm.ok;
+      embeddings.output = npm.output.length === 0 ? null : npm.output.slice(-2000);
+      if (npm.ok) configPatch = { embeddings: { enabled: true } };
+      else warnings.push(`npm install @xenova/transformers failed; embeddings stay disabled (${npm.output.split("\n").slice(-1)[0] ?? "no output"})`);
+    }
   }
   const configFile = ensureConfigFile(ctx.paths, configPatch);
   const config = loadConfig(ctx.paths.config);
@@ -268,13 +322,17 @@ export async function runInstall(ctx: CommandContext): Promise<number> {
   writeSettingsFile(settingsFile, merged.settings);
   if (ctx.platform === "win32" && gitBash === null) warnings.push("Git Bash not found: Claude Code will use its PowerShell tool; pitfalls learned under bash still fire (canonical tool `bash`)");
 
-  // 4 git exclude
+  // 4 git exclude (project scope; a worktree's / submodule's .git pointer is followed to the repository's info/exclude)
   const gitExclude = userScope ? null : ensureGitExclude(ctx.paths.root);
+  if (!userScope && gitExclude === null && gitDirectory(ctx.paths.root) !== null) {
+    warnings.push(`${GIT_EXCLUDE_LINE} was not added to git's exclude file (.git is a pointer whose gitdir could not be resolved); add the line to .gitignore so the hooks' local paths are never committed`);
+  }
 
   // 5 manifest
   const files: ManifestFile[] = [
     { path: settingsFile, role: "settings", sha256: sha256File(settingsFile), created: !current.existed },
     { path: ctx.paths.config, role: "config", sha256: sha256File(ctx.paths.config), created: configFile.created },
+    { path: gitIgnore.path, role: "git_ignore", sha256: sha256File(gitIgnore.path), created: gitIgnore.created },
     { path: hookScript, role: "hook_script", sha256: sha256File(hookScript), created: false },
     { path: siblings.worker, role: "worker_script", sha256: sha256File(siblings.worker), created: false },
   ];
@@ -339,6 +397,7 @@ export async function runInstall(ctx: CommandContext): Promise<number> {
     snapshot_counts:
       snapshotFacts.counts === null ? null : { active: snapshotFacts.counts.active, candidates: snapshotFacts.counts.candidates, unreachable: snapshotFacts.counts.unreachable },
     git_exclude: gitExclude,
+    git_ignore: gitIgnore,
     manifest: ctx.paths.manifest,
     probe,
     self_test: selfTest,

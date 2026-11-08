@@ -11,7 +11,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import { selectAfterToolHints } from "../src/activation/after-tool";
 import { activateBeforeModel } from "../src/activation/before-model";
 import { decideBeforeTool, type BeforeToolInput } from "../src/activation/before-tool";
-import { applyBudget, isHostLoadedFile, itemFromSnapshotMemory, renderItemText, renderReason } from "../src/activation/injection";
+import { applyBudget, isHostLoadedFile, itemFromSnapshotMemory, renderItemText, renderReason, stripControlCharacters } from "../src/activation/injection";
 import { LEXICAL_TOKENIZER_ID, normalizeLexicalScore, snapshotTokenize, stripHangulParticles } from "../src/activation/lexical-snapshot";
 import { snapshotMemoryScore, trustMultiplier } from "../src/activation/scoring";
 import { buildDigestMessage, selectSessionStartItems } from "../src/activation/session-start";
@@ -415,6 +415,23 @@ describe("injection helpers, scoring and tokenizer", () => {
     expect(budget.dropped).toHaveLength(1);
     expect(applyBudget([item], 5, item.bytes - 1).included).toEqual([]);
     expect(applyBudget([item, item], 5, item.bytes * 2).included).toHaveLength(1);
+  });
+
+  test("rendered text drops ANSI escapes and control characters, so a row shows exactly its visible text", () => {
+    const text = renderItemText({
+      type: "workflow",
+      authority: "human",
+      unconfirmed: false,
+      summary: "Run pnpm test\u001b[2K\u001b[1A before\u0007 committing",
+      details: "\u001b[31mred\u001b[0m\ttext\u000b",
+      contested: false,
+    });
+    expect(text).toBe("[harness-memory] WORKFLOW (human): Run pnpm test before committing — red text");
+    expect(text).not.toMatch(/[\u0000-\u0008\u000e-\u001f\u007f-\u009f]/);
+    const item = itemFromSnapshotMemory(fixtureMemory({ summary: "Keep going\u001b[2K", details: "" }), { score: 1, source: "scope" });
+    expect(renderReason(item, "soft_deny")).not.toContain("\u001b");
+    expect(stripControlCharacters("a\u0085b\u009bc\u007fd")).toBe("abcd");
+    expect(stripControlCharacters("plain\n\ttext")).toBe("plain\n\ttext");
   });
 
   test("isHostLoadedFile per host; scoring trust ladder", () => {

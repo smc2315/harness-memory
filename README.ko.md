@@ -91,7 +91,8 @@ Open Claude Code in this project; `hm status` shows what the hooks learn.
 | 경로 | 내용 |
 |---|---|
 | `.claude/settings.local.json` | 훅 항목 아홉 개(아래 표). 기존 훅은 건드리지 않는다; `hm install`을 다시 실행하면 `args`가 harness-memory의 `hook.js`를 가리키는 항목만 교체된다. `--user`는 대신 `~/.claude/settings.json`을 대상으로 한다(`CLAUDE_CONFIG_DIR` 존중). |
-| `.git/info/exclude` | `.claude/settings.local.json` 한 줄이 추가된다(프로젝트 범위만; `.git`이 worktree 파일이면 건너뛴다). |
+| `.git/info/exclude` | `.claude/settings.local.json` 한 줄이 추가된다(프로젝트 범위만). `.git`이 worktree/submodule 포인터 파일이면 그것을 따라가 실제 `info/exclude`에 쓰고, 풀 수 없으면 조용히 넘어가는 대신 경고한다. |
+| `.harness-memory/.gitignore` | `*` 한 줄. ledger, 데이터베이스, 스냅샷, 로그가 git에 올라가지 않는다. 편집된 파일은 그대로 두며, 이미 git이 추적하는 파일이 있으면 `hm doctor`가 경고하고 추적을 해제하는 git 명령을 알려 준다. |
 | `.harness-memory/` | `config.json` 기본값, `memory.sqlite`(새로 생성하거나, 업그레이드면 `memory.sqlite.bak-v<N>` 백업과 함께 마이그레이션), `snapshot/` 파일, 빈 `ledger/ state/ queue/ raw/ locks/ logs/`와 함께 생성된다. |
 | `.harness-memory/install-manifest.json` | 건드린 파일과 sha256, node 경로, 훅 형식, 버전. `hm uninstall`과 `hm doctor --fix`가 이것을 기준으로 동작한다. |
 | `~/.harness-memory/` | 사용자 수준, `install`이 아니라 첫 사용 시 생성: `worker/<repo_hash>/`(헤드리스 추출 CLI용 빈 cwd, 어떤 git 저장소 밖), `models/`(임베딩 모델 캐시). v0.5의 `global.sqlite`가 있어도 그대로 둔다. |
@@ -227,7 +228,7 @@ evidence_weight = correction 2 + remember 3 + (실패마다 resolution 2 | 미�
 | `locks/db.lock/`, `locks/worker.lock/`, `*.pid`, `embed-helper.spawn` | `owner.json` heartbeat를 가진 `mkdir` 기반 lock; pid 파일; 스폰 스로틀 | 아니오 |
 | `logs/hooks.log`, `logs/worker.log`, `logs/audit.log` | 훅 호출당 한 줄(5 MB × 3 회전); worker 이벤트; audit 이벤트 | 아니오 |
 
-프로젝트의 `.gitignore`에 `.harness-memory/`를 추가할 것. 버전 관리에 둘 백업은 `hm memory:export`가 만드는 결정적 SQL 덤프를 쓰면 된다.
+`hm install`이 `.harness-memory/.gitignore`(`*`)를 써 두므로 디렉터리 안의 어떤 것도 git에 올라가지 않는다; 예전에 커밋된 파일이 있으면 `hm doctor`가 경고한다. 버전 관리에 둘 백업은 `hm memory:export`가 만드는 결정적 SQL 덤프를 쓰면 된다.
 
 ## 권한 모델
 
@@ -294,7 +295,7 @@ evidence_weight = correction 2 + remember 3 + (실패마다 resolution 2 | 미�
 hm install --host claude --with-embeddings   # 패키지 루트에서 npm install @xenova/transformers, embeddings.enabled = true
 ```
 
-- 작은 **helper 프로세스**(`dist/embed-helper.js <root>`)가 Windows 명명 파이프(`\\.\pipe\harness-memory-embed-<repo_hash>`) 또는 POSIX 소켓(`locks/embed-helper.sock`)으로 top-k 질의에 답한다. `prompt` 훅은 `before_model.dense_timeout_ms`(80 ms) 예산 안에서 묻고, 답이 없으면 lexical 전용으로 넘어간다; 첫 실패가 helper를 분리 스폰한다(60 s에 한 번으로 제한). helper는 `snapshot/dense.v1.bin`을 로드하고 그 파일이 바뀌면 다시 로드하며, `embeddings.idle_exit_minutes`(15) 동안 요청이 없거나 SIGTERM을 받으면 **스스로 종료**한다. 설치되는 서비스도, 고정 포트도 없다.
+- 작은 **helper 프로세스**(`dist/embed-helper.js <root>`)가 Windows 명명 파이프(`\\.\pipe\harness-memory-embed-<repo_hash>`) 또는 `$XDG_RUNTIME_DIR`(없으면 임시 디렉터리) 아래의 Unix 소켓 `harness-memory-embed-<repo_hash>.sock`(저장소 밖에 두므로 깊은 체크아웃에서도 Unix 소켓 경로 길이 제한에 걸리지 않는다; `hm doctor`가 경로를 보여 준다)으로 top-k 질의에 답한다. `prompt` 훅은 `before_model.dense_timeout_ms`(80 ms) 예산 안에서 묻고, 답이 없으면 lexical 전용으로 넘어간다; 첫 실패가 helper를 분리 스폰한다(60 s에 한 번으로 제한). helper는 `snapshot/dense.v1.bin`을 로드하고 그 파일이 바뀌면 다시 로드하며, `embeddings.idle_exit_minutes`(15) 동안 요청이 없거나 SIGTERM을 받으면 **스스로 종료**한다. 설치되는 서비스도, 고정 포트도 없다.
 - 모델: `Xenova/multilingual-e5-small`(양자화), `~/.harness-memory/models`(`embeddings.cache_dir`)에 캐시. 다운로드는 임베딩이 켜져 있고 모델이 없을 때 한 번만 일어난다; 당신의 추출 CLI 외에 유일한 네트워크 접근이다.
 - worker는 추출 직후 새 행을 임베딩하고(`passage:` 접두어) `hm dream`이 나머지를 백필한다; `dense.v1.bin`은 임베딩을 가진 행이 하나라도 있을 때만 쓰인다.
 - **한국어와 기타 별칭에는 임베딩이 필요 없다:** 추출기는 fact마다 최대 여덟 개의 `aliases`를 내고(프롬프트가 영어가 아니면 사용자 언어로), lexical 스냅샷은 코드 인식·한글 조사 제거 토크나이저로 이를 색인하므로 한국어 프롬프트가 BM25로 영어 메모리에 닿는다.
@@ -414,8 +415,8 @@ hm install --host claude --with-embeddings   # 패키지 루트에서 npm instal
 
 - **계정도, 텔레메트리도, 서버도 없다.** 모든 것은 `<project>/.harness-memory/`와 `~/.harness-memory/`에 있다. 네트워크와 통신하는 프로세스는 (1) 당신이 이미 쓰는 추출 CLI — 분리된 worker가 당신의 로그인으로 호출하는 `claude -p` 또는 `codex exec` — 와 (2) `--with-embeddings`를 켰을 때 한 번 일어나는 선택적 임베딩 모델 다운로드뿐이다.
 - **추출기가 보는 것.** 자격 있는 에피소드에 대해: 당신의 프롬프트 텍스트(≤ 4,000자), 그 턴의 툴 호출 다이제스트(명령 텍스트 또는 저장소 상대 경로, ≤ 500자), 실패·해결 호출의 툴 출력 head/tail(2,000 / 1,000자)과 오류 텍스트(1,500), 마지막 assistant 메시지(≤ 2,000), 턴이 교정일 때 직전 턴의 ≤ 12 툴 라인, 그리고 기존 메모리 최대 40건(id, type, status, authority, scope, signature, summary). transcript 파일은 절대 보지 않고, 툴 출력이 이미 보여 준 것 이상의 파일 내용도 보지 않는다. 호출은 `--tools ""`, 모든 훅과 auto-memory 비활성화, 세션 비저장, 허용 목록 환경, 모든 저장소 밖의 cwd로 실행된다.
-- **무엇이든 쓰기 전에 마스킹.** ledger 라인은 먼저 `redactCredentials`를 거친다: 개인 키 블록, `sk-ant-…`, `sk-…`, GitHub `ghp_…`, AWS `AKIA…`, Slack `xox…`, Google `AIza…`, JWT, `Bearer …`, `https://user:pass@`, `password|secret|token|api_key = …` 대입은 `<redacted>`가 된다.
-- **추출된 텍스트는 스캔된다**(보이지 않는 유니코드, "ignore previous instructions" 같은 프롬프트 주입 문구, 자격 증명 패턴, 은폐 지시) 그리고 harness-memory, 그 명령, 메모리 id를 언급하는 fact는 거부되므로(V6) 모델이 툴 출력을 통해 스스로에게 규칙을 써 넣을 수 없다.
+- **무엇이든 쓰기 전에 마스킹.** ledger 라인은 먼저 `redactCredentials`를 거친다: 개인 키 블록, `sk-ant-…`, `sk-…`, GitHub `ghp_…` / `github_pat_…`, GitLab `glpat-…`, npm `npm_…`, Stripe `sk_live_…` / `sk_test_…`, AWS `AKIA…`, Slack `xox…` / `xapp-…`, Google `AIza…`, JWT, `Bearer …`와 `Basic …` 헤더, 어떤 스킴이든 URL 안의 자격 증명(`postgres://user:pass@`), `curl -u user:pass`, `--password …`, `mysql -p…`, 그리고 키 이름이 password / secret / token / API key를 뜻하는 `KEY=value` / `"key": "value"` / `key: value` 대입(`DB_PASSWORD=`, `AWS_SECRET_ACCESS_KEY=`, `accessToken:`)은 `<redacted>`가 된다; `$VAR` 참조는 남긴다. 같은 마스킹이 `scope_refs`, `failure_sig`, `program_token`(토큰당 256자, 합계 4,000자 상한)과 import한 bullet 텍스트에도 적용된다.
+- **추출된 텍스트는 스캔된다**(보이지 않는 유니코드와 제어 문자, "ignore previous instructions" / "이전 지시를 무시" 같은 영어·한국어 프롬프트 주입 문구, 자격 증명 대입, 은폐하거나 사용자를 따르지 말라는 지시) 그리고 harness-memory, 그 명령, 메모리 id를 언급하는 fact는 거부되므로(V6) 모델이 툴 출력을 통해 스스로에게 규칙을 써 넣을 수 없다. 추출 프롬프트는 기록된 이벤트, 직전 턴, 마지막 assistant 메시지, 기존 메모리 목록을 데이터 울타리로 감싸고 울타리 안은 지시가 아니라 데이터라고 명시한다; 저장된 텍스트가 스캔에 걸리는 legacy 후보는 강화는 되어도 자동 활성화되지 않는다.
 - **훅은 읽기 전용이다.** 데이터베이스를 열지 않고 lock을 쥐지 않으며 모든 경로에서 종료 0을 돌려준다; 유일한 쓰기는 ledger, 세션 state, 큐 파일이다. `PreToolUse`는 절대 `allow`를 내보내지 않으므로 당신의 권한 프롬프트를 넓힐 수 없다.
 - **보존.** ledger 세그먼트 14 d, provider 원본 출력 24 h, audit 로그 30 d, hooks.log 5 MB × 3 — `retention` / `log`로 설정 가능. `hm uninstall --purge`는 `memory.sqlite.bak-v<N>` 백업을 제외한 전부를 제거한다.
 

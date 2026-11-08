@@ -1,6 +1,7 @@
 /**
  * Idle-exit embedding helper (implementation plan §1 deviation, §4 B2): a detached process that
- * listens on `paths.embedHelperSocket` (Windows named pipe / POSIX socket), lazily loads
+ * listens on `paths.embedHelperSocket` (Windows named pipe / POSIX socket in the per-user runtime
+ * directory, both keyed by `repoHash` — see `embedHelperSocketPath` in core/paths), lazily loads
  * `@xenova/transformers` with the configured model, keeps `snapshot/dense.v1.bin` in memory (reloaded
  * when its mtime changes) and answers `ping` / `topk` / `embed` requests as JSON lines. It exits after
  * `embeddings.idle_exit_minutes` without a request, on SIGTERM/SIGINT, or when another helper already
@@ -9,10 +10,10 @@
 
 import { existsSync, mkdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import type { HarnessConfig } from "../core/config";
-import { modelsDir, type HarnessPaths } from "../core/paths";
+import { modelsDir, unixSocketPathMaxBytes, unixSocketPathTooLong, type HarnessPaths } from "../core/paths";
 import { requestHelper } from "./client";
 import { denseTopK, readDenseSnapshot, type DenseMatrix } from "./dense-file";
 import { encodeMessage, parseRequest, type EmbedRequest, type EmbedResponse } from "./protocol";
@@ -95,16 +96,30 @@ export async function startHelper(options: StartHelperOptions): Promise<HelperHa
   const isPipe = socketPath.startsWith("\\\\.\\pipe\\") || socketPath.startsWith("\\\\?\\pipe\\");
 
   mkdirSync(paths.locksDir, { recursive: true });
-  if (!isPipe && existsSync(socketPath)) {
-    if (await probeHelper(socketPath)) {
-      log("another embedding helper is alive; exiting");
-      exit(0);
+  if (!isPipe) {
+    // Node ≥ 24 rejects an over-long sun_path with EINVAL; Node 20/22 silently truncate it on both ends,
+    // which works until the first unclean exit leaves a stale socket nobody can find. Refuse loudly instead.
+    if (unixSocketPathTooLong(socketPath)) {
+      log(`socket path is ${String(Buffer.byteLength(socketPath, "utf8"))} bytes, over the ${String(unixSocketPathMaxBytes())}-byte unix socket limit: ${socketPath}; exiting`);
+      exit(1);
       return { socketPath, requests: 0, closed: true, close: async () => undefined };
     }
     try {
-      unlinkSync(socketPath);
+      mkdirSync(dirname(socketPath), { recursive: true });
     } catch {
-      // stale socket we cannot remove: listen() reports the real error below
+      // a missing runtime directory we cannot create: listen() reports the real error below
+    }
+    if (existsSync(socketPath)) {
+      if (await probeHelper(socketPath)) {
+        log("another embedding helper is alive; exiting");
+        exit(0);
+        return { socketPath, requests: 0, closed: true, close: async () => undefined };
+      }
+      try {
+        unlinkSync(socketPath);
+      } catch {
+        // stale socket we cannot remove: listen() reports the real error below
+      }
     }
   }
 

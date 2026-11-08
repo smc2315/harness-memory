@@ -3,9 +3,9 @@
  * runs from (hook script `dist/hook.js`, version), Claude Code's settings files and the git exclude file.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { DB_FILE_NAME, findProjectRoot, HARNESS_DIR_NAME, resolvePaths, type HarnessPaths } from "../../core/paths";
@@ -125,8 +125,32 @@ export function userSettingsFile(env: NodeJS.ProcessEnv = process.env): string {
   return join(claudeConfigDir(env), "settings.json");
 }
 
+/**
+ * First `<dir>/<name>` on PATH that exists, so tools are spawned by absolute path: a bare name is looked
+ * up in the cwd first by cmd.exe (and by libuv on Windows), which a repository could plant a binary in.
+ */
+export function findExecutable(names: readonly string[], env: NodeJS.ProcessEnv = process.env): string | null {
+  const pathValue = env.PATH ?? env.Path ?? "";
+  for (const dir of pathValue.split(delimiter)) {
+    if (dir.length === 0) continue;
+    for (const name of names) {
+      const candidate = join(dir, name);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
 /** Relative path recorded in `.git/info/exclude`. */
 export const GIT_EXCLUDE_LINE = ".claude/settings.local.json";
+
+/** True when an exclude/ignore file's content already lists GIT_EXCLUDE_LINE (with or without a leading slash). */
+export function hasGitExcludeLine(content: string): boolean {
+  return content.split(/\r?\n/).some((line) => {
+    const trimmed = line.trim();
+    return trimmed === GIT_EXCLUDE_LINE || trimmed === `/${GIT_EXCLUDE_LINE}`;
+  });
+}
 
 export interface GitDirInfo {
   /** `<root>/.git` */
@@ -145,10 +169,66 @@ export function gitDirectory(root: string): GitDirInfo | null {
   }
 }
 
+/**
+ * Follows a `.git` pointer file (`gitdir: <path>`, what git writes for a linked worktree or a submodule)
+ * to the directory whose `info/exclude` git reads for that work tree: the gitdir's `commondir` when it
+ * names one (a worktree shares `info/` with its repository), else the gitdir itself (a submodule). Null
+ * when the file is not a pointer or the directory it names does not exist.
+ */
+export function resolveGitDirPointer(root: string, pointerFile: string): string | null {
+  let content: string;
+  try {
+    content = readFileSync(pointerFile, "utf8");
+  } catch {
+    return null;
+  }
+  const match = content.match(/^gitdir:[ \t]*(.+?)[ \t]*$/m);
+  if (match === null) return null;
+  const gitDir = resolve(root, match[1]!);
+  if (!existsSync(gitDir)) return null;
+  try {
+    const common = readFileSync(join(gitDir, "commondir"), "utf8").trim();
+    if (common.length > 0) {
+      const commonDir = resolve(gitDir, common);
+      if (existsSync(commonDir)) return commonDir;
+    }
+  } catch {
+    // no commondir file: the gitdir is the repository itself (submodule) and holds info/ directly
+  }
+  return gitDir;
+}
+
+/**
+ * The `info/exclude` file git consults for the work tree at `root`: `<root>/.git/info/exclude`, or, when
+ * `.git` is a worktree / submodule pointer file, the pointed-at repository's. Null without a `.git`, or when
+ * the pointer cannot be resolved (install then warns and leaves the exclusion to the user).
+ */
 export function gitExcludeFile(root: string): string | null {
   const info = gitDirectory(root);
-  if (info === null || info.isFile) return null;
-  return join(info.path, "info", "exclude");
+  if (info === null) return null;
+  const gitDir = info.isFile ? resolveGitDirPointer(root, info.path) : info.path;
+  return gitDir === null ? null : join(gitDir, "info", "exclude");
+}
+
+/**
+ * Content of `.harness-memory/.gitignore`. The state directory holds the last 14 days of prompts and tool
+ * output (ledgers), the database with its provenance excerpts, raw provider answers and logs, so install
+ * ignores all of it from inside the directory: that covers every scope and checkout layout (`.git/info/exclude`
+ * is skipped for `--user` installs and unresolvable worktree pointers) and needs no manifest bookkeeping.
+ */
+export const STATE_GITIGNORE_CONTENT = "# harness-memory state (prompts, tool output, memory.sqlite): never commit this directory\n*\n";
+
+export function stateGitignoreFile(paths: Pick<HarnessPaths, "dir">): string {
+  return join(paths.dir, ".gitignore");
+}
+
+/** Writes `.harness-memory/.gitignore` when it is missing; an existing file (perhaps edited to publish `skills/`) is left alone. */
+export function ensureStateGitignore(paths: Pick<HarnessPaths, "dir">): { path: string; created: boolean } {
+  const path = stateGitignoreFile(paths);
+  if (existsSync(path)) return { path, created: false };
+  mkdirSync(paths.dir, { recursive: true });
+  writeFileSync(path, STATE_GITIGNORE_CONTENT, "utf8");
+  return { path, created: true };
 }
 
 /** `memory.sqlite.bak-v<N>` files next to the database, newest version first. */
