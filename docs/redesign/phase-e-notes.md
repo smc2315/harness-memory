@@ -221,7 +221,7 @@ correctness; does it gate what matters), then fixed:
   2026-09-23); `permissions: contents: read`; one concurrency group per event and ref, `cancel-in-progress` except for
   master and manual runs. Validated by parsing the YAML and by running the main job's command sequence locally.
 
-Nothing has run on GitHub yet: the branch is not pushed.
+Pushed 2026-11-08 night (`origin/redesign/v0.6` at 8f30938). The first run, 42489023967, came back Windows and package-verify green, ubuntu Node 20 / 24 and macOS red on two tests; the run and the fix are in phase-f-notes.md, "CI follow-up".
 
 ## 6. Embedding helper end to end with the real model
 
@@ -267,7 +267,7 @@ that one expectation corrected the full run passed (pack → install into a temp
 - (done 20:05) `claude auth login`; what remains is a first dogfood session in a real project so the live extraction
   prompt, validators V1–V12 and the `nested_refusal` / `probe_timeout` classifiers see real `claude -p` output over
   days, not two synthetic sessions.
-- Approval to push `redesign/v0.6`: with §5 in place the first push runs the suite on ubuntu, macOS and Windows.
+- (done 2026-11-08 night) Approval to push `redesign/v0.6`: the first push ran the suite on ubuntu, macOS and Windows — run 42489023967, two red tests, fixed in phase-f-notes.md "CI follow-up".
 - A project to dogfood in (hooks load at session start; corrections and failure→resolution episodes are what the
   extractor keys on).
 - Later: Codex CLI install + login (0.6.1), `npm login` (publish).
@@ -336,7 +336,7 @@ The completeness critic ran against commit 8654058. Status after the follow-up w
 | 4 | hook-internal p95 203 ms in the live session | open as a measurement task — the 203 ms was the first PreToolUse of a session while three workers and `claude -p` started; re-run with one session and `hm dream` to characterise |
 | 5 | dist-dependent vitest suites and the helper Tier-2 suite never ran on Linux | closed — 6/6 and 18/18 on WSL, helper on the `/run/user/1000` socket (§5.1 addendum) |
 | 6 | two open advisories in the runtime tree | brace-expansion fixed in the lockfile (`npm audit fix`); minimatch stays on 10.x — 11.x breaks the glob compiler and the stored regex sources — recorded under Known limitations |
-| 7 | CI never ran; Node 20 and macOS untested | Node 20.20.2 full gate green in WSL (995/996, replay 12/12); macOS and the workflow itself wait for the first push |
+| 7 | CI never ran; Node 20 and macOS untested | Node 20.20.2 full gate green in WSL (995/996, replay 12/12); the workflow ran on 2026-11-08 (run 42489023967): Windows and package-verify green, ubuntu / macOS red on two tests, fixed — phase-f-notes.md "CI follow-up" |
 | 8 | ci.yml header asserted an unverified "Node 20 runtime removed on 2026-09-23" | closed — reworded to what the fetched `action.yml` files prove |
 | 9 | embedding job's download branch never executed | open — needs a 130 MB download or the first `workflow_dispatch` |
 | 10 | `--with-embeddings` from an installed package never run | open — documented path, seam-tested only |

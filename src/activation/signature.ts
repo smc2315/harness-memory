@@ -360,9 +360,51 @@ export function commandPatternHasPath(tokens: readonly string[]): boolean {
 // Regex safety (V5)
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * V5 floor at the 4 KB stage: a sweep over the samples that finishes within this many ms is accepted on any machine.
+ * The smaller stages of the ladder (`REGEX_STAGE_BYTES`) scale it down with the sample size.
+ */
 export const REGEX_BUDGET_MS = 2;
+/**
+ * V5 ceiling, relative to the machine: above the floor a sweep may cost at most this many times a plain linear scan
+ * (`REGEX_REFERENCE`) over samples of the same size, measured in the same process right after the candidate with a
+ * timed round as long as the candidate's, so a verdict depends neither on the machine that runs the worker nor on
+ * how loaded it is. Calibrated 2026-11-09 at 4 KB (Windows and Linux, Node 20 and 24, native and
+ * `--regexp-interpret-all`): realistic unanchored patterns that backtrack from each literal prefix stay well below
+ * it (`curl .* \| (ba)?sh` 90–102× native, 34–43× interpreted; `cat .*\.env` 168–179× / 46–58×; `curl .*\|.*sh`
+ * 154–171× / 53–63×), patterns that backtrack at every position stay well above it (`[a-z]+\s+[0-9]+`
+ * 1 968–2 748× / 1 198–1 402×; `[a-z]+[0-9]*\s+x` 1 904–2 813× / 1 147–1 283×; `.*\.env.*` 4 895–6 690× /
+ * 1 759–2 220×). On a quadratic pattern the ratio roughly halves with each smaller stage of the ladder, so such a
+ * pattern is refused at the first stage where its ratio crosses the line (`.*\.env.*` at 512 B, the pair above at
+ * 1–2 KB) and the accepted ones never come near it below 4 KB; the smallest stages also keep patterns of a higher
+ * degree from getting expensive.
+ */
+export const REGEX_BUDGET_RATIO = 500;
+/** Timed sweeps `fastestSweepMs` tries before it gives up on reaching `stopAtMs`; the fastest one counts. */
+export const REGEX_BUDGET_ROUNDS = 5;
+/**
+ * Sample sizes of the V5 ladder, smallest first. From the second stage on each stage bounds the cost of the next: a
+ * pattern of polynomial degree d costs at most 2^d times its budget at the previous size. The first stage is bounded
+ * by `withinBudget` itself: a first sweep beyond any stall-explicable multiple of the budget ends the stage after that
+ * one sweep (REGEX_HOPELESS_RATIO, REGEX_HOPELESS_MS). Starting at 128 B keeps that one sweep cheap for dense
+ * patterns of a high degree (`a.*b.*c.*d.*e.*f\.g` costs 1.8 ms per sweep at 128 B and 2.6 s at 512 B).
+ */
+export const REGEX_STAGE_BYTES: readonly number[] = [128, 256, 512, 1024, 2048, 4096];
+/** A first sweep this many times over the budget (and over REGEX_HOPELESS_MS) is refused without further rounds. */
+export const REGEX_HOPELESS_RATIO = 50;
+/** … but never below this many ms: a stall of this size on a sub-millisecond sweep is not a plausible explanation. */
+export const REGEX_HOPELESS_MS = 250;
 const REGEX_SAMPLE_BYTES = 4096;
-const REGEX_PRECHECK_BYTES = 512;
+/** Short mixed subject run twice before the timed sweeps so V8's regexp interpreter and tier-up are not timed. */
+const REGEX_WARMUP_SUBJECT = "ab ".repeat(22);
+/** The linear scan the ratio is measured against: one character class and one literal per position, no quantifier. */
+const REGEX_REFERENCE = /[a-z]!/;
+/** Text swept per quick reference round (several passes over small samples) so the reference is not timer noise. */
+const REGEX_REFERENCE_BYTES_PER_ROUND = 131_072;
+/** Longest timed round the matched reference is sized to; past a few scheduler slices the inflation has converged. */
+const REGEX_REFERENCE_MAX_ROUND_MS = 25;
+/** Upper bound on the sweeps per matched-reference round, should the quick reference ever measure near zero. */
+const REGEX_REFERENCE_MAX_PASSES = 100_000;
 const OPTIONAL_RUN_LIMIT = 4;
 
 type ClassKind = "word" | "digit" | "space" | "nonword" | "nondigit" | "nonspace";
@@ -687,22 +729,107 @@ function regexSamples(source: string, size: number): string[] {
   ];
 }
 
-function runWithinBudget(regex: RegExp, samples: readonly string[], budgetMs: number): boolean {
-  let best = Infinity;
-  for (let round = 0; round < 2; round += 1) {
-    const start = performance.now();
-    for (const sample of samples) {
-      regex.lastIndex = 0;
-      regex.test(sample);
-    }
-    const elapsed = performance.now() - start;
-    if (elapsed < best) best = elapsed;
-    if (best <= budgetMs) return true;
-  }
-  return best <= budgetMs;
+/** Options of `fastestSweepMs`; `now` is injectable so the loop can be tested without a clock. */
+export interface SweepOptions {
+  /** Timed rounds to try (default REGEX_BUDGET_ROUNDS). */
+  rounds?: number;
+  /** Stop as soon as a sweep is within this many ms; with the default 0 only an immeasurably fast sweep stops early. */
+  stopAtMs?: number;
+  /** Sweeps per timed round; the measured time is divided by it (default 1). */
+  passes?: number;
+  now?: () => number;
 }
 
-/** V5: compiles, no nested quantifiers, and 4 KB samples match or fail within REGEX_BUDGET_MS. */
+/**
+ * The fastest of up to `rounds` timed sweeps of `regex` over `samples`, in ms per sweep. A sweep can only be slowed
+ * down from the outside — a preempted thread, a GC pause, a regex V8 has not compiled to native code yet — so the
+ * fastest sweep is the one that measures the pattern, and a pattern that is slow by construction never gets a fast
+ * one. Two warm-up runs on a short subject take the interpreter and the tier-up compile out of the timed rounds.
+ */
+export function fastestSweepMs(regex: RegExp, samples: readonly string[], options: SweepOptions = {}): number {
+  const rounds = Math.max(1, options.rounds ?? REGEX_BUDGET_ROUNDS);
+  const stopAtMs = options.stopAtMs ?? 0;
+  const passes = Math.max(1, options.passes ?? 1);
+  const now = options.now ?? (() => performance.now());
+  for (let warm = 0; warm < 2; warm += 1) {
+    regex.lastIndex = 0;
+    regex.test(REGEX_WARMUP_SUBJECT);
+  }
+  let best = Infinity;
+  for (let round = 0; round < rounds; round += 1) {
+    const start = now();
+    for (let pass = 0; pass < passes; pass += 1) {
+      for (const sample of samples) {
+        regex.lastIndex = 0;
+        regex.test(sample);
+      }
+    }
+    const elapsed = (now() - start) / passes;
+    if (elapsed < best) best = elapsed;
+    if (best <= stopAtMs) break;
+  }
+  return best;
+}
+
+/** The V5 floor for a stage of `size` bytes: REGEX_BUDGET_MS at 4 KB, proportionally less on the smaller samples. */
+export function regexFloorMs(size: number): number {
+  return (REGEX_BUDGET_MS * size) / REGEX_SAMPLE_BYTES;
+}
+
+/** The V5 budget in ms per sweep: the stage's floor, or REGEX_BUDGET_RATIO × the linear reference's sweep if larger. */
+export function regexBudgetMs(referenceMs: number, floorMs: number = REGEX_BUDGET_MS): number {
+  return Math.max(floorMs, REGEX_BUDGET_RATIO * referenceMs);
+}
+
+/**
+ * Ms per sweep of the linear reference over `size`-byte samples, measured now. `passes` sweeps make one timed round;
+ * the default covers REGEX_REFERENCE_BYTES_PER_ROUND so a quick reference is not timer noise.
+ */
+export function referenceSweepMs(size: number, options: { passes?: number; now?: () => number } = {}): number {
+  const samples = regexSamples("x", size);
+  const passes = Math.max(1, options.passes ?? Math.ceil(REGEX_REFERENCE_BYTES_PER_ROUND / (samples.length * size)));
+  return fastestSweepMs(REGEX_REFERENCE, samples, { passes, now: options.now });
+}
+
+/**
+ * One V5 stage over `size`-byte samples. One timed sweep within the stage's floor passes at once (the common case:
+ * microseconds). Otherwise the linear reference is measured in the same process — quickly first, then with a timed
+ * round as long as the candidate's sweep (capped at REGEX_REFERENCE_MAX_ROUND_MS): on a loaded host a round longer
+ * than a scheduler slice always carries a wait while a microsecond round slips into a clean slice, and comparing
+ * minimum to minimum at equal round lengths keeps the ratio honest (measured: 4–6× inflation at 6:1 oversubscription
+ * without this, none with it). A first sweep within the resulting budget passes; one beyond REGEX_HOPELESS_RATIO
+ * times the budget (and REGEX_HOPELESS_MS) is refused at once, since no stall explains it; in between the remaining
+ * rounds run against the budget, stopping at the first sweep inside it, and the fastest sweep decides. Cost: an
+ * accepted pattern over the floor pays one sweep plus two reference measurements, a refused one up to
+ * REGEX_BUDGET_ROUNDS sweeps plus the two.
+ */
+function withinBudget(regex: RegExp, source: string, size: number): { ok: true } | { ok: false; detail: string } {
+  const samples = regexSamples(source, size);
+  const floor = regexFloorMs(size);
+  const first = fastestSweepMs(regex, samples, { rounds: 1 });
+  if (first <= floor) return { ok: true };
+  const quick = referenceSweepMs(size);
+  const passes = Math.min(REGEX_REFERENCE_MAX_PASSES, Math.max(1, Math.ceil(Math.min(first, REGEX_REFERENCE_MAX_ROUND_MS) / Math.max(quick, 1e-4))));
+  const reference = referenceSweepMs(size, { passes });
+  const budget = regexBudgetMs(reference, floor);
+  if (first <= budget) return { ok: true };
+  const hopeless = first > Math.max(REGEX_HOPELESS_RATIO * budget, REGEX_HOPELESS_MS);
+  const rest = !hopeless && REGEX_BUDGET_ROUNDS > 1 ? fastestSweepMs(regex, samples, { rounds: REGEX_BUDGET_ROUNDS - 1, stopAtMs: budget }) : Infinity;
+  const sweep = Math.min(first, rest);
+  if (sweep <= budget) return { ok: true };
+  return {
+    ok: false,
+    detail:
+      `exceeded the budget on a ${size} B sample: ${sweep.toFixed(2)} ms per sweep, budget ${budget.toFixed(2)} ms ` +
+      `(max of the ${floor} ms floor and ${REGEX_BUDGET_RATIO}× a linear scan at ${reference.toFixed(4)} ms)`,
+  };
+}
+
+/**
+ * V5: compiles, no nested quantifiers, and the samples of every stage of the ladder (128 B … 4 KB) match or fail
+ * within the budget — the stage's floor (2 ms at 4 KB) on any machine, or REGEX_BUDGET_RATIO times a linear scan
+ * measured alongside on a slower or loaded one. Static first: an exponential pattern is never executed.
+ */
 export function checkRegexSafety(source: string): { ok: true; regex: RegExp } | { ok: false; code: "regex_unsafe" | "invalid"; detail: string } {
   if (source.length === 0 || source.length > 200) return { ok: false, code: "invalid", detail: "regex length must be 1..200" };
   let regex: RegExp;
@@ -712,11 +839,9 @@ export function checkRegexSafety(source: string): { ok: true; regex: RegExp } | 
     return { ok: false, code: "invalid", detail: `regex does not compile: ${String(error)}` };
   }
   if (regexLooksUnsafe(source)) return { ok: false, code: "regex_unsafe", detail: "nested or overlapping quantifiers" };
-  if (!runWithinBudget(regex, regexSamples(source, REGEX_PRECHECK_BYTES), REGEX_BUDGET_MS)) {
-    return { ok: false, code: "regex_unsafe", detail: `exceeded ${REGEX_BUDGET_MS} ms on a ${REGEX_PRECHECK_BYTES} B sample` };
-  }
-  if (!runWithinBudget(regex, regexSamples(source, REGEX_SAMPLE_BYTES), REGEX_BUDGET_MS)) {
-    return { ok: false, code: "regex_unsafe", detail: `exceeded ${REGEX_BUDGET_MS} ms on a ${REGEX_SAMPLE_BYTES} B sample` };
+  for (const size of REGEX_STAGE_BYTES) {
+    const stage = withinBudget(regex, source, size);
+    if (!stage.ok) return { ok: false, code: "regex_unsafe", detail: stage.detail };
   }
   return { ok: true, regex };
 }

@@ -4,6 +4,12 @@ import { describe, expect, test } from "vitest";
 
 import {
   CANONICAL_CACHE_SIZE,
+  REGEX_BUDGET_MS,
+  REGEX_BUDGET_RATIO,
+  REGEX_BUDGET_ROUNDS,
+  REGEX_HOPELESS_MS,
+  REGEX_HOPELESS_RATIO,
+  REGEX_STAGE_BYTES,
   canonicalCommandFor,
   canonicalizeCommand,
   checkRegexSafety,
@@ -11,11 +17,15 @@ import {
   commandPatternHasPath,
   compileSignature,
   compileSignatureKey,
+  fastestSweepMs,
   globMatchesPath,
   matchSignature,
   matchSignatureKey,
   parseSignatureKey,
   primaryProgramToken,
+  referenceSweepMs,
+  regexBudgetMs,
+  regexFloorMs,
   regexLooksUnsafe,
   signatureKey,
 } from "../src/activation/signature";
@@ -194,6 +204,10 @@ describe("V5 regex safety", () => {
     }
   );
 
+  // The last three are quadratic on V5's seed sample with a small constant (`.*` backtracks to the end from every
+  // literal prefix; 0.7–1.6 ms per 4 KB sweep on a 2024 desktop): they pass through the 2 ms floor on a fast machine
+  // and through REGEX_BUDGET_RATIO × the linear reference on a slow one — the regression for the machine-relative
+  // budget (the first CI run rejected the curl pattern on runners 2–3.5× slower than the author's machine).
   test.each([
     "^npm\\s+(run\\s+)?test\\b",
     "rm\\s+-rf\\s+/",
@@ -204,6 +218,8 @@ describe("V5 regex safety", () => {
     "^DROP TABLE",
     "(foo|bar)+\\s*=",
     "curl .* \\| (ba)?sh",
+    "cat .*\\.env",
+    "curl .*\\|.*sh",
   ])("accepts %s", (pattern) => {
     expect(regexLooksUnsafe(pattern)).toBe(false);
     expect(compileSignature({ tool: "bash", target: "command", pattern_kind: "regex", pattern })).toMatchObject({ ok: true });
@@ -216,13 +232,86 @@ describe("V5 regex safety", () => {
     expect(performance.now() - start).toBeLessThan(500);
   });
 
-  test("a safe pattern stays within the 2 ms budget on the 4 KB samples", () => {
+  test("a safe pattern stays within the 2 ms floor on the 4 KB samples", () => {
     expect(checkRegexSafety("^npm\\s+(run\\s+)?test\\b")).toMatchObject({ ok: true });
   });
 
-  test("an unanchored quadratic pattern passes the static check but trips the 4 KB / 2 ms budget", () => {
+  test("a pattern that backtracks at every position passes the static check but trips the budget on any machine", () => {
+    // ≥ 1 860× the linear reference natively and ≥ 1 150× interpreted at 4 KB, against a 500× ceiling. On a quadratic
+    // pattern the ratio roughly halves with each smaller stage of the ladder (this pair: ~240–360× at 512 B, ~490–580×
+    // at 1 KB on 2024 x64 desktops), so it is normally refused at 1–2 KB and `.*\.env.*`, with its larger constant,
+    // already at 512 B; the stage depends on the machine and is not asserted (calibration in
+    // docs/redesign/phase-f-notes.md, CI follow-up).
     expect(regexLooksUnsafe("[a-z]+\\s+[0-9]+")).toBe(false);
-    expect(checkRegexSafety("[a-z]+\\s+[0-9]+")).toMatchObject({ ok: false, code: "regex_unsafe", detail: expect.stringContaining("exceeded") });
+    expect(checkRegexSafety("[a-z]+\\s+[0-9]+")).toMatchObject({
+      ok: false,
+      code: "regex_unsafe",
+      detail: expect.stringMatching(/exceeded the budget on a \d+ B sample: .* linear scan/),
+    });
+    expect(checkRegexSafety(".*\\.env.*")).toMatchObject({ ok: false, code: "regex_unsafe" });
+  });
+
+  test("patterns of a higher degree are refused early in the ladder, within a bounded time", () => {
+    // Three `.*` before a literal the seed sample cannot contain: quartic on that sample, 1.6 s for five 4 KB sweeps
+    // natively — a smaller stage refuses it first (from the second stage on, each stage bounds the next by 2^degree).
+    let started = performance.now();
+    expect(checkRegexSafety("docker .* run .* -v .* /var/run/docker\\.sock")).toMatchObject({
+      ok: false,
+      code: "regex_unsafe",
+      detail: expect.stringMatching(/exceeded the budget on a (128|256|512|1024|2048) B sample/),
+    });
+    expect(performance.now() - started).toBeLessThan(5_000);
+    // Dense literals make a degree-6 pattern cost 1.8 ms per sweep at 128 B and 2.6 s at 512 B natively: the 128 B
+    // stage refuses it, and a first sweep beyond REGEX_HOPELESS_RATIO × the budget would end a stage after one sweep.
+    started = performance.now();
+    expect(checkRegexSafety("a.*b.*c.*d.*e.*f\\.g")).toMatchObject({
+      ok: false,
+      code: "regex_unsafe",
+      detail: expect.stringMatching(/exceeded the budget on a (128|256|512) B sample/),
+    });
+    expect(performance.now() - started).toBeLessThan(5_000);
+    expect(REGEX_HOPELESS_RATIO).toBeGreaterThanOrEqual(10);
+    expect(REGEX_HOPELESS_MS).toBeGreaterThanOrEqual(100);
+  });
+
+  test("fastestSweepMs keeps the fastest round, stops once a round is within stopAtMs, and divides by passes", () => {
+    const clock = (ticks: number[]) => {
+      let reads = 0;
+      return () => ticks[Math.min(reads++, ticks.length - 1)]!;
+    };
+    // rounds of 10, 10, 10, 10 and 0.5 ms: four stalled rounds do not count, the fast one does
+    expect(fastestSweepMs(/a/, ["abc"], { rounds: 5, stopAtMs: 2, now: clock([0, 10, 10, 20, 20, 30, 30, 40, 40, 40.5]) })).toBe(0.5);
+    // early exit: the second round (1 ms) is within stopAtMs, so the clock is read four times and later rounds never run
+    let reads = 0;
+    const ticks = [0, 10, 10, 11, 11, 99, 99, 99, 99, 99];
+    const now = () => ticks[Math.min(reads++, ticks.length - 1)]!;
+    expect(fastestSweepMs(/a/, ["abc"], { rounds: 5, stopAtMs: 2, now })).toBe(1);
+    expect(reads).toBe(4);
+    // every round above stopAtMs: all rounds run and the fastest is returned
+    expect(fastestSweepMs(/a/, ["abc"], { rounds: 5, stopAtMs: 2, now: clock([0, 10, 10, 15, 15, 21, 21, 30, 30, 33]) })).toBe(3);
+    // passes divide the measured time; the default round count is REGEX_BUDGET_ROUNDS
+    expect(fastestSweepMs(/a/, ["abc"], { rounds: 1, passes: 4, now: clock([0, 8]) })).toBe(2);
+    expect(REGEX_BUDGET_ROUNDS).toBeGreaterThanOrEqual(3);
+  });
+
+  test("the budget is the 2 ms floor on a fast machine and REGEX_BUDGET_RATIO × the linear reference on a slow one", () => {
+    expect(regexBudgetMs(0.001)).toBe(REGEX_BUDGET_MS);
+    expect(regexBudgetMs(0.01)).toBeCloseTo(REGEX_BUDGET_RATIO * 0.01, 10);
+    expect(regexBudgetMs(REGEX_BUDGET_MS / REGEX_BUDGET_RATIO)).toBe(REGEX_BUDGET_MS);
+    // the smaller stages of the ladder scale the floor with the sample size
+    expect(REGEX_STAGE_BYTES[REGEX_STAGE_BYTES.length - 1]).toBe(4096);
+    expect([...REGEX_STAGE_BYTES].sort((left, right) => left - right)).toEqual([...REGEX_STAGE_BYTES]);
+    expect(REGEX_STAGE_BYTES[0]).toBe(128);
+    expect(regexFloorMs(4096)).toBe(REGEX_BUDGET_MS);
+    expect(regexFloorMs(512)).toBe(REGEX_BUDGET_MS / 8);
+    expect(regexFloorMs(128)).toBe(REGEX_BUDGET_MS / 32);
+    expect(regexBudgetMs(0.0001, regexFloorMs(512))).toBe(REGEX_BUDGET_MS / 8);
+    expect(regexBudgetMs(0.001, regexFloorMs(512))).toBeCloseTo(0.5, 10);
+    // a linear scan of five 4 KB samples is far below the floor on every machine this runs on (≈ 0.01 ms native,
+    // ≈ 0.1 ms with V8's interpreter); a reference anywhere near the floor would mean the budget is meaningless there
+    const reference = referenceSweepMs(4096);
+    expect(reference).toBeGreaterThan(0);
+    expect(reference).toBeLessThan(REGEX_BUDGET_MS / 2);
   });
 });
 

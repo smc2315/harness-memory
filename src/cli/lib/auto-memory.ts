@@ -13,8 +13,10 @@
  * When the derived directory is absent the projects directory is scanned: a case-insensitive slug match first, then
  * a slug of a real subdirectory of the project (a session started inside `packages/app` writes to
  * `<slug>-packages-app`), otherwise the memory directories found become the candidates the error message lists for
- * `--memory-dir`. The directory that is finally used is canonicalised (`realpathSync.native`: on-disk case, 8.3
- * names, symlinks), so refs do not depend on how the caller spelled the project root (review M-2).
+ * `--memory-dir`. The directory that is finally used takes the slug's on-disk name from the projects listing (exact
+ * match first, then case-insensitive: realpath(3) on Linux keeps the caller's spelling on a case-insensitive mount)
+ * and is then canonicalised (`realpathSync.native`: on-disk case, 8.3 names, symlinks), so refs do not depend on how
+ * the caller spelled the project root (review M-2).
  *
  * Only topic files are imported: type `feedback` by default, plus `project` with `--include-project`; `user` and
  * `reference` notes are profile / lookup material, not rules. A note's body becomes import bullets by the rule that
@@ -165,6 +167,9 @@ function nativeRealpath(path: string): string | null {
  * The on-disk spelling of a directory (`realpathSync.native`: case, 8.3 short names, symlinks); the resolved input
  * when the path cannot be canonicalised. Every ref written for a memory directory is built from this spelling, so a
  * run from `c:\users\…` and one from `C:\Users\…` produce the same `source_ref`s and the same `--sync` prefix.
+ * On a case-insensitive Linux mount (WSL `/mnt/c`, ext4 casefold, CIFS) realpath(3) keeps the spelling it is given,
+ * so an explicit `--memory-dir` keeps the caller's case there: spell it the same way across runs, or let
+ * `locateAutoMemory` fold the slug through the projects listing.
  */
 export function canonicalDirectory(path: string): string {
   const absolute = resolve(path);
@@ -173,8 +178,10 @@ export function canonicalDirectory(path: string): string {
 
 function listDirectories(dir: string): string[] {
   try {
+    // A symlinked or junctioned project directory is a directory too: without it the exact slug match in `found`
+    // misses and the case-insensitive fallback could pick a case-variant sibling.
     return readdirSync(dir, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
+      .filter((entry) => entry.isDirectory() || (entry.isSymbolicLink() && isDirectory(join(dir, entry.name))))
       .map((entry) => entry.name)
       .sort();
   } catch {
@@ -209,7 +216,13 @@ export function locateAutoMemory(root: string, options: LocateAutoMemoryOptions 
   const slug = projectSlug(absoluteRoot);
   const derived = join(projectsDir, slug, "memory");
   const found = (dirSlug: string, how: AutoMemoryLocated): AutoMemoryLookup => {
-    const dir = canonicalDirectory(join(projectsDir, dirSlug, "memory"));
+    // realpath(3) on Linux resolves symlinks but keeps the caller's spelling of each component, so on a
+    // case-insensitive mount there (WSL drvfs, ext4 casefold, CIFS) `canonicalDirectory` alone would not fold the
+    // case: take the slug's on-disk name from the listing first — an exact match before a case-insensitive one, so
+    // two case-variant slugs on a case-sensitive volume are never confused.
+    const names = listDirectories(projectsDir);
+    const onDisk = names.find((name) => name === dirSlug) ?? names.find((name) => name.toLowerCase() === dirSlug.toLowerCase()) ?? dirSlug;
+    const dir = canonicalDirectory(join(projectsDir, onDisk, "memory"));
     const projectDir = resolve(dir, "..");
     return { projectsDir, slug, derived, location: { dir, projectDir, slug: basename(projectDir), how }, candidates: [] };
   };

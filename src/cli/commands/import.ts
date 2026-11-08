@@ -213,7 +213,11 @@ function fileSource(ctx: CommandContext, file: string, now: string): ImportSourc
   };
 }
 
-/** `--memory-dir` / `--from <directory>` (canonicalised), else the directory derived from the project root (with the scan fallback). */
+/**
+ * `--memory-dir` / `--from <directory>` (canonicalised; on a case-insensitive Linux mount realpath keeps the typed
+ * spelling, so spell it the same way across runs), else the directory derived from the project root (with the scan
+ * fallback, which folds the slug through the projects listing).
+ */
 function resolveAutoMemoryDir(ctx: CommandContext, explicitDir: string | null): { dir: string; how: AutoMemoryLocated } {
   if (explicitDir !== null) {
     const dir = resolve(ctx.cwd, explicitDir);

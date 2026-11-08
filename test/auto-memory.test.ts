@@ -10,7 +10,7 @@
  * universe with its protected files, the memory-directory check `--from <dir>` relies on, and the refs the hooks see.
  */
 
-import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -178,21 +178,38 @@ describe("locateAutoMemory", () => {
 
   test("a case-different spelling of the root yields the same directory, refs and --sync prefix (idempotent imports)", () => {
     const dir = memoryDirFor(configDir, projectSlug(root));
-    const variant = root.toLowerCase() === root ? root.toUpperCase() : root.toLowerCase();
+    // Flip only the basename (pure ASCII): both directories the lookup stats — the variant root and its derived memory
+    // directory — live in fresh sibling directories under `base`, so they share one case regime whatever the ancestors
+    // of tmpdir do.
+    const variant = join(dirname(root), "PROJECT");
     expect(variant).not.toBe(root);
     const canonical = locateAutoMemory(root, { env });
     const differentCase = locateAutoMemory(variant, { env });
-    // On a case-insensitive volume (Windows, macOS) both spellings resolve to the on-disk directory; on a
-    // case-sensitive one the variant simply does not exist and the lookup reports no location.
-    if (isDirectory(variant)) {
-      expect(differentCase.location?.dir).toBe(canonical.location?.dir);
-      expect(differentCase.location?.dir).toBe(canonicalDirectory(dir));
-      expect(autoMemorySyncPrefix(differentCase.location!.dir)).toBe(autoMemorySyncPrefix(canonical.location!.dir));
-      expect(autoMemorySourcePath(join(differentCase.location!.dir, "topic.md"))).toBe(autoMemorySourcePath(join(canonical.location!.dir, "topic.md")));
-    } else {
-      expect(differentCase.location).toBeNull();
-    }
+    // On a case-insensitive volume (Windows, macOS) the variant's derived directory exists under its own spelling
+    // ("derived"); on a case-sensitive one (Linux — the two ubuntu CI jobs; macOS and Windows take the derived branch) it does not, and the case-insensitive scan over
+    // <projects>/*/memory finds the same directory ("scan_case"). Either way dir, refs and the --sync prefix agree.
+    expect(differentCase.location?.how).toBe(isDirectory(differentCase.derived) ? "derived" : "scan_case");
+    expect(differentCase.location?.dir).toBe(canonical.location?.dir);
+    expect(differentCase.location?.dir).toBe(canonicalDirectory(dir));
+    expect(autoMemorySyncPrefix(differentCase.location!.dir)).toBe(autoMemorySyncPrefix(canonical.location!.dir));
+    expect(autoMemorySourcePath(join(differentCase.location!.dir, "topic.md"))).toBe(autoMemorySourcePath(join(canonical.location!.dir, "topic.md")));
     expect(canonicalDirectory(join(base, "does-not-exist"))).toBe(join(base, "does-not-exist"));
+  });
+
+  test("a symlinked project directory is listed, so the exact slug wins over a case-variant sibling", () => {
+    const slug = projectSlug(root);
+    const target = join(base, "shared-target");
+    mkdirSync(join(target, "memory"), { recursive: true });
+    mkdirSync(join(configDir, "projects"), { recursive: true });
+    symlinkSync(target, join(configDir, "projects", slug), process.platform === "win32" ? "junction" : "dir");
+    // On a case-sensitive volume this is a second, distinct entry that differs from the slug only by case; on a
+    // case-insensitive one the path resolves to the link itself and the directory already exists. Before the listing
+    // included symlinked directories the exact match missed and the case-insensitive fallback picked the sibling.
+    const sibling = slug.toLowerCase() === slug ? slug.toUpperCase() : slug.toLowerCase();
+    expect(sibling).not.toBe(slug);
+    mkdirSync(join(configDir, "projects", sibling, "memory"), { recursive: true });
+    const found = locateAutoMemory(root, { env });
+    expect(found.location).toMatchObject({ how: "derived", dir: canonicalDirectory(join(target, "memory")) });
   });
 
   test("falls back to the canonical path's slug, then to a case-insensitive scan", () => {

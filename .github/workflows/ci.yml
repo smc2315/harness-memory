@@ -13,7 +13,7 @@
 #
 # Actions are pinned to @v5: their action.yml files declare `runs.using: node24` and keep the inputs used here,
 # while the @v4 releases of checkout, setup-node and cache still declare the older node20 runtime. (Verified by
-# reading each tag's action.yml; nothing here has run on GitHub yet.)
+# reading each tag's action.yml; the first run, 2026-11-08 on redesign/v0.6, confirmed it.)
 #
 # Latency is informational here. `npm run test:latency` (test/eval-latency.test.ts) and `hm eval:latency`
 # (src/cli/commands/eval-latency.ts) spawn `node dist/hook.js pre-tool` fifty times and judge the p95 against
@@ -94,7 +94,7 @@ jobs:
           HM_LATENCY_BUDGET_MS: "60"
         run: npm test -- --testTimeout=20000
 
-      # --verbose prints every check (314 at HEAD), not only the failed ones, so a red scenario can be read from
+      # --verbose prints every check (350 at HEAD), not only the failed ones, so a red scenario can be read from
       # the step log without re-running it locally with --keep.
       - name: hm eval:replay
         run: node dist/bin/harness-memory.js eval:replay --verbose
