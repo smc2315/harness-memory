@@ -13,7 +13,7 @@
 
 import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 import { DEFAULT_CONFIG, loadConfig, mergeConfig, type HarnessConfig } from "../../core/config";
 import { EXIT_CODES } from "../../core/errors";
@@ -200,6 +200,10 @@ export function renderInstallReport(report: InstallReport): string[] {
   else lines.push(`  self-test   FAILED: ${report.self_test.error ?? "unknown error"}`);
   lines.push(`  manifest    ${report.manifest}`);
   for (const warning of report.warnings) lines.push(`  warning     ${warning}`);
+  const importable = report.ok ? ["CLAUDE.md", "AGENTS.md"].find((name) => existsSync(join(report.root, name))) : undefined;
+  if (importable !== undefined) {
+    lines.push(`  import      \`hm import --from ${importable}\` turns its bullets into human memories (a confirmation table lets you pick)`);
+  }
   lines.push(report.ok ? "Open Claude Code in this project; `hm status` shows what the hooks learn." : "Run `hm doctor` for details.");
   return lines;
 }

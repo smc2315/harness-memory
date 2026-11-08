@@ -1,3 +1,6 @@
+<!-- v0.5-historical-banner -->
+> **과거 기록 (v0.4–v0.5).** 이 페이지는 v0.4/v0.5 작업 추적이며 v0.6 재설계 이전의 것이다. 여기 적힌 Tier 2 벤치마크·auto-promotion·OpenCode 플러그인 항목 다수는 v0.6에서 삭제되거나 다시 설계되었다. 현재 설계는 [docs/redesign/spec-v0.6.md](../redesign/spec-v0.6.md), 구현 계획은 [docs/redesign/implementation-plan.md](../redesign/implementation-plan.md), v0.5 → v0.6 이행은 [docs/redesign/upgrade-from-0.5.md](../redesign/upgrade-from-0.5.md)를 볼 것. 참고용으로 남겨 두며 갱신하지 않는다.
+
 # TODO
 
 harness-memory 개선 작업 추적.

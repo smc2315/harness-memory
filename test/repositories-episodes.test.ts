@@ -134,6 +134,14 @@ describe("EpisodeRepository", () => {
     expect(again.status).toBe("queued");
     expect(again.attemptCount).toBe(1);
     expect(again.lastError).toBe("not_logged_in: please run /login");
+
+    // resetAttempts (operator retry of a dead episode) starts the count from zero
+    episodes.markFailed(a.id, "gave up", { retryAt: null, dead: true });
+    episodes.requeue(a.id, { nextAttemptAt: isoPlus(retryAt, { hours: 2 }), resetAttempts: true });
+    const reset = episodes.getById(a.id)!;
+    expect(reset.status).toBe("queued");
+    expect(reset.attemptCount).toBe(0);
+    expect(reset.lastError).toBe("gave up");
   });
 
   test("status transitions: extracted, skipped, failed, dead, lease release and retry requeue", () => {

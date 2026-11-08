@@ -56,7 +56,7 @@ describe("(a) correction episode → active / auto / soft_deny; (j) evidence_wei
     expect(descriptor.flags).toEqual({ correction: 1 });
     expect(descriptor.evidence_weight).toBe(2);
 
-    const output = outputFixture([factFixture({ evidence_refs: ["e1001"] })]);
+    const output = outputFixture([factFixture({ evidence_refs: ["e1"] })]);
     const result = applyRun(db, { descriptor, lines: s01, output });
 
     expect(result.committed).toBe(true);
@@ -111,7 +111,7 @@ describe("(b) a bare failure yields a candidate; a second episode activates it",
   test("evidence 1 → candidate(evidence), evidence 2 → active", () => {
     const first = descriptorFromLines(bareFailureLines("p10", 1100), { sessionId: "session-a", turnKey: "p10" });
     expect(first.evidence_weight).toBe(1);
-    const fact = factFixture({ knowledge_kind: "failure_resolution", evidence_refs: ["e1101"], summary: "Use pnpm test rather than npm test; the npm script is missing in this repository." });
+    const fact = factFixture({ knowledge_kind: "failure_resolution", evidence_refs: ["e1"], summary: "Use pnpm test rather than npm test; the npm script is missing in this repository." });
     const one = applyRun(db, { descriptor: first, lines: bareFailureLines("p10", 1100), output: outputFixture([fact]) });
     const id = one.op.report.created[0]!;
     expect(memories.getById(id)?.status).toBe("candidate");
@@ -122,7 +122,7 @@ describe("(b) a bare failure yields a candidate; a second episode activates it",
     const two = applyRun(db, {
       descriptor: second,
       lines: secondLines,
-      output: outputFixture([{ ...fact, action: "reinforce", target_memory_id: id, evidence_refs: ["e1201"] }]),
+      output: outputFixture([{ ...fact, action: "reinforce", target_memory_id: id, evidence_refs: ["e1"] }]),
       now: isoPlus(REPLAY_NOW, { hours: 1 }),
     });
     expect(two.op.report.reinforced).toEqual([id]);
@@ -139,13 +139,13 @@ describe("(b) a bare failure yields a candidate; a second episode activates it",
   test("a create whose claim already lives as a candidate reinforces it (semantic twin)", () => {
     const lines = bareFailureLines("p12", 1300);
     const descriptor = descriptorFromLines(lines, { sessionId: "session-c", turnKey: "p12" });
-    const fact = factFixture({ knowledge_kind: "failure_resolution", evidence_refs: ["e1301"] });
+    const fact = factFixture({ knowledge_kind: "failure_resolution", evidence_refs: ["e1"] });
     const one = applyRun(db, { descriptor, lines, output: outputFixture([fact]) });
     const id = one.op.report.created[0]!;
 
     const lines2 = bareFailureLines("p13", 1400);
     const descriptor2 = descriptorFromLines(lines2, { sessionId: "session-d", turnKey: "p13" });
-    const two = applyRun(db, { descriptor: descriptor2, lines: lines2, output: outputFixture([{ ...fact, evidence_refs: ["e1401"] }]), now: isoPlus(REPLAY_NOW, { hours: 2 }) });
+    const two = applyRun(db, { descriptor: descriptor2, lines: lines2, output: outputFixture([{ ...fact, evidence_refs: ["e1"] }]), now: isoPlus(REPLAY_NOW, { hours: 2 }) });
     expect(two.op.report.created).toEqual([]);
     expect(two.op.report.reinforced).toEqual([id]);
     expect(memories.list({ status: ["candidate", "active"] })).toHaveLength(1);
@@ -155,7 +155,7 @@ describe("(b) a bare failure yields a candidate; a second episode activates it",
 describe("(d) idempotency", () => {
   test("applying the same run twice leaves the database bytes identical", () => {
     const descriptor = descriptorFromLines(s01);
-    const output = outputFixture([factFixture({ evidence_refs: ["e1001"] })]);
+    const output = outputFixture([factFixture({ evidence_refs: ["e1"] })]);
     const first = applyRun(db, { descriptor, lines: s01, output });
     expect(first.committed).toBe(true);
     const before = Buffer.from(db.export());
@@ -181,7 +181,7 @@ describe("(e) a hallucinated propose_supersede against a human row", () => {
       target_memory_id: human.id,
       summary: "Run pnpm test instead of npm test; the npm scripts are missing in this repository.",
       knowledge_kind: "failure_resolution",
-      evidence_refs: ["e2002", "e2004"],
+      evidence_refs: ["e2", "e4"],
       confidence: 0.9,
     });
     const result = applyRun(db, { descriptor, lines: s02, output: outputFixture([fact]) });
@@ -213,7 +213,7 @@ describe("(e) a hallucinated propose_supersede against a human row", () => {
 describe("(f) propose_stale needs two sessions to demote an auto row", () => {
   test("1-support does nothing; 2-session support demotes by auto_rule", () => {
     const target = memories.create(autoMemory({ status: "active", summary: "Use npm test to run the suite in this repository.", knowledgeKind: "convention", confidence: 0.8 }));
-    const fact = factFixture({ action: "propose_stale", target_memory_id: target.id, knowledge_kind: "convention", evidence_refs: ["e2002"], summary: "npm test no longer works here; the scripts moved to pnpm." });
+    const fact = factFixture({ action: "propose_stale", target_memory_id: target.id, knowledge_kind: "convention", evidence_refs: ["e2"], summary: "npm test no longer works here; the scripts moved to pnpm." });
 
     const one = applyRun(db, { descriptor: descriptorFromLines(s02, { sessionId: "session-a" }), lines: s02, output: outputFixture([fact]) });
     expect(one.op.report.outcomes[0]).toMatchObject({ outcome: "proposed" });
@@ -234,7 +234,7 @@ describe("(f) propose_stale needs two sessions to demote an auto row", () => {
 
   test("the same session twice is still one support session", () => {
     const target = memories.create(autoMemory({ status: "active", summary: "Use npm test to run the suite in this repository.", knowledgeKind: "convention" }));
-    const fact = factFixture({ action: "propose_stale", target_memory_id: target.id, knowledge_kind: "convention", evidence_refs: ["e2002"], summary: "npm test no longer works here; the scripts moved to pnpm." });
+    const fact = factFixture({ action: "propose_stale", target_memory_id: target.id, knowledge_kind: "convention", evidence_refs: ["e2"], summary: "npm test no longer works here; the scripts moved to pnpm." });
     applyRun(db, { descriptor: descriptorFromLines(s02, { sessionId: "session-a", turnKey: "p2" }), lines: s02, output: outputFixture([fact]) });
     applyRun(db, { descriptor: descriptorFromLines(s02, { sessionId: "session-a", turnKey: "p3" }), lines: s02, output: outputFixture([fact]), now: isoPlus(REPLAY_NOW, { hours: 1 }) });
     expect(memories.getById(target.id)?.status).toBe("active");
@@ -246,7 +246,7 @@ describe("(f) propose_stale needs two sessions to demote an auto row", () => {
 describe("(g) reinforce raises TTL and validation_count", () => {
   test("a second episode extends the TTL and bumps validation_count", () => {
     const descriptor = descriptorFromLines(s01);
-    const fact = factFixture({ evidence_refs: ["e1001"] });
+    const fact = factFixture({ evidence_refs: ["e1"] });
     const one = applyRun(db, { descriptor, lines: s01, output: outputFixture([fact]) });
     const id = one.op.report.created[0]!;
     const before = memories.getById(id)!;
@@ -257,7 +257,7 @@ describe("(g) reinforce raises TTL and validation_count", () => {
     const two = applyRun(db, {
       descriptor: descriptorFromLines(lines, { sessionId: "session-z", turnKey: "p20" }),
       lines,
-      output: outputFixture([{ ...fact, action: "reinforce", target_memory_id: id, evidence_refs: ["e2101"] }]),
+      output: outputFixture([{ ...fact, action: "reinforce", target_memory_id: id, evidence_refs: ["e1"] }]),
       now: later,
     });
     expect(two.op.report.reinforced).toEqual([id]);
@@ -273,7 +273,7 @@ describe("(g) reinforce raises TTL and validation_count", () => {
   test("a human target only gains counters and last_verified_at", () => {
     const human = memories.create(humanMemory({ type: "pitfall", summary: "Run pnpm test for the suite.", scopeGlob: "**/*", confidence: 0.6, importance: 0.9, lifecycleTriggers: ["before_model"] }));
     const descriptor = descriptorFromLines(s02);
-    applyRun(db, { descriptor, lines: s02, output: outputFixture([factFixture({ action: "reinforce", target_memory_id: human.id, evidence_refs: ["e2004"], knowledge_kind: "failure_resolution" })]) });
+    applyRun(db, { descriptor, lines: s02, output: outputFixture([factFixture({ action: "reinforce", target_memory_id: human.id, evidence_refs: ["e4"], knowledge_kind: "failure_resolution" })]) });
     const after = memories.getById(human.id)!;
     expect(after.evidenceCount).toBe(1);
     expect(after.confidence).toBe(0.6);
@@ -287,7 +287,7 @@ describe("(g) reinforce raises TTL and validation_count", () => {
 describe("(h) propose → expire → propose", () => {
   test("a new proposal opens after the first one expired", () => {
     const target = memories.create(autoMemory({ status: "active", summary: "Use npm test to run the suite in this repository.", knowledgeKind: "convention" }));
-    const fact = factFixture({ action: "propose_stale", target_memory_id: target.id, knowledge_kind: "convention", evidence_refs: ["e2002"], summary: "npm test no longer works here; the scripts moved to pnpm." });
+    const fact = factFixture({ action: "propose_stale", target_memory_id: target.id, knowledge_kind: "convention", evidence_refs: ["e2"], summary: "npm test no longer works here; the scripts moved to pnpm." });
     applyRun(db, { descriptor: descriptorFromLines(s02, { sessionId: "session-a" }), lines: s02, output: outputFixture([fact]) });
     const proposals = new ProposalRepository(db);
     const first = proposals.listOpen({ kind: "stale", targetId: target.id })[0]!;
@@ -307,7 +307,7 @@ describe("(h) propose → expire → propose", () => {
 
   test("a rejected proposal is not re-opened within 30 days", () => {
     const target = memories.create(autoMemory({ status: "active", summary: "Use npm test to run the suite in this repository.", knowledgeKind: "convention" }));
-    const fact = factFixture({ action: "propose_stale", target_memory_id: target.id, knowledge_kind: "convention", evidence_refs: ["e2002"], summary: "npm test no longer works here; the scripts moved to pnpm." });
+    const fact = factFixture({ action: "propose_stale", target_memory_id: target.id, knowledge_kind: "convention", evidence_refs: ["e2"], summary: "npm test no longer works here; the scripts moved to pnpm." });
     applyRun(db, { descriptor: descriptorFromLines(s02, { sessionId: "session-a" }), lines: s02, output: outputFixture([fact]) });
     const proposals = new ProposalRepository(db);
     const first = proposals.listOpen({ kind: "stale", targetId: target.id })[0]!;
@@ -347,7 +347,7 @@ describe("(i) learn-and-apply episodes are pitfalls", () => {
         summary: scenario.summary,
         trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: scenario.failed },
         knowledge_kind: "failure_resolution",
-        evidence_refs: [`e${String(base + 1)}`, `e${String(base + 2)}`],
+        evidence_refs: ["e2", "e3"],
       });
       const result = applyRun(db, { descriptor, lines, output: outputFixture([fact]) });
       expect(result.op.report.created).toHaveLength(1);
@@ -367,8 +367,8 @@ describe("(i) learn-and-apply episodes are pitfalls", () => {
 describe("normalization and guards", () => {
   test("normalizeFact relabels policy→pitfall, recomputes the semantic key and collects failure classes", () => {
     const descriptor = descriptorFromLines(s02);
-    const seqMap = new Map(s02.map((line) => [`e${String(line.seq)}`, line]));
-    const fact = factFixture({ type: "policy", knowledge_kind: "failure_resolution", evidence_refs: ["e2002", "e2004"] });
+    const seqMap = new Map(s02.map((line, index) => [`e${String(index + 1)}`, line]));
+    const fact = factFixture({ type: "policy", knowledge_kind: "failure_resolution", evidence_refs: ["e2", "e4"] });
     const validated = {
       ...fact,
       ordinal: 0,
@@ -388,7 +388,7 @@ describe("normalization and guards", () => {
 
   test("decision facts get session_start + before_model triggers", () => {
     const descriptor = descriptorFromLines(s02);
-    const fact = factFixture({ type: "decision", trigger_signature: null, lifecycle_triggers: ["before_tool"], knowledge_kind: "decision", scope_glob: "**/*", evidence_refs: ["e2005"] });
+    const fact = factFixture({ type: "decision", trigger_signature: null, lifecycle_triggers: ["before_tool"], knowledge_kind: "decision", scope_glob: "**/*", evidence_refs: ["e5"] });
     const validated = { ...fact, ordinal: 0, compiledSignature: null, semanticKey: "k", normalizedScope: "**/*", relabels: ["tool_not_hooked"] };
     const normalized = normalizeFact(validated, descriptor, new Map(), null);
     expect(normalized.lifecycleTriggers).toEqual(["session_start", "before_model"]);
@@ -397,26 +397,26 @@ describe("normalization and guards", () => {
 
   test("a recently rejected twin is skipped (skipped_recent_reject)", () => {
     const descriptor = descriptorFromLines(s01);
-    const fact = factFixture({ evidence_refs: ["e1001"] });
+    const fact = factFixture({ evidence_refs: ["e1"] });
     const one = applyRun(db, { descriptor, lines: s01, output: outputFixture([fact]) });
     const id = one.op.report.created[0]!;
     db.run("UPDATE memories SET status = 'rejected', status_reason = 'human', updated_at = ? WHERE id = ?", [isoPlus(REPLAY_NOW, { days: 1 }), id]);
 
     const lines = bareFailureLines("p40", 4100);
-    const again = applyRun(db, { descriptor: descriptorFromLines(lines, { sessionId: "session-q", turnKey: "p40" }), lines, output: outputFixture([{ ...fact, evidence_refs: ["e4101"] }]), now: isoPlus(REPLAY_NOW, { days: 2 }) });
+    const again = applyRun(db, { descriptor: descriptorFromLines(lines, { sessionId: "session-q", turnKey: "p40" }), lines, output: outputFixture([{ ...fact, evidence_refs: ["e1"] }]), now: isoPlus(REPLAY_NOW, { days: 2 }) });
     expect(again.op.report.outcomes[0]).toMatchObject({ outcome: "skipped", rejection: "skipped_recent_reject", memory_id: id });
     expect(memories.list({ status: ["candidate", "active"] })).toHaveLength(0);
   });
 
   test("a terminal twin older than 30 days is revived as a new live row", () => {
     const descriptor = descriptorFromLines(s01);
-    const fact = factFixture({ evidence_refs: ["e1001"] });
+    const fact = factFixture({ evidence_refs: ["e1"] });
     const one = applyRun(db, { descriptor, lines: s01, output: outputFixture([fact]) });
     const id = one.op.report.created[0]!;
     db.run("UPDATE memories SET status = 'rejected', status_reason = 'human', updated_at = ? WHERE id = ?", [isoPlus(REPLAY_NOW, { days: -40 }), id]);
 
     const lines = bareFailureLines("p41", 4200);
-    const again = applyRun(db, { descriptor: descriptorFromLines(lines, { sessionId: "session-r", turnKey: "p41" }), lines, output: outputFixture([{ ...fact, evidence_refs: ["e4201"] }]), now: isoPlus(REPLAY_NOW, { days: 1 }) });
+    const again = applyRun(db, { descriptor: descriptorFromLines(lines, { sessionId: "session-r", turnKey: "p41" }), lines, output: outputFixture([{ ...fact, evidence_refs: ["e1"] }]), now: isoPlus(REPLAY_NOW, { days: 1 }) });
     expect(again.op.report.created).toHaveLength(1);
     expect(again.op.report.created[0]).not.toBe(id);
     expect(memories.getById(again.op.report.created[0]!)?.status).toBe("candidate");
@@ -424,7 +424,7 @@ describe("normalization and guards", () => {
 
   test("a propose_supersede with the target's own claim becomes reinforce + stale proposal", () => {
     const descriptor = descriptorFromLines(s01);
-    const fact = factFixture({ evidence_refs: ["e1001"] });
+    const fact = factFixture({ evidence_refs: ["e1"] });
     const one = applyRun(db, { descriptor, lines: s01, output: outputFixture([fact]) });
     const id = one.op.report.created[0]!;
 
@@ -432,7 +432,7 @@ describe("normalization and guards", () => {
     const again = applyRun(db, {
       descriptor: descriptorFromLines(lines, { sessionId: "session-s", turnKey: "p42" }),
       lines,
-      output: outputFixture([{ ...fact, action: "propose_supersede", target_memory_id: id, evidence_refs: ["e4301"] }]),
+      output: outputFixture([{ ...fact, action: "propose_supersede", target_memory_id: id, evidence_refs: ["e1"] }]),
       now: isoPlus(REPLAY_NOW, { hours: 3 }),
     });
     expect(again.op.report.created).toEqual([]);
@@ -456,7 +456,7 @@ describe("normalization and guards", () => {
       factFixture({
         summary: summaries[index]!,
         trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: command },
-        evidence_refs: ["e1001"],
+        evidence_refs: ["e1"],
       })
     );
     const promptText = s01[0]!.kind === "prompt" ? s01[0]!.text : "";
@@ -473,7 +473,7 @@ describe("normalization and guards", () => {
 
   test("autonomy off keeps rows candidate; shadow writes an audit entry", () => {
     const descriptor = descriptorFromLines(s01);
-    const fact = factFixture({ evidence_refs: ["e1001"] });
+    const fact = factFixture({ evidence_refs: ["e1"] });
     const off = applyRun(db, { descriptor, lines: s01, output: outputFixture([fact]), config: { ...DEFAULT_CONFIG, autonomy_level: "off" } });
     expect(memories.getById(off.op.report.created[0]!)?.status).toBe("candidate");
 

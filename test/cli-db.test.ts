@@ -125,16 +125,18 @@ describe("hm snapshot:rebuild", () => {
 });
 
 describe("hm dispatcher", () => {
-  test("registers the 33 commands of spec §11 and marks the Phase C ones as not in this build", async () => {
+  test("registers the 33 commands of spec §11; only eval:live (a later release) is not in this build", async () => {
     expect(COMMANDS).toHaveLength(33);
     expect(new Set(COMMANDS.map((command) => command.name)).size).toBe(33);
-    expect(implementedCommands().map((command) => command.name).sort()).toEqual(["db:migrate", "db:rollback", "doctor", "install", "snapshot:rebuild", "status", "uninstall"]);
+    const notInBuild = COMMANDS.filter((command) => command.run === undefined).map((command) => command.name);
+    expect(notInBuild).toEqual(["eval:live"]);
+    expect(implementedCommands()).toHaveLength(32);
     const help = await runHm(project, ["--help"]);
     expect(help.code).toBe(0);
     for (const command of COMMANDS) expect(help.stdout).toContain(command.name);
     expect(help.stdout).toContain("(not in this build)");
 
-    const stub = await runHm(project, ["memory:list", "--status", "active"]);
+    const stub = await runHm(project, ["eval:live"]);
     expect(stub.code).toBe(2);
     expect(stub.stderr).toContain("not in this build");
 

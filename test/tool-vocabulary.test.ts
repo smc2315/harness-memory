@@ -50,6 +50,12 @@ describe("canonicalizeHostTool (§8.5)", () => {
 });
 
 describe("extractScopeRefs", () => {
+  test("bare executable tokens are not scope refs (PowerShell `& npm.cmd run build`)", () => {
+    expect(extractScopeRefs("& npm.cmd run build")).toEqual([]);
+    expect(extractScopeRefs("node.exe scripts/build.mjs")).toEqual(["scripts/build.mjs"]);
+    expect(extractScopeRefs("./tools/run.cmd src/a.ts build.bat")).toEqual(["tools/run.cmd", "src/a.ts"]);
+  });
+
   test("strips quotes, ./ and flags; drops URLs and absolute paths outside the repo", () => {
     expect(
       extractScopeRefs(`cat "./src/a.ts" --file=src/b.ts -v https://example.com/x.ts /etc/passwd 'docs/x y.md' src/c.ts.`, "/repo")

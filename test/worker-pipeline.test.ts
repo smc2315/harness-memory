@@ -101,7 +101,7 @@ function worker(overrides: Partial<WorkerOptions> = {}) {
 describe("worker extract", () => {
   test("queue file → two lock sessions → active memory, snapshot, write_ops; reruns are idempotent", async () => {
     const descriptor = queueEpisode(s01);
-    const provider = createReplayProvider({ answers: { [descriptor.id]: outputFixture([factFixture({ evidence_refs: ["e1001"] })]) } });
+    const provider = createReplayProvider({ answers: { [descriptor.id]: outputFixture([factFixture({ evidence_refs: ["e1"] })]) } });
     const result = await worker({ provider });
 
     expect(result.exitCode).toBe(0);
@@ -152,7 +152,7 @@ describe("worker extract", () => {
 
   test("fire roll-up happens only for newly inserted episodes", async () => {
     const first = queueEpisode(s01);
-    const provider = createReplayProvider({ answers: { [first.id]: outputFixture([factFixture({ evidence_refs: ["e1001"] })]) } });
+    const provider = createReplayProvider({ answers: { [first.id]: outputFixture([factFixture({ evidence_refs: ["e1"] })]) } });
     const seeded = await worker({ provider });
     const memoryId = seeded.processed[0]!.created[0]!;
 
@@ -179,7 +179,7 @@ describe("worker extract", () => {
   test("a V1-valid raw cache is reused without calling the provider", async () => {
     const descriptor = queueEpisode(s01);
     const runId = extractionRunId(descriptor.id);
-    writeFileSync(rawFile(paths, runId), JSON.stringify(outputFixture([factFixture({ evidence_refs: ["e1001"] })])));
+    writeFileSync(rawFile(paths, runId), JSON.stringify(outputFixture([factFixture({ evidence_refs: ["e1"] })])));
     const provider = fakeProvider({ probe: "ok" });
     const result = await worker({ provider });
     expect(result.processed[0]).toMatchObject({ status: "ok", fromCache: true });
@@ -218,7 +218,7 @@ describe("worker extract", () => {
 
     // After the daily window both episodes are due; a fresh probe succeeds and the cache flips to ok.
     clockNow = "2026-11-09T16:00:00.000Z";
-    const good = fakeProvider({ probe: "ok", extract: () => ({ status: "ok", raw: JSON.stringify(outputFixture([factFixture({ evidence_refs: ["e1001"] })])) }) });
+    const good = fakeProvider({ probe: "ok", extract: () => ({ status: "ok", raw: JSON.stringify(outputFixture([factFixture({ evidence_refs: ["e1"] })])) }) });
     const recovered = await worker({ provider: good });
     expect(good.probes).toBe(1);
     expect(recovered.processed.map((entry) => entry.status)).toEqual(["ok", "ok"]);
@@ -298,7 +298,7 @@ describe("worker extract", () => {
 describe("worker extract with an embedder", () => {
   test("new rows are embedded in a separate lock session after extraction and the dense snapshot appears", async () => {
     const descriptor = queueEpisode(s01);
-    const provider = createReplayProvider({ answers: { [descriptor.id]: outputFixture([factFixture({ evidence_refs: ["e1001"] })]) } });
+    const provider = createReplayProvider({ answers: { [descriptor.id]: outputFixture([factFixture({ evidence_refs: ["e1"] })]) } });
     const calls: string[][] = [];
     const embed = async (texts: string[]): Promise<Float32Array[]> => {
       calls.push(texts);
@@ -331,7 +331,7 @@ describe("worker extract with an embedder", () => {
 
   test("an embedder failure is reported but never fails the run", async () => {
     const descriptor = queueEpisode(s01);
-    const provider = createReplayProvider({ answers: { [descriptor.id]: outputFixture([factFixture({ evidence_refs: ["e1001"] })]) } });
+    const provider = createReplayProvider({ answers: { [descriptor.id]: outputFixture([factFixture({ evidence_refs: ["e1"] })]) } });
     config.embeddings.enabled = true;
     const result = await worker({
       provider,
@@ -350,7 +350,7 @@ describe("worker extract with an embedder", () => {
 describe("worker reindex and dream", () => {
   test("reindex rebuilds the snapshot without touching the database generation", async () => {
     const descriptor = queueEpisode(s01);
-    const provider = createReplayProvider({ answers: { [descriptor.id]: outputFixture([factFixture({ evidence_refs: ["e1001"] })]) } });
+    const provider = createReplayProvider({ answers: { [descriptor.id]: outputFixture([factFixture({ evidence_refs: ["e1"] })]) } });
     await worker({ provider });
     rmSync(paths.snapshotActive);
     writeFileSync(paths.reindexRequested, "");
@@ -364,7 +364,7 @@ describe("worker reindex and dream", () => {
 
   test("dream empties the queue first, then consolidates and stamps last_dream_at", async () => {
     const descriptor = queueEpisode(s01);
-    const provider = createReplayProvider({ answers: { [descriptor.id]: outputFixture([factFixture({ evidence_refs: ["e1001"] })]) } });
+    const provider = createReplayProvider({ answers: { [descriptor.id]: outputFixture([factFixture({ evidence_refs: ["e1"] })]) } });
     const result = await worker({ command: "dream", provider });
     expect(result.processed).toHaveLength(1);
     expect(result.dream).not.toBeNull();

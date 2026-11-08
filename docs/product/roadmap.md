@@ -1,3 +1,6 @@
+<!-- v0.5-historical-banner -->
+> **Historical (v0.5).** This roadmap predates the v0.6 redesign. The current plan is the milestone table in §14 of [docs/redesign/spec-v0.6.md](../redesign/spec-v0.6.md): 0.6.0 Claude Code, 0.6.1 Codex, 0.6.2 OpenCode V2, 0.7 global sync / auto merge / buckets. The "completed" sections below describe v0.4 features whose implementation (auto-promoter, conversation buffer) was replaced in v0.6 — see [docs/redesign/upgrade-from-0.5.md](../redesign/upgrade-from-0.5.md).
+
 # Roadmap
 
 ## Roadmap Rule

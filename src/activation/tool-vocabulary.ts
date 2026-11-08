@@ -138,6 +138,8 @@ const DRIVE_PATH = /^[A-Za-z]:\//;
 const GIT_BASH_DRIVE = /^\/([A-Za-z])\/(.*)$/;
 const FILE_LIKE = /^[\w@.-]+\.[A-Za-z][A-Za-z0-9]{0,7}$/;
 const DOTFILE_LIKE = /^\.[A-Za-z][\w.-]*$/;
+/** `npm.cmd`, `node.exe`, `build.bat` without a directory part are the program being run, not a file of the repo. */
+const EXECUTABLE_TOKEN = /\.(?:exe|cmd|bat|com)$/i;
 const TOKEN_DELIMITERS = new Set([" ", "\t", "\n", "\r", ",", ";", "=", "(", ")", "{", "}", "[", "]", "<", ">", "|", "&"]);
 
 function splitTokens(text: string): string[] {
@@ -251,6 +253,7 @@ export function extractScopeRefs(text: string, root?: string): string[] {
     if (!/[A-Za-z0-9]/.test(value)) continue;
     const pathLike = hadSlash || FILE_LIKE.test(value) || DOTFILE_LIKE.test(value);
     if (!pathLike) continue;
+    if (!hadSlash && EXECUTABLE_TOKEN.test(value)) continue;
     if (!hadSlash && !value.startsWith(".")) {
       const dot = value.lastIndexOf(".");
       const base = value.slice(0, dot);

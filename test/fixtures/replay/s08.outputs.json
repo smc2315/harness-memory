@@ -1,0 +1,206 @@
+{
+  "A/q1": {
+    "episode_summary": "npm test failed; pnpm test worked.",
+    "nothing_to_learn": false,
+    "facts": [
+      {
+        "action": "create",
+        "target_memory_id": null,
+        "type": "policy",
+        "summary": "Run the suite with pnpm test; npm test has no script here.",
+        "details": "npm test failed with exit code 1 and pnpm test succeeded in the same turn.",
+        "scope_glob": "**/*",
+        "relevant_tools": [
+          "bash"
+        ],
+        "trigger_signature": {
+          "tool": "bash",
+          "target": "command",
+          "pattern_kind": "cmd",
+          "pattern": "npm test"
+        },
+        "lifecycle_triggers": [
+          "before_tool"
+        ],
+        "confidence": 0.85,
+        "evidence_refs": [
+          "e8012",
+          "e8013"
+        ],
+        "knowledge_kind": "failure_resolution",
+        "rationale": "Failure followed by the working alternative.",
+        "aliases": []
+      }
+    ]
+  },
+  "B/q2": {
+    "episode_summary": "npm run build failed; pnpm build worked.",
+    "nothing_to_learn": false,
+    "facts": [
+      {
+        "action": "create",
+        "target_memory_id": null,
+        "type": "policy",
+        "summary": "Build with pnpm build; npm run build fails without the pnpm workspace.",
+        "details": "npm run build failed with exit code 1 and pnpm build succeeded in the same turn.",
+        "scope_glob": "**/*",
+        "relevant_tools": [
+          "bash"
+        ],
+        "trigger_signature": {
+          "tool": "bash",
+          "target": "command",
+          "pattern_kind": "cmd",
+          "pattern": "npm run build"
+        },
+        "lifecycle_triggers": [
+          "before_tool"
+        ],
+        "confidence": 0.85,
+        "evidence_refs": [
+          "e8022",
+          "e8023"
+        ],
+        "knowledge_kind": "failure_resolution",
+        "rationale": "Failure followed by the working alternative.",
+        "aliases": []
+      }
+    ]
+  },
+  "C/q3": {
+    "episode_summary": "yarn lint failed; pnpm lint worked.",
+    "nothing_to_learn": false,
+    "facts": [
+      {
+        "action": "create",
+        "target_memory_id": null,
+        "type": "pitfall",
+        "summary": "Lint through pnpm lint; yarn lint is not configured in this repository.",
+        "details": "yarn lint failed with exit code 1 and pnpm lint succeeded in the same turn.",
+        "scope_glob": "**/*",
+        "relevant_tools": [
+          "bash"
+        ],
+        "trigger_signature": {
+          "tool": "bash",
+          "target": "command",
+          "pattern_kind": "cmd",
+          "pattern": "yarn lint"
+        },
+        "lifecycle_triggers": [
+          "before_tool"
+        ],
+        "confidence": 0.85,
+        "evidence_refs": [
+          "e8032",
+          "e8033"
+        ],
+        "knowledge_kind": "failure_resolution",
+        "rationale": "Failure followed by the working alternative.",
+        "aliases": []
+      }
+    ]
+  },
+  "D/q4": {
+    "episode_summary": "npx vitest run failed; npx vitest run --reporter dot worked.",
+    "nothing_to_learn": false,
+    "facts": [
+      {
+        "action": "create",
+        "target_memory_id": null,
+        "type": "pitfall",
+        "summary": "Run vitest with --reporter dot; the default reporter hangs this terminal.",
+        "details": "npx vitest run failed with exit code 1 and npx vitest run --reporter dot succeeded in the same turn.",
+        "scope_glob": "**/*",
+        "relevant_tools": [
+          "bash"
+        ],
+        "trigger_signature": {
+          "tool": "bash",
+          "target": "command",
+          "pattern_kind": "cmd",
+          "pattern": "npx vitest run"
+        },
+        "lifecycle_triggers": [
+          "before_tool"
+        ],
+        "confidence": 0.85,
+        "evidence_refs": [
+          "e8042",
+          "e8043"
+        ],
+        "knowledge_kind": "failure_resolution",
+        "rationale": "Failure followed by the working alternative.",
+        "aliases": []
+      }
+    ]
+  },
+  "E/q5": {
+    "episode_summary": "npm run typecheck failed; pnpm typecheck worked.",
+    "nothing_to_learn": false,
+    "facts": [
+      {
+        "action": "create",
+        "target_memory_id": null,
+        "type": "policy",
+        "summary": "Typecheck with pnpm typecheck; npm run typecheck misses the workspace flags.",
+        "details": "npm run typecheck failed with exit code 1 and pnpm typecheck succeeded in the same turn.",
+        "scope_glob": "**/*",
+        "relevant_tools": [
+          "bash"
+        ],
+        "trigger_signature": {
+          "tool": "bash",
+          "target": "command",
+          "pattern_kind": "cmd",
+          "pattern": "npm run typecheck"
+        },
+        "lifecycle_triggers": [
+          "before_tool"
+        ],
+        "confidence": 0.85,
+        "evidence_refs": [
+          "e8052",
+          "e8053"
+        ],
+        "knowledge_kind": "failure_resolution",
+        "rationale": "Failure followed by the working alternative.",
+        "aliases": []
+      }
+    ]
+  },
+  "F/q6": {
+    "episode_summary": "npm run e2e failed; pnpm e2e worked.",
+    "nothing_to_learn": false,
+    "facts": [
+      {
+        "action": "create",
+        "target_memory_id": null,
+        "type": "pitfall",
+        "summary": "Run e2e tests with pnpm e2e; npm run e2e cannot find the playwright config.",
+        "details": "npm run e2e failed with exit code 1 and pnpm e2e succeeded in the same turn.",
+        "scope_glob": "**/*",
+        "relevant_tools": [
+          "bash"
+        ],
+        "trigger_signature": {
+          "tool": "bash",
+          "target": "command",
+          "pattern_kind": "cmd",
+          "pattern": "npm run e2e"
+        },
+        "lifecycle_triggers": [
+          "before_tool"
+        ],
+        "confidence": 0.85,
+        "evidence_refs": [
+          "e8062",
+          "e8063"
+        ],
+        "knowledge_kind": "failure_resolution",
+        "rationale": "Failure followed by the working alternative.",
+        "aliases": []
+      }
+    ]
+  }
+}

@@ -1,0 +1,3 @@
+{"kind":"prompt","ts":"2026-11-08T10:00:00.000Z","seq":5001,"turn_key":"p5","text":"check the lockfile","correction":0,"remember":0,"prompt_id":"p5"}
+{"kind":"tool_ok","ts":"2026-11-08T10:00:02.000Z","seq":5002,"turn_key":"p5","tool_use_id":"tu5-1","tool":"read","host_tool":"Read","shell_dialect":null,"input_digest":"pnpm-lock.yaml","scope_refs":["pnpm-lock.yaml"],"program_token":null,"output_head":"lockfileVersion: '9.0'","output_tail":"","resolution_of":null}
+{"kind":"assistant","ts":"2026-11-08T10:00:05.000Z","seq":5003,"turn_key":"p5","text":"The lockfile is pnpm v9."}

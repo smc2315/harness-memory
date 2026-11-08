@@ -289,15 +289,16 @@ export class EpisodeRepository {
   /**
    * Puts one leased/failed episode back to `queued` at `nextAttemptAt` outside the normal backoff accounting:
    * provider-unavailable outcomes (no_provider / not_logged_in / nested_refusal, m0-facts #3) must not burn one
-   * of the three attempts, so `undoAttempt` reverses the increment the lease made.
+   * of the three attempts, so `undoAttempt` reverses the increment the lease made. `resetAttempts` (an operator's
+   * `hm queue retry` on a dead episode) starts the count from zero again.
    */
-  requeue(id: string, options: { nextAttemptAt: string; undoAttempt?: boolean; lastError?: string | null }): void {
+  requeue(id: string, options: { nextAttemptAt: string; undoAttempt?: boolean; resetAttempts?: boolean; lastError?: string | null }): void {
     this.db.run(
       `
         UPDATE episodes
         SET status = 'queued',
             lease_until = NULL,
-            attempt_count = CASE WHEN $undo = 1 THEN MAX(0, attempt_count - 1) ELSE attempt_count END,
+            attempt_count = CASE WHEN $reset = 1 THEN 0 WHEN $undo = 1 THEN MAX(0, attempt_count - 1) ELSE attempt_count END,
             next_attempt_at = $next,
             last_error = COALESCE($error, last_error)
         WHERE id = $id
@@ -306,6 +307,7 @@ export class EpisodeRepository {
         $id: id,
         $next: options.nextAttemptAt,
         $undo: options.undoAttempt === true ? 1 : 0,
+        $reset: options.resetAttempts === true ? 1 : 0,
         $error: options.lastError === undefined || options.lastError === null ? null : truncateText(options.lastError, MAX_ERROR_CHARS),
       }
     );

@@ -1,7 +1,7 @@
 {
   "name": "harness-memory",
   "version": "0.6.0-rc.1",
-  "description": "Project memory layer for coding harnesses",
+  "description": "Trigger-aware project memory for Claude Code: policies and pitfalls learned from your own corrections and failures, enforced at the tool boundary through hooks. Local-first, no account, no daemon.",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -57,11 +57,19 @@
     "node": ">=20.0.0"
   },
   "keywords": [
+    "claude-code",
+    "claude-code-hooks",
+    "hooks",
     "project-memory",
+    "agent-memory",
+    "coding-agent",
     "coding-harness",
+    "pitfall",
+    "policy",
+    "pretooluse",
     "sqlite",
-    "activation",
-    "policy"
+    "local-first",
+    "activation"
   ],
   "homepage": "https://github.com/smc2315/harness-memory#readme",
   "repository": {

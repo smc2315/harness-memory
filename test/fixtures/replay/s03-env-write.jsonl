@@ -1,0 +1,4 @@
+{"kind":"prompt","ts":"2026-11-08T10:00:00.000Z","seq":3101,"turn_key":"p31","text":"Don't put the API key in .env, read it from the vault instead.","correction":1,"remember":0,"prompt_id":"p31"}
+{"kind":"fired","ts":"2026-11-08T10:00:02.000Z","seq":3102,"turn_key":"p31","memory_ids":["seed-env-policy"],"rule_codes":[],"tool":"write","target_digest":".env","delivery":"before","decision":"ask","enforcement":"confirm","signature_keys":["write|edit|path|glob|**/.env*"]}
+{"kind":"tool_ok","ts":"2026-11-08T10:00:04.000Z","seq":3103,"turn_key":"p31","tool_use_id":"tu31-1","tool":"write","host_tool":"Write","shell_dialect":null,"input_digest":".env","scope_refs":[".env"],"program_token":null,"output_head":"","output_tail":"","resolution_of":null}
+{"kind":"assistant","ts":"2026-11-08T10:00:08.000Z","seq":3104,"turn_key":"p31","text":"Removed the key from .env; the app now reads it through the vault CLI."}

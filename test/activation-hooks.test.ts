@@ -331,9 +331,14 @@ describe("snapshot reader", () => {
     const loaded = readActiveSnapshot(fixture.paths, { spawnWorker: null });
     expect(loaded).not.toBeNull();
     expect(loaded!.stale).toBe(false);
-    expect(loaded!.compiled.scopeRegex.get("m")).toBeInstanceOf(RegExp);
-    expect(loaded!.compiled.signatureRegex.get("m")).toBeInstanceOf(RegExp);
+    // regexes are compiled lazily: nothing before the first scope check, cached afterwards
+    expect(loaded!.compiled.scopeRegex.size).toBe(0);
     expect(scopeMatches(loaded!, memory, "src/db/store.ts")).toBe(true);
+    expect(loaded!.compiled.scopeRegex.get("m")).toBeInstanceOf(RegExp);
+    expect(loaded!.compiled.scopeRegex.size).toBe(1);
+    const eager = compileSnapshotRegexes(loaded!.snapshot.memories);
+    expect(eager.scopeRegex.get("m")).toBeInstanceOf(RegExp);
+    expect(eager.signatureRegex.get("m")).toBeInstanceOf(RegExp);
     expect(scopeMatches(loaded!, memory, "docs/readme.md")).toBe(false);
     expect(scopeMatches(loaded!, memory, "src\\db\\store.ts")).toBe(true);
 

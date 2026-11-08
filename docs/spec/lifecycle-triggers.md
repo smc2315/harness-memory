@@ -1,3 +1,6 @@
+<!-- v0.5-historical-banner -->
+> **Partly historical (v0.5).** The four lifecycle triggers (`session_start`, `before_model`, `before_tool`, `after_tool`) are unchanged in v0.6, but this page maps them to OpenCode plugin hooks and to system-prompt injection. v0.6 maps them to Claude Code hooks (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse(Failure)`), delivers `before_tool` through the enforcement ladder (`permissionDecision ask | deny`) and uses per-trigger budgets (5/3 KB, 5/3 KB, 3/2 KB, 2/1 KB) — spec §6.1, §7.2, §8.2 in [docs/redesign/spec-v0.6.md](../redesign/spec-v0.6.md). Kept for reference, not updated.
+
 # Lifecycle Triggers
 
 This document defines when and how memories are activated during the OpenCode session lifecycle. It maps memory system triggers to OpenCode plugin hook points.

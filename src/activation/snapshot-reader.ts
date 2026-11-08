@@ -32,10 +32,21 @@ export const SNAPSHOT_MTIME_TOLERANCE_MS = 1;
 export type SpawnWorkerFn = (command: "extract" | "dream" | "reindex", root: string) => number | null;
 
 export interface CompiledSnapshotRegexes {
-  /** memory id → compiled scope RegExp (absent for global rows). */
+  /**
+   * memory id → compiled scope RegExp. `readActiveSnapshot` starts with an empty map and `scopeMatches` fills it
+   * on first use (a PreToolUse call touches a handful of rows, never all 300); `compileSnapshotRegexes` fills it
+   * eagerly for CLI tools. Invalid sources are stored as a never-matching RegExp.
+   */
   scopeRegex: Map<string, RegExp>;
-  /** memory id → compiled glob/regex signature RegExp (cmd / substring signatures have none). */
+  /** memory id → compiled glob/regex signature RegExp (eager form only; `matchSignature` keeps its own cache). */
   signatureRegex: Map<string, RegExp>;
+}
+
+/** Never matches; stored for scope sources that fail to compile so they are not retried per call. */
+const NEVER_MATCHES = /(?!)/;
+
+export function emptyCompiledRegexes(): CompiledSnapshotRegexes {
+  return { scopeRegex: new Map(), signatureRegex: new Map() };
 }
 
 export interface LoadedSnapshot {
@@ -107,11 +118,14 @@ export function compileSnapshotRegexes(memories: readonly SnapshotMemory[]): Com
   return { scopeRegex, signatureRegex };
 }
 
-/** `scope_regex` null → global; otherwise the precompiled RegExp must match the normalized ref. */
+/** `scope_regex` null → global; otherwise the (lazily compiled, cached) RegExp must match the normalized ref. */
 export function scopeMatches(loaded: Pick<LoadedSnapshot, "compiled">, memory: Pick<SnapshotMemory, "id" | "scope_regex">, ref: string): boolean {
   if (memory.scope_regex === null) return true;
-  const regex = loaded.compiled.scopeRegex.get(memory.id);
-  if (regex === undefined) return false;
+  let regex = loaded.compiled.scopeRegex.get(memory.id);
+  if (regex === undefined) {
+    regex = memory.scope_regex.length > 0 ? (sharedRegExp(memory.scope_regex, globRegexFlags()) ?? NEVER_MATCHES) : NEVER_MATCHES;
+    loaded.compiled.scopeRegex.set(memory.id, regex);
+  }
   regex.lastIndex = 0;
   return regex.test(normalizeRef(ref));
 }
@@ -191,7 +205,7 @@ export function readActiveSnapshot(paths: HarnessPaths, options: ReadSnapshotOpt
   if (stale) requestReindex(paths, options);
   return {
     snapshot: parsed,
-    compiled: compileSnapshotRegexes(parsed.memories),
+    compiled: emptyCompiledRegexes(),
     stale,
     byId: new Map(parsed.memories.map((memory) => [memory.id, memory])),
   };

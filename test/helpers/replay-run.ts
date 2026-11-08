@@ -60,7 +60,7 @@ export function factFixture(overrides: Partial<ExtractionFact> = {}): Extraction
     trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "npm test" },
     lifecycle_triggers: ["before_tool"],
     confidence: 0.85,
-    evidence_refs: ["e1001"],
+    evidence_refs: ["e1"],
     knowledge_kind: "correction",
     rationale: "The user corrected the package manager.",
     aliases: ["pnpm test", "테스트 실행"],

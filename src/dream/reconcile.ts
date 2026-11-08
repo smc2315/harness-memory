@@ -96,7 +96,7 @@ export interface ReconcileContext {
   now: string;
   config: HarnessConfig;
   run: ReconcileRunInfo;
-  /** `e<seq>` → rendered line (from buildExtractionPrompt); excerpts and failure classes come from here. */
+  /** Positional event id (`e1`, `e2`, … from buildExtractionPrompt) → ledger line; excerpts, provenance seqs and failure classes come from here. */
   seqMap: ReadonlyMap<string, LedgerLine>;
   /** The corrected episode when `descriptor.correction_for` is set (failure classes union, §5.7 step 2). */
   correctionForEpisode?: EpisodeRecord | null;
@@ -143,11 +143,6 @@ function addMs(iso: string, ms: number): string {
 function oneLine(text: string, max: number): string {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`;
-}
-
-function seqOf(ref: string): number {
-  const parsed = Number.parseInt(ref.replace(/^e/, ""), 10);
-  return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
 }
 
 export function summaryTokens(summary: string): Set<string> {
@@ -486,7 +481,7 @@ function outcomeFor(fact: ValidatedFact, kind: FactOutcomeKind, extra: Partial<F
 function excerptFor(state: RunState, ref: string): string {
   const line = state.ctx.seqMap.get(ref);
   if (line === undefined) return "";
-  return oneLine(renderEventLine(line), 500);
+  return oneLine(renderEventLine(line, ref), 500);
 }
 
 function insertProvenance(state: RunState, memoryId: string, fact: ValidatedFact, relation: "origin" | "reinforce" | "contradict" | "import"): void {
@@ -494,7 +489,7 @@ function insertProvenance(state: RunState, memoryId: string, fact: ValidatedFact
     state.provenance.insert({
       memoryId,
       episodeId: state.descriptor.id,
-      eventSeq: state.isImport ? 0 : seqOf(ref),
+      eventSeq: state.isImport ? 0 : (state.ctx.seqMap.get(ref)?.seq ?? 0),
       relation,
       confidence: fact.confidence,
       excerpt: excerptFor(state, ref),

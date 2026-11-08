@@ -55,13 +55,13 @@ describe("buildExtractionPrompt (§5.4)", () => {
     expect(prompt).toContain("host: claude-code | close_reason: stop | evidence_weight: 2");
     expect(prompt).toContain("flags: failure, resolution");
     expect(prompt).toContain("tools used: bash");
-    expect(prompt).toContain("e2001 [prompt] correction=0 remember=0\n    run the tests");
-    expect(prompt).toContain("e2002 [tool_fail] bash(bash) class=exit_1 sig=bash|exit_1|pm test");
+    expect(prompt).toContain("e1 [prompt] correction=0 remember=0\n    run the tests");
+    expect(prompt).toContain("e2 [tool_fail] bash(bash) class=exit_1 sig=bash|exit_1|pm test");
     expect(prompt).toContain('Missing script: "test"');
-    expect(prompt).toContain("e2003 [tool_ok] bash(bash): ls → package.json pnpm-lock.yaml src");
-    expect(prompt).toContain("e2004 [tool_ok] bash(bash) resolves=bash|exit_1|pm test");
+    expect(prompt).toContain("e3 [tool_ok] bash(bash): ls → package.json pnpm-lock.yaml src");
+    expect(prompt).toContain("e4 [tool_ok] bash(bash) resolves=bash|exit_1|pm test");
     expect(prompt).toContain("Test Files  3 passed (3)");
-    expect(prompt).toContain("e2005 [assistant] Tests pass with pnpm test");
+    expect(prompt).toContain("e5 [assistant] Tests pass with pnpm test");
     expect(prompt).toContain("# Last assistant message\nTests pass with pnpm test");
     expect(prompt).toContain("[M:mem-1] [pitfall] [active/auto] scope=**/* sig=bash|command|cmd|pm test — Use pnpm test;");
     expect(prompt).toContain("# Canonical tool vocabulary");
@@ -73,8 +73,10 @@ describe("buildExtractionPrompt (§5.4)", () => {
     expect(prompt).toContain("aliases: up to 8");
     expect(prompt).toContain("# Output");
     expect(prompt).not.toContain("Korean");
-    expect([...seqMap.keys()]).toEqual(["e2001", "e2002", "e2003", "e2004", "e2005"]);
-    expect(seqMap.get("e2002")?.kind).toBe("tool_fail");
+    expect([...seqMap.keys()]).toEqual(["e1", "e2", "e3", "e4", "e5"]);
+    expect(seqMap.get("e2")?.kind).toBe("tool_fail");
+    expect(seqMap.get("e2")?.seq).toBe(2002);
+    expect(prompt).not.toContain("e2002");
   });
 
   test("context lines are marked not citable and never enter the seqMap", () => {
@@ -82,12 +84,13 @@ describe("buildExtractionPrompt (§5.4)", () => {
     const correction = fixtureTurn("s01-correction-only.jsonl", "p1");
     const correctionDescriptor = descriptorFor(correction, "p1", "episode-prev", corrected);
     const { prompt, seqMap } = buildExtractionPrompt({ descriptor: correctionDescriptor, lines: correction, contextLines: corrected });
-    expect(prompt).toContain("# Previous turn (context only — NOT citable, no e<seq> ids)");
+    expect(prompt).toContain("# Previous turn (context only — NOT citable, no event ids)");
     expect(prompt).toContain("(prev) tool_fail bash(powershell): & npm.cmd run build — exit_1:");
     expect(prompt).toContain("corrects a previous episode: yes");
     expect(prompt).toContain("flags: correction");
-    expect(seqMap.has("e7002")).toBe(false);
-    expect(seqMap.has("e1001")).toBe(true);
+    expect([...seqMap.keys()]).toEqual(["e1", "e2"]);
+    expect(seqMap.get("e1")?.seq).toBe(1001);
+    expect([...seqMap.values()].some((line) => line.seq === 7002)).toBe(false);
   });
 
   test("falls back to descriptor.context_ref when no context lines are passed", () => {
@@ -113,8 +116,27 @@ describe("buildExtractionPrompt (§5.4)", () => {
   test("subagent lines are not rendered", () => {
     const withAgent = [...lines, toolOkLine("sub", { seq: 2999, turn_key: "p2", agent_id: "agent-1" })];
     const { prompt, seqMap } = buildExtractionPrompt({ descriptor, lines: withAgent });
-    expect(seqMap.has("e2999")).toBe(false);
-    expect(prompt).not.toContain("e2999");
+    expect([...seqMap.keys()]).toEqual(["e1", "e2", "e3", "e4", "e5"]);
+    expect([...seqMap.values()].some((line) => line.seq === 2999)).toBe(false);
+    expect(prompt).not.toContain("bash(bash): sub");
+  });
+
+  test("real 16-digit ledger seqs render as e1..eN and the seqMap maps back to the raw seq", () => {
+    const base = 1_794_113_640_889_000; // makeSeq(Date.now()) scale
+    const ts = "2026-11-08T04:54:00.889Z";
+    const real = [
+      promptLine("아니, npm test 말고 pnpm vitest run", { seq: base, ts, turn_key: "p9", correction: 1 }),
+      toolOkLine("pnpm vitest run", { seq: base + 240_000, ts, turn_key: "p9" }),
+      assistantLine("Switched to pnpm vitest run.", { seq: base + 480_000, ts, turn_key: "p9" }),
+    ];
+    const { prompt, seqMap } = buildExtractionPrompt({ descriptor: { ...descriptor, turn_key: "p9" }, lines: real });
+    expect([...seqMap.keys()]).toEqual(["e1", "e2", "e3"]);
+    expect(seqMap.get("e1")?.seq).toBe(base);
+    expect(seqMap.get("e3")?.kind).toBe("assistant");
+    expect(prompt).toContain("e1 [prompt] correction=1");
+    expect(prompt).toContain("e2 [tool_ok] bash(bash): pnpm vitest run");
+    expect(prompt).not.toContain(String(base));
+    for (const key of seqMap.keys()) expect(key).toMatch(/^e[0-9]{1,4}$/);
   });
 
   test("renderEventLine shapes", () => {
@@ -138,11 +160,13 @@ describe("hard cap (24,000 chars)", () => {
     const { prompt, seqMap, droppedLines } = buildExtractionPrompt({ descriptor, lines, existingMemories: [memory] });
     expect(prompt.length).toBeLessThanOrEqual(EXTRACTION_LIMITS.prompt_chars);
     expect(droppedLines).toBeGreaterThan(0);
-    expect(seqMap.has("e1")).toBe(true);
-    expect(seqMap.has("e500")).toBe(true);
-    expect(seqMap.has("e501")).toBe(true);
-    expect(seqMap.has("e10")).toBe(false);
-    expect(seqMap.has("e129")).toBe(true);
+    const kept = [...seqMap.values()];
+    expect(seqMap.get("e1")?.kind).toBe("prompt");
+    expect(kept.some((line) => line.seq === 500)).toBe(true); // the failure stays citable
+    expect(kept.some((line) => line.seq === 501)).toBe(true); // and its resolution
+    expect(kept.some((line) => line.seq === 10)).toBe(false); // the oldest routine line went first
+    expect(kept.some((line) => line.seq === 129)).toBe(true); // the newest routine line survives
+    expect([...seqMap.keys()]).toEqual(kept.map((_line, index) => `e${String(index + 1)}`)); // ids are dense after drops
     expect(prompt).toContain("[M:mem-1]");
     expect(seqMap.size).toBe(lines.length - droppedLines);
   });

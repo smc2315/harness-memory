@@ -75,8 +75,21 @@ function isProtected(line: LedgerLine): boolean {
   return line.kind === "tool_ok" && line.resolution_of !== null;
 }
 
+/**
+ * Raw-seq form (`e<seq>`), used only when a line is rendered on its own (tests, debugging). The prompt
+ * itself numbers its events positionally — see `ordinalRef`.
+ */
 export function seqRef(line: Pick<LedgerLine, "seq">): string {
   return `e${line.seq}`;
+}
+
+/**
+ * Positional event id of the i-th rendered line (`e1`, `e2`, …). Ledger seqs are 16-digit timestamps, so the
+ * prompt renumbers the kept lines in render order; the returned `seqMap` maps these ids back to the ledger
+ * lines (the extraction schema and V1 accept `^e[0-9]{1,4}$` only).
+ */
+export function ordinalRef(index: number): string {
+  return `e${index + 1}`;
 }
 
 function renderToolHeader(line: ToolOkLine | ToolFailLine): string {
@@ -85,8 +98,7 @@ function renderToolHeader(line: ToolOkLine | ToolFailLine): string {
 }
 
 /** One rendered event: failures and resolutions in full, everything else on one summarized line. */
-export function renderEventLine(line: LedgerLine): string {
-  const ref = seqRef(line);
+export function renderEventLine(line: LedgerLine, ref: string = seqRef(line)): string {
   switch (line.kind) {
     case "prompt":
       return `${ref} [prompt] correction=${line.correction} remember=${line.remember}\n${block(line.text, EXTRACTION_LIMITS.prompt_chars)}`;
@@ -151,7 +163,7 @@ bash, edit, write, read, grep, glob, fetch, task, mcp:<server>/<tool>, other. Ba
 Command patterns use the canonical form: "npm|pnpm|yarn|bun [run] <script>" → "pm <script>", "npx|pnpm dlx|bunx <bin>" → "bin <bin>"; flags stay as tokens (e.g. "pm test", "git push --force", "bin vitest run").
 
 # What to extract
-Only knowledge that changes what a future turn should do in this repository. Every fact cites at least one e<seq> event that shows it; previous-turn context lines are not citable.
+Only knowledge that changes what a future turn should do in this repository. Every fact cites at least one event id from the Events section (e1, e2, …) that shows it; previous-turn context lines are not citable.
 Types:
 - pitfall: an action → consequence pair learned from a failure or a user correction, with a trigger_signature so it surfaces right before the same action.
 - policy: a standing rule that spans tools or has no specific signature.
@@ -171,7 +183,7 @@ Boundary rules:
 - nothing_to_learn: true with an empty facts array when the episode teaches nothing durable (routine read-only work, generic knowledge).
 
 # Output
-Return only JSON matching the provided schema: {"episode_summary": string (≤ 400 chars), "nothing_to_learn": boolean, "facts": [{"action", "target_memory_id", "type", "summary" (12–160 chars), "details" (≤ 1200), "scope_glob", "relevant_tools", "trigger_signature" | null, "lifecycle_triggers", "confidence", "evidence_refs": ["e<seq>"], "knowledge_kind", "rationale" (≤ 300), "aliases"}]}. No prose outside the JSON.`;
+Return only JSON matching the provided schema: {"episode_summary": string (≤ 400 chars), "nothing_to_learn": boolean, "facts": [{"action", "target_memory_id", "type", "summary" (12–160 chars), "details" (≤ 1200), "scope_glob", "relevant_tools", "trigger_signature" | null, "lifecycle_triggers", "confidence", "evidence_refs": ["e<n>"], "knowledge_kind", "rationale" (≤ 300), "aliases"}]}. No prose outside the JSON.`;
 
 function render(
   descriptor: EpisodeDescriptor,
@@ -195,10 +207,10 @@ function render(
     ].join("\n")
   );
   if (contextText !== null) {
-    sections.push(`# Previous turn (context only — NOT citable, no e<seq> ids)\n${contextText}`);
+    sections.push(`# Previous turn (context only — NOT citable, no event ids)\n${contextText}`);
   }
   sections.push(
-    `# Events (cite these ids in evidence_refs)\n${kept.length === 0 ? "(none)" : kept.map((entry) => renderEventLine(entry.line)).join("\n")}`
+    `# Events (cite these ids in evidence_refs)\n${kept.length === 0 ? "(none)" : kept.map((entry, index) => renderEventLine(entry.line, ordinalRef(index))).join("\n")}`
   );
   sections.push(
     `# Last assistant message\n${descriptor.last_assistant_message === null ? "(none)" : oneLine(descriptor.last_assistant_message, LAST_ASSISTANT_CHARS)}`
@@ -211,7 +223,7 @@ function render(
 
 function toSeqMap(kept: readonly KeptLine[]): Map<string, LedgerLine> {
   const map = new Map<string, LedgerLine>();
-  for (const entry of kept) map.set(seqRef(entry.line), entry.line);
+  kept.forEach((entry, index) => map.set(ordinalRef(index), entry.line));
   return map;
 }
 

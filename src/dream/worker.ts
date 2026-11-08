@@ -54,6 +54,7 @@ import {
 } from "./extract/providers";
 import { readLedgerRangeLines } from "./ledger";
 import { recordExtractionFailure, reconcileRun, type ReconcileRunInfo, type ReconcileWriteOp } from "./reconcile";
+import { createTransformersEmbedder, type Embedder } from "../embed/helper";
 
 export const WORKER_COMMANDS = ["extract", "dream", "reindex", "import"] as const;
 export type WorkerCommand = (typeof WORKER_COMMANDS)[number];
@@ -124,6 +125,26 @@ export function composeStoreHooks(config: HarnessConfig): StoreHooks {
     postMigrate: (db, ctx) => runPostMigrate(db, { now: ctx.now, logger: ctx.logger }),
     deriveRules: (db, ctx: WriteContext) => derivePolicyRules(db, { now: ctx.now }),
     buildSnapshot: (db, ctx: WriteContext) => buildSnapshot(db, ctx.paths, { now: ctx.now, config, generation: ctx.generation }),
+  };
+}
+
+/**
+ * Document-side embedder (`EmbedFn` for backfillEmbeddings): lazily loads the same @xenova/transformers pipeline
+ * the embedding helper uses, with the e5 `passage: ` prefix. Null when embeddings are disabled; an empty batch
+ * only warms the model. Shared by the detached worker entry and the in-process CLI runs.
+ */
+export function createWorkerEmbed(config: HarnessConfig): EmbedFn | null {
+  if (!config.embeddings.enabled) return null;
+  const factory = createTransformersEmbedder(config);
+  let loading: Promise<Embedder> | null = null;
+  return async (texts: string[]): Promise<Float32Array[]> => {
+    loading ??= factory();
+    const embedder = await loading;
+    const vectors: Float32Array[] = [];
+    for (const text of texts) {
+      vectors.push(embedder.embedPassage !== undefined ? await embedder.embedPassage(text) : await embedder.embedQuery(text));
+    }
+    return vectors;
   };
 }
 

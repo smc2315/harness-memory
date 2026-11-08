@@ -1,0 +1,75 @@
+{
+  "A/p21": {
+    "episode_summary": "npm test failed with a missing script.",
+    "nothing_to_learn": false,
+    "facts": [
+      {
+        "action": "create",
+        "target_memory_id": null,
+        "type": "pitfall",
+        "summary": "Use pnpm test rather than npm test; the npm script is missing in this repository.",
+        "details": "npm test exits 1 with 'Missing script: test'.",
+        "scope_glob": "**/*",
+        "relevant_tools": [
+          "bash"
+        ],
+        "trigger_signature": {
+          "tool": "bash",
+          "target": "command",
+          "pattern_kind": "cmd",
+          "pattern": "npm test"
+        },
+        "lifecycle_triggers": [
+          "before_tool"
+        ],
+        "confidence": 0.85,
+        "evidence_refs": [
+          "e2102"
+        ],
+        "knowledge_kind": "failure_resolution",
+        "rationale": "The npm script does not exist.",
+        "aliases": [
+          "pnpm test",
+          "테스트 실행"
+        ]
+      }
+    ]
+  },
+  "B/p22": {
+    "episode_summary": "npm test failed again; pnpm test ran the suite.",
+    "nothing_to_learn": false,
+    "facts": [
+      {
+        "action": "reinforce",
+        "target_memory_id": "$created:A/p21",
+        "type": "pitfall",
+        "summary": "Use pnpm test rather than npm test; the npm script is missing in this repository.",
+        "details": "npm test exits 1 with 'Missing script: test'.",
+        "scope_glob": "**/*",
+        "relevant_tools": [
+          "bash"
+        ],
+        "trigger_signature": {
+          "tool": "bash",
+          "target": "command",
+          "pattern_kind": "cmd",
+          "pattern": "npm test"
+        },
+        "lifecycle_triggers": [
+          "before_tool"
+        ],
+        "confidence": 0.85,
+        "evidence_refs": [
+          "e2202",
+          "e2204"
+        ],
+        "knowledge_kind": "failure_resolution",
+        "rationale": "The npm script does not exist.",
+        "aliases": [
+          "pnpm test",
+          "테스트 실행"
+        ]
+      }
+    ]
+  }
+}
