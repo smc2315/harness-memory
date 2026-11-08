@@ -317,6 +317,13 @@ Review findings that changed something:
 | `npm run package:verify` | OK after the script fix | — |
 | Live `claude -p` | probe ok; two full extraction runs (§4b) | — |
 
+## 10b. Positioning research
+
+A separate four-agent sweep of public sources (claude-mem today, Claude Code native memory, the wider landscape, then a
+synthesis) is written up in `docs/redesign/positioning-2026-11.md`: differentiation is clear and verifiable,
+demand is not validated; the wedge is open, narrow, copyable and unproven; a two-to-four-week validation plan and
+the design directions A / A′ / B / C are there.
+
 ## 11. The critic's 18 gaps and what happened to each
 
 The completeness critic ran against commit 40db65d. Status after the follow-up work of the same evening:
