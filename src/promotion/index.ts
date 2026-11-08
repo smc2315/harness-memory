@@ -43,3 +43,5 @@ export {
   type RevalidateSkipReason,
   type RevalidationPlan,
 } from "./revalidate";
+// Proposals (Phase B1): open/support, human and auto decisions, auto-demotion evaluation, expiry.
+export * from "./proposals";

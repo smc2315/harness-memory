@@ -4,12 +4,16 @@ import {
   type MemoryStatus,
   type MemoryType,
 } from "../db/schema/types";
-import type { MemoryRecord } from "../memory";
+import type { MemoryRecord, MemoryRepository } from "../memory";
+
+/** The read-only slice of the repository the engine needs (spec §6.4); any object with these three methods works. */
+export type MemoryReader = Pick<MemoryRepository, "list" | "getById" | "listLineageConflicts">;
 
 export type ActivationSuppressionKind =
   | "trigger_mismatch"
   | "scope_mismatch"
   | "tool_mismatch"
+  | "signature_mismatch"
   | "status_inactive"
   | "ttl_expired"
   | "budget_limit"
@@ -34,6 +38,11 @@ export interface ActivationRequest {
   queryTokens?: string[];
   repoFingerprint?: string[];
   toolName?: string;
+  /** Command text / repository-relative path / URL / MCP JSON digest of the tool call (signature matching). */
+  toolTarget?: string | null;
+  toolInput?: unknown;
+  /** `scope_refs[0]` of the last tool line in the session ledger (§6.2 step 4). */
+  lastScopeRef?: string | null;
   maxMemories?: number;
   maxPayloadBytes?: number;
   /** When true, include superseded memories for temporal context (e.g., showing what changed) */

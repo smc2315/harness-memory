@@ -93,25 +93,27 @@ export function stateDirectories(paths: HarnessPaths): string[] {
 
 /**
  * Project root = first ancestor of `cwd` (inclusive) containing `.harness-memory/`; otherwise the
- * first ancestor containing `.git/`; otherwise `cwd` itself (spec §3.4).
+ * first ancestor containing `.git/`; otherwise `cwd` itself (spec §3.4). The user-level
+ * `~/.harness-memory/` (model cache, worker cwd, v0.5 global DB) is never a project install.
  */
 export function findProjectRoot(cwd: string): string {
   const start = resolve(cwd);
-  const withHarness = findAncestorContaining(start, HARNESS_DIR_NAME);
+  const withHarness = findAncestorContaining(start, HARNESS_DIR_NAME, userHarnessDir());
   if (withHarness !== null) return withHarness;
   const withGit = findAncestorContaining(start, ".git");
   return withGit ?? start;
 }
 
-/** Null when no ancestor has `.harness-memory/` (hooks then exit immediately with status not_installed). */
+/** Null when no ancestor has a project-level `.harness-memory/` (hooks then exit immediately with status not_installed). */
 export function findInstalledRoot(cwd: string): string | null {
-  return findAncestorContaining(resolve(cwd), HARNESS_DIR_NAME);
+  return findAncestorContaining(resolve(cwd), HARNESS_DIR_NAME, userHarnessDir());
 }
 
-function findAncestorContaining(start: string, name: string): string | null {
+function findAncestorContaining(start: string, name: string, excludeDir?: string): string | null {
   let current = start;
   for (;;) {
-    if (existsSync(join(current, name))) return current;
+    const candidate = join(current, name);
+    if ((excludeDir === undefined || resolve(candidate) !== resolve(excludeDir)) && existsSync(candidate)) return current;
     const parent = dirname(current);
     if (parent === current) return null;
     current = parent;

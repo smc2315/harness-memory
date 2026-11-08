@@ -286,6 +286,31 @@ export class EpisodeRepository {
     );
   }
 
+  /**
+   * Puts one leased/failed episode back to `queued` at `nextAttemptAt` outside the normal backoff accounting:
+   * provider-unavailable outcomes (no_provider / not_logged_in / nested_refusal, m0-facts #3) must not burn one
+   * of the three attempts, so `undoAttempt` reverses the increment the lease made.
+   */
+  requeue(id: string, options: { nextAttemptAt: string; undoAttempt?: boolean; lastError?: string | null }): void {
+    this.db.run(
+      `
+        UPDATE episodes
+        SET status = 'queued',
+            lease_until = NULL,
+            attempt_count = CASE WHEN $undo = 1 THEN MAX(0, attempt_count - 1) ELSE attempt_count END,
+            next_attempt_at = $next,
+            last_error = COALESCE($error, last_error)
+        WHERE id = $id
+      `,
+      {
+        $id: id,
+        $next: options.nextAttemptAt,
+        $undo: options.undoAttempt === true ? 1 : 0,
+        $error: options.lastError === undefined || options.lastError === null ? null : truncateText(options.lastError, MAX_ERROR_CHARS),
+      }
+    );
+  }
+
   /** `leased` rows whose lease ended at or before `now` go back to `queued` (§9.4 F3). Returns the count. */
   releaseExpiredLeases(now: string): number {
     this.db.run(

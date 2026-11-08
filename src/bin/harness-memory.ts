@@ -1,8 +1,15 @@
 #!/usr/bin/env node
-// Placeholder entry point while the v0.6 CLI is rebuilt (implementation-plan.md §4 B3 replaces this file).
-// The v0.5 per-command scripts under src/cli/ were retired in Phase A6.
+// `harness-memory` / `hm` binary (spec §11). All logic lives in src/cli/main.ts so tests can run the
+// dispatcher in-process; this file only maps the result to the process exit code.
 
-const message = "harness-memory v0.6: CLI is being rebuilt; use `npm run build` after Phase B";
+import { runCli } from "../cli/main";
 
-console.error(message);
-process.exit(1);
+runCli(process.argv.slice(2)).then(
+  (code) => {
+    process.exitCode = code;
+  },
+  (error: unknown) => {
+    process.stderr.write(`hm crashed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`);
+    process.exitCode = 1;
+  }
+);

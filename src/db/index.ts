@@ -111,3 +111,23 @@ export {
   type WriteOpRecord,
 } from "./repositories";
 export type * from "./schema/types";
+// Snapshot builder (Phase B1): the three snapshot files every writer rebuilds after a commit (§4.8).
+export {
+  buildLexicalSnapshot,
+  buildSnapshot,
+  buildSnapshotData,
+  createLexicalIndex,
+  decodeDenseSnapshot,
+  encodeDenseSnapshot,
+  LEXICAL_FIELDS,
+  SNAPSHOT_DETAILS_CHARS,
+  SNAPSHOT_RECENT_SUMMARIES,
+  snapshotFileName,
+  sourceFileOf,
+  toSnapshotMemory,
+  type BuildSnapshotOptions,
+  type MemoryConversion,
+  type SnapshotBuildResult,
+  type SnapshotData,
+  type UnreachableMemory,
+} from "./snapshot";

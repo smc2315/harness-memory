@@ -127,6 +127,11 @@ export interface LexicalSnapshot {
   db_generation: number;
   /** Fields indexed in the MiniSearch document (`summary`, `details`, `aliases`). */
   fields: string[];
+  /**
+   * Tokenizer the builder used (`LEXICAL_TOKENIZER_ID` from src/activation/lexical-snapshot.ts). Absent =
+   * MiniSearch defaults; the reader must query with the same tokenizer the posting lists were built with.
+   */
+  tokenizer?: string;
   /** `MiniSearch.toJSON()` output; loaded with `MiniSearch.loadJSON`. */
   index: unknown;
   recent_summaries: RecentSummary[];

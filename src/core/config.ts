@@ -31,6 +31,8 @@ export interface HarnessConfig {
     min_score: number;
     /** `helper` = idle-exit embedding helper over a named pipe; `off` = lexical only. */
     dense: "helper" | "off";
+    /** How long before_model waits for the helper's dense top-k before continuing lexical-only (ms). */
+    dense_timeout_ms: number;
   };
   session_start: TriggerBudget;
   after_tool: TriggerBudget;
@@ -73,7 +75,7 @@ export const DEFAULT_CONFIG: HarnessConfig = {
   schema: "config.v1",
   autonomy_level: "standard",
   before_tool: { max_items: 3, max_bytes: 2_048, auto_enforcement: "soft_deny", hard_policy: "confirm" },
-  before_model: { max_items: 5, max_bytes: 3_072, min_score: 0.35, dense: "helper" },
+  before_model: { max_items: 5, max_bytes: 3_072, min_score: 0.35, dense: "helper", dense_timeout_ms: 80 },
   session_start: { max_items: 5, max_bytes: 3_072 },
   after_tool: { max_items: 2, max_bytes: 1_024 },
   extraction: {
@@ -143,6 +145,7 @@ export function mergeConfig(base: HarnessConfig, override: unknown): HarnessConf
       ...pickBudget(override.before_model, base.before_model),
       min_score: pickNumber(beforeModel.min_score, base.before_model.min_score),
       dense: pickEnum(beforeModel.dense, ["helper", "off"] as const, base.before_model.dense),
+      dense_timeout_ms: pickNumber(beforeModel.dense_timeout_ms, base.before_model.dense_timeout_ms, 1),
     },
     session_start: pickBudget(override.session_start, base.session_start),
     after_tool: pickBudget(override.after_tool, base.after_tool),

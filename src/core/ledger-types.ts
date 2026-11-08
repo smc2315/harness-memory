@@ -141,6 +141,8 @@ export interface SessionState {
   correction_for?: string;
   /** Id of the most recently closed episode (becomes correction_for on a correcting prompt). */
   last_episode_id?: string;
+  /** Ledger byte range of that episode; the stop hook renders its tool lines into `context_ref` (§5.2). */
+  last_episode_range?: { start: number; end: number };
   /** Daily systemMessage throttle (ISO date of the last digest). */
   last_digest_date?: string;
   updated_at: string;

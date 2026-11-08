@@ -1,0 +1,281 @@
+/**
+ * `hm install` / `hm uninstall` into a temp project: settings merge (idempotent, foreign hooks kept),
+ * .git/info/exclude, install-manifest.json, config.json, migrated database + snapshot, the real hook
+ * self-test against a fake dist/hook.js, --user scope, --with-embeddings via the npm seam, shell form for
+ * an old host, probe guidance; uninstall strips exactly our entries, --purge keeps the backups.
+ */
+
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+
+import type { InstallReport } from "../src/cli/commands/install";
+import type { UninstallReport } from "../src/cli/commands/uninstall";
+import type { InstallManifest } from "../src/cli/lib/manifest";
+import { listHarnessHooks } from "../src/cli/lib/settings";
+import { TARGET_USER_VERSION } from "../src/core/paths";
+import type { ProbeResult } from "../src/core/vocabulary";
+import { getMeta } from "../src/db/meta";
+import { loadSqlJs } from "../src/db/sqlite";
+import type { ExtractionProvider } from "../src/dream/extract/providers";
+import { createCliProject, runHm, type CliProject } from "./helpers/cli-run";
+
+let project: CliProject;
+
+beforeEach(() => {
+  project = createCliProject();
+});
+
+afterEach(() => {
+  project.cleanup();
+});
+
+function readJson<T = Record<string, unknown>>(file: string): T {
+  return JSON.parse(readFileSync(file, "utf8")) as T;
+}
+
+async function readUserVersion(file: string): Promise<{ version: number; installed: string | null }> {
+  const SQL = await loadSqlJs();
+  const db = new SQL.Database(readFileSync(file));
+  try {
+    const version = Number(db.exec("PRAGMA user_version")[0]!.values[0]![0]);
+    return { version, installed: getMeta(db, "installed_version") };
+  } finally {
+    db.close();
+  }
+}
+
+describe("hm install --host claude", () => {
+  test("registers exec-form hooks, migrates, builds the snapshot, excludes the settings file and passes the self-test", async () => {
+    const result = await runHm(project, ["install", "--host", "claude", "--json"]);
+    expect(result.stderr).toBe("");
+    expect(result.code).toBe(0);
+    const report = result.json<InstallReport>();
+    expect(report.ok).toBe(true);
+    expect(report.hook_form).toBe("exec");
+    expect(report.events).toHaveLength(9);
+    expect(report.database.user_version).toBe(TARGET_USER_VERSION);
+    expect(report.database.migrated_from).toBe(0);
+    expect(report.database.snapshot_built).toBe(true);
+    expect(report.snapshot_counts).toEqual({ active: 0, candidates: 0, unreachable: 0 });
+    expect(report.git_exclude).toEqual({ path: join(project.root, ".git", "info", "exclude"), added: true, already: false });
+    expect(report.probe.skipped).toBe(false);
+    expect(report.probe.provider).toBeNull();
+    expect("skipped" in report.self_test).toBe(false);
+    if (!("skipped" in report.self_test)) {
+      expect(report.self_test.ok).toBe(true);
+      expect(report.self_test.logEntry?.event).toBe("session-start");
+    }
+
+    const settingsFile = join(project.root, ".claude", "settings.local.json");
+    const settings = readJson<{ hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ command: string; args: string[]; timeout: number }> }>> }>(settingsFile);
+    expect(Object.keys(settings.hooks).sort()).toEqual(["PostToolUse", "PostToolUseFailure", "PreCompact", "PreToolUse", "SessionEnd", "SessionStart", "Stop", "StopFailure", "UserPromptSubmit"]);
+    const preTool = settings.hooks.PreToolUse![0]!;
+    expect(preTool.matcher).toBe("Bash|PowerShell|Edit|MultiEdit|Write|NotebookEdit|WebFetch|mcp__.*");
+    expect(preTool.hooks[0]).toEqual({ type: "command", command: process.execPath, args: [project.hookScript, "pre-tool"], timeout: 5 });
+    expect(settings.hooks.SessionEnd![0]!.hooks[0]!.timeout).toBe(1);
+    expect(settings.hooks.SessionStart![0]!.matcher).toBeUndefined();
+
+    expect(readFileSync(join(project.root, ".git", "info", "exclude"), "utf8")).toBe(".claude/settings.local.json\n");
+    expect(existsSync(project.paths.snapshotActive)).toBe(true);
+    expect(existsSync(project.paths.snapshotLexical)).toBe(true);
+    expect(readJson(project.paths.config).schema).toBe("config.v1");
+    const db = await readUserVersion(project.paths.db);
+    expect(db.version).toBe(TARGET_USER_VERSION);
+    expect(db.installed).toMatch(/^\d+\.\d+\.\d+/);
+    expect(readFileSync(project.paths.hooksLog, "utf8")).toMatch(/ session-start /);
+
+    const manifest = readJson<InstallManifest>(project.paths.manifest);
+    expect(manifest.schema).toBe("install-manifest.v1");
+    expect(manifest.node).toBe(process.execPath);
+    expect(manifest.hook_script).toBe(project.hookScript);
+    expect(manifest.settings_file).toBe(settingsFile);
+    expect(manifest.scope).toBe("project");
+    expect(manifest.claude_version).toBe("2.1.172");
+    expect(manifest.files.map((file) => file.role).sort()).toEqual(["config", "git_exclude", "hook_script", "settings", "worker_script"]);
+    expect(manifest.files.find((file) => file.role === "settings")!.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(manifest.files.find((file) => file.role === "settings")!.created).toBe(true);
+  });
+
+  test("is idempotent and keeps foreign hooks while replacing an earlier install's entries", async () => {
+    const settingsFile = join(project.root, ".claude", "settings.local.json");
+    mkdirSync(join(project.root, ".claude"), { recursive: true });
+    const foreign = { type: "command", command: "echo hi", timeout: 3 };
+    const old = { type: "command", command: "/old/node", args: ["/old/harness-memory/dist/hook.js", "pre-tool"], timeout: 5 };
+    writeFileSync(settingsFile, JSON.stringify({ permissions: { allow: ["Bash(ls)"] }, hooks: { PreToolUse: [{ matcher: "Bash", hooks: [foreign, old] }] } }, null, 2));
+    writeFileSync(join(project.root, ".git", "info", "exclude"), "node_modules\n.claude/settings.local.json\n");
+
+    const first = await runHm(project, ["install", "--host", "claude", "--skip-probe", "--skip-self-test", "--json"]);
+    expect(first.code).toBe(0);
+    expect(first.json<InstallReport>().replaced_entries).toBe(1);
+    expect(first.json<InstallReport>().git_exclude).toEqual({ path: join(project.root, ".git", "info", "exclude"), added: false, already: true });
+    const afterFirst = readFileSync(settingsFile, "utf8");
+    const parsed = JSON.parse(afterFirst) as { permissions: unknown; hooks: Record<string, Array<{ matcher?: string; hooks: unknown[] }>> };
+    expect(parsed.permissions).toEqual({ allow: ["Bash(ls)"] });
+    expect(parsed.hooks.PreToolUse).toHaveLength(2);
+    expect(parsed.hooks.PreToolUse![0]).toEqual({ matcher: "Bash", hooks: [foreign] });
+    expect(listHarnessHooks(parsed)).toHaveLength(9);
+
+    const second = await runHm(project, ["install", "--host", "claude", "--skip-probe", "--skip-self-test", "--json"]);
+    expect(second.code).toBe(0);
+    expect(second.json<InstallReport>().replaced_entries).toBe(9);
+    expect(second.json<InstallReport>().database.migrated_from).toBeNull();
+    expect(readFileSync(settingsFile, "utf8")).toBe(afterFirst);
+    expect(readFileSync(join(project.root, ".git", "info", "exclude"), "utf8")).toBe("node_modules\n.claude/settings.local.json\n");
+    expect(readJson<InstallManifest>(project.paths.manifest).files.find((file) => file.role === "settings")!.created).toBe(false);
+  });
+
+  test("--user writes ~/.claude/settings.json (CLAUDE_CONFIG_DIR) and skips the git exclude", async () => {
+    const result = await runHm(project, ["install", "--host", "claude", "--user", "--skip-probe", "--skip-self-test", "--json"]);
+    expect(result.code).toBe(0);
+    const report = result.json<InstallReport>();
+    expect(report.scope).toBe("user");
+    expect(report.settings_file).toBe(join(project.configDir, "settings.json"));
+    expect(report.git_exclude).toBeNull();
+    expect(existsSync(join(project.root, ".claude", "settings.local.json"))).toBe(false);
+    expect(listHarnessHooks(readJson(join(project.configDir, "settings.json")))).toHaveLength(9);
+    expect(existsSync(join(project.root, ".git", "info", "exclude"))).toBe(false);
+    expect(readJson<InstallManifest>(project.paths.manifest).scope).toBe("user");
+  });
+
+  test("writes shell form with powershell when the host is older than the exec-form minimum and Git Bash is absent", async () => {
+    const result = await runHm(project, ["install", "--host", "claude", "--skip-probe", "--skip-self-test", "--json"], {
+      platform: "win32",
+      seams: { detectClaudeVersion: () => "2.1.100", findGitBash: () => null },
+    });
+    expect(result.code).toBe(0);
+    const report = result.json<InstallReport>();
+    expect(report.hook_form).toBe("shell");
+    expect(report.shell).toBe("powershell");
+    expect(report.warnings.some((warning) => warning.includes("Git Bash"))).toBe(true);
+    const entries = listHarnessHooks(readJson(report.settings_file));
+    expect(entries).toHaveLength(9);
+    expect(entries[0]!.command.args).toBeUndefined();
+    expect(entries[0]!.command.command).toBe(`"${process.execPath}" "${project.hookScript}" ${entries[0]!.event}`);
+    expect(entries[0]!.command.shell).toBe("powershell");
+  });
+
+  test("--with-embeddings runs npm through the seam and enables embeddings only on success", async () => {
+    const calls: Array<{ args: readonly string[]; cwd: string }> = [];
+    const ok = await runHm(project, ["install", "--host", "claude", "--with-embeddings", "--skip-probe", "--skip-self-test", "--json"], {
+      seams: {
+        runNpm: (args, cwd) => {
+          calls.push({ args, cwd });
+          return { ok: true, output: "added 1 package" };
+        },
+      },
+    });
+    expect(ok.code).toBe(0);
+    expect(calls).toEqual([{ args: ["install", "@xenova/transformers"], cwd: expect.any(String) }]);
+    expect(ok.json<InstallReport>().config.embeddings_enabled).toBe(true);
+    expect(readJson<{ embeddings: { enabled: boolean } }>(project.paths.config).embeddings.enabled).toBe(true);
+
+    const failing = createCliProject();
+    try {
+      const bad = await runHm(failing, ["install", "--host", "claude", "--with-embeddings", "--skip-probe", "--skip-self-test", "--json"], {
+        seams: { runNpm: () => ({ ok: false, output: "npm ERR! network" }) },
+      });
+      expect(bad.code).toBe(1);
+      const report = bad.json<InstallReport>();
+      expect(report.ok).toBe(false);
+      expect(report.config.embeddings_enabled).toBe(false);
+      expect(report.warnings.some((warning) => warning.startsWith("npm install"))).toBe(true);
+    } finally {
+      failing.cleanup();
+    }
+  });
+
+  test("probes the provider, caches the result in meta and prints the not_logged_in guidance", async () => {
+    const provider: ExtractionProvider = {
+      name: "claude",
+      probe: async () => "not_logged_in" as ProbeResult,
+      extract: async () => ({ status: "no_provider", raw: "" }),
+    };
+    const result = await runHm(project, ["install", "--host", "claude", "--skip-self-test"], { seams: { provider } });
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("probe not_logged_in");
+    expect(result.stdout).toContain("/login");
+    const SQL = await loadSqlJs();
+    const db = new SQL.Database(readFileSync(project.paths.db));
+    try {
+      expect(getMeta(db, "last_probe_result")).toBe("not_logged_in");
+      expect(getMeta(db, "last_probe_at")).toMatch(/^\d{4}-/);
+    } finally {
+      db.close();
+    }
+    const snapshot = readJson<{ last_probe: { result: string } | null }>(project.paths.snapshotActive);
+    expect(snapshot.last_probe?.result).toBe("not_logged_in");
+  });
+
+  test("refuses unknown hosts and a missing hook script", async () => {
+    const codex = await runHm(project, ["install", "--host", "codex"]);
+    expect(codex.code).toBe(2);
+    expect(codex.stderr).toContain("not in this build");
+    const missing = await runHm(project, ["install", "--host", "claude", "--hook-script", join(project.root, "nope", "hook.js")]);
+    expect(missing.code).toBe(1);
+    expect(missing.stderr).toContain("hook script not found");
+    expect(existsSync(project.paths.manifest)).toBe(false);
+  });
+
+  test("reports a failing self-test as exit 1 but leaves the install in place", async () => {
+    const result = await runHm(project, ["install", "--host", "claude", "--skip-probe", "--json"], {
+      seams: { selfTest: () => ({ ok: false, event: "session-start", exitCode: 1, signal: null, logEntry: null, stdout: "", stderr: "boom", error: "hook exited with code 1", durationMs: 5 }) },
+    });
+    expect(result.code).toBe(1);
+    const report = result.json<InstallReport>();
+    expect(report.ok).toBe(false);
+    expect(existsSync(project.paths.manifest)).toBe(true);
+  });
+});
+
+describe("hm uninstall", () => {
+  test("removes our hooks, the exclude line and the manifest; keeps foreign hooks and the data", async () => {
+    const settingsFile = join(project.root, ".claude", "settings.local.json");
+    mkdirSync(join(project.root, ".claude"), { recursive: true });
+    const foreign = { type: "command", command: "echo hi", timeout: 3 };
+    writeFileSync(settingsFile, JSON.stringify({ hooks: { Stop: [{ hooks: [foreign] }] } }));
+    expect((await runHm(project, ["install", "--host", "claude", "--skip-probe", "--skip-self-test"])).code).toBe(0);
+
+    const result = await runHm(project, ["uninstall", "--json"]);
+    expect(result.code).toBe(0);
+    const report = result.json<UninstallReport>();
+    expect(report.manifest_found).toBe(true);
+    expect(report.settings[0]).toEqual({ file: settingsFile, removed: 9, deleted_file: false, error: null });
+    expect(report.git_exclude_removed).toBe(true);
+    expect(report.manifest_removed).toBe(true);
+    expect(readJson(settingsFile)).toEqual({ hooks: { Stop: [{ hooks: [foreign] }] } });
+    expect(readFileSync(join(project.root, ".git", "info", "exclude"), "utf8")).toBe("\n");
+    expect(existsSync(project.paths.manifest)).toBe(false);
+    expect(existsSync(project.paths.db)).toBe(true);
+  });
+
+  test("deletes a settings file it created once it is empty, and --purge keeps only the .bak-v<N> backups", async () => {
+    expect((await runHm(project, ["install", "--host", "claude", "--skip-probe", "--skip-self-test"])).code).toBe(0);
+    writeFileSync(project.paths.dbBackup(9), "backup bytes");
+    writeFileSync(join(project.paths.dir, ".conversation-buffer.json"), "{}");
+
+    const result = await runHm(project, ["uninstall", "--purge", "--json"]);
+    expect(result.code).toBe(0);
+    const report = result.json<UninstallReport>();
+    expect(report.settings[0]!.deleted_file).toBe(true);
+    expect(existsSync(join(project.root, ".claude", "settings.local.json"))).toBe(false);
+    expect(report.purged).toBe(true);
+    expect(report.kept).toEqual([project.paths.dbBackup(9)]);
+    expect(existsSync(project.paths.db)).toBe(false);
+    expect(existsSync(project.paths.snapshotDir)).toBe(false);
+    expect(existsSync(join(project.paths.dir, ".conversation-buffer.json"))).toBe(false);
+    expect(readFileSync(project.paths.dbBackup(9), "utf8")).toBe("backup bytes");
+  });
+
+  test("without a manifest it still strips the project settings file", async () => {
+    const settingsFile = join(project.root, ".claude", "settings.local.json");
+    mkdirSync(join(project.root, ".claude"), { recursive: true });
+    writeFileSync(settingsFile, JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: "command", command: "/x/node", args: ["/x/dist/hook.js", "pre-tool"] }] }] } }));
+    const result = await runHm(project, ["uninstall", "--json"]);
+    expect(result.code).toBe(0);
+    const report = result.json<UninstallReport>();
+    expect(report.manifest_found).toBe(false);
+    expect(report.settings[0]!.removed).toBe(1);
+    expect(readJson(settingsFile)).toEqual({});
+  });
+});

@@ -1,6 +1,6 @@
 {
   "name": "harness-memory",
-  "version": "0.5.1",
+  "version": "0.6.0-rc.1",
   "description": "Project memory layer for coding harnesses",
   "license": "MIT",
   "type": "module",
@@ -46,7 +46,8 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "harness-memory": "dist/bin/harness-memory.js"
+    "harness-memory": "dist/bin/harness-memory.js",
+    "hm": "dist/bin/harness-memory.js"
   },
   "files": [
     "dist",
@@ -72,7 +73,9 @@
   },
   "scripts": {
     "build": "tsup --config tsup.config.ts && node scripts/copy-assets.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "package:pack": "npm pack",
+    "package:verify": "node scripts/verify-packed-install.mjs",
     "prepack": "npm run build",
     "test": "vitest run --config vitest.config.ts",
     "test:embedding": "vitest run --config vitest.embedding.config.ts"

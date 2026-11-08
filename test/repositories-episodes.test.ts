@@ -111,6 +111,31 @@ describe("EpisodeRepository", () => {
     expect(later.map((episode) => episode.id)).toEqual([deferred.id]);
   });
 
+  test("requeue puts a leased episode back to queued without burning the attempt (provider unavailable)", () => {
+    const a = insertEpisode(db);
+    const now = isoPlus(T0, { minutes: 1 });
+    const [leased] = episodes.lease(1, { leaseSeconds: 180, now });
+    expect(leased?.attemptCount).toBe(1);
+
+    const retryAt = isoPlus(now, { hours: 24 });
+    episodes.requeue(a.id, { nextAttemptAt: retryAt, undoAttempt: true, lastError: "not_logged_in: please run /login" });
+    const requeued = episodes.getById(a.id)!;
+    expect(requeued.status).toBe("queued");
+    expect(requeued.attemptCount).toBe(0);
+    expect(requeued.leaseUntil).toBeNull();
+    expect(requeued.nextAttemptAt).toBe(retryAt);
+    expect(requeued.lastError).toBe("not_logged_in: please run /login");
+    expect(episodes.lease(1, { leaseSeconds: 180, now: isoPlus(now, { hours: 1 }) })).toEqual([]);
+
+    // Without undoAttempt the counter is kept, and a null lastError leaves the previous error in place.
+    expect(episodes.lease(1, { leaseSeconds: 180, now: retryAt })).toHaveLength(1);
+    episodes.requeue(a.id, { nextAttemptAt: isoPlus(retryAt, { hours: 1 }), lastError: null });
+    const again = episodes.getById(a.id)!;
+    expect(again.status).toBe("queued");
+    expect(again.attemptCount).toBe(1);
+    expect(again.lastError).toBe("not_logged_in: please run /login");
+  });
+
   test("status transitions: extracted, skipped, failed, dead, lease release and retry requeue", () => {
     const a = insertEpisode(db);
     const b = insertEpisode(db);

@@ -1,9 +1,24 @@
-import { readdirSync, readFileSync } from "fs";
+import { existsSync, readdirSync, readFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 
 const RUNTIME_DIR = dirname(fileURLToPath(import.meta.url));
-const DIST_ROOT = resolve(RUNTIME_DIR, "..");
+
+/**
+ * Directory that holds `db/migrations` and `research/eval`. Bundles live at two depths: `dist/bin/*.js`,
+ * `dist/<area>/index.js` and the source tree's `src/runtime/` resolve it as the parent directory, while the
+ * runtime bundles at the dist root (`dist/worker.js`, `dist/hook-bundle.js`, `dist/index.js`) resolve it as
+ * their own directory. The first candidate containing `db/migrations` wins; the parent stays the default.
+ */
+function findDistRoot(): string {
+  const candidates = [resolve(RUNTIME_DIR, ".."), RUNTIME_DIR];
+  for (const candidate of candidates) {
+    if (existsSync(join(candidate, "db", "migrations"))) return candidate;
+  }
+  return candidates[0];
+}
+
+const DIST_ROOT = findDistRoot();
 
 function getPackagePath(...segments: string[]): string {
   return join(DIST_ROOT, ...segments);

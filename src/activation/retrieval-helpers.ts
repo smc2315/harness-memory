@@ -1,4 +1,4 @@
-import type { MemoryRecord, MemoryRepository } from "../memory";
+import type { MemoryRecord } from "../memory";
 import type { AuditLogger } from "../audit/logger";
 import type {
   SummaryRepository,
@@ -12,6 +12,7 @@ import { matchesScope } from "./scope";
 import type {
   ActivationRequest,
   ActivationResult,
+  MemoryReader,
   RankedMemory,
   SuppressedMemory,
 } from "./types";
@@ -21,7 +22,7 @@ const SCOPE_BOOST = 0.05;
 export const HEURISTIC_SESSION_GAP_MS = 6 * 60 * 60 * 1000;
 
 export interface ActivationContext {
-  repository: MemoryRepository;
+  repository: MemoryReader;
   embeddingService: EmbeddingService | null;
   auditLogger: AuditLogger | null;
   summaryRepository: SummaryRepository | null;
