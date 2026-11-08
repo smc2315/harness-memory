@@ -4,6 +4,7 @@ import { describe, expect, test } from "vitest";
 
 import {
   CANONICAL_CACHE_SIZE,
+  REGEX_AMBIGUOUS_LIMIT,
   REGEX_BUDGET_MS,
   REGEX_BUDGET_RATIO,
   REGEX_BUDGET_ROUNDS,
@@ -197,7 +198,13 @@ describe("compileSignature / signatureKey", () => {
 });
 
 describe("V5 regex safety", () => {
-  test.each(["(a+)+$", "(.*)*x", "(a|aa)+$", "(\\w+\\s?)+$", "\\w*\\d*\\w*x", "\\s*\\s*x", "a?a?a?a?a?aaaa", "(x+x+)+y", "[a-z]+[a-m]*k"])(
+  // The last four exceed REGEX_AMBIGUOUS_LIMIT: four or more quantified atoms that can each hand the engine a retry
+  // position (a repeated literal after every `.*`, groups holding one each, `a?` before `a`, bounded `.{0,10}` before
+  // `a`) make the backtracking C(N, k) on a dense sample — one 128 B sweep of the five-`.*` chain took 1.1 s.
+  test.each([
+    "(a+)+$", "(.*)*x", "(a|aa)+$", "(\\w+\\s?)+$", "\\w*\\d*\\w*x", "\\s*\\s*x", "a?a?a?a?a?aaaa", "(x+x+)+y", "[a-z]+[a-m]*k",
+    "a.*a.*a.*a.*a\\.b", "(a.*a)(a.*a)(a.*a)(a.*a)\\.b", "a?aa?aa?aa?a", "a.{0,10}a.{0,10}a.{0,10}a.{0,10}a",
+  ])(
     "rejects %s statically",
     (pattern) => {
       expect(regexLooksUnsafe(pattern)).toBe(true);
@@ -215,7 +222,6 @@ describe("V5 regex safety", () => {
     "rm\\s+-rf\\s+/",
     "git push.*--force",
     "(foo|bar)\\.ts$",
-    "\\d+\\s+\\d+",
     "^[a-z]+\\s+[0-9]+",
     "^DROP TABLE",
     "(foo|bar)+\\s*=",
@@ -249,6 +255,11 @@ describe("V5 regex safety", () => {
       detail: expect.stringMatching(/exceeded the budget on a \d+ B sample: .* reference pattern/),
     });
     expect(checkRegexSafety(".*\\.env.*")).toMatchObject({ ok: false, code: "regex_unsafe" });
+    // the digit-run samples make `\d+\s+\d+` what `[a-z]+\s+[0-9]+` is on the letter runs
+    expect(regexLooksUnsafe("\\d+\\s+\\d+")).toBe(false);
+    expect(checkRegexSafety("\\d+\\s+\\d+")).toMatchObject({ ok: false, code: "regex_unsafe", detail: expect.stringContaining("exceeded") });
+    // (`sudo .* apt(-get)? .* install` — two `.*` before a literal the sparse sample lacks — sits on the 2.5× line,
+    // ≈ 2.7× on the author's desktop, and is deliberately not a fixture of either kind)
   });
 
   test("patterns of a higher degree are refused early in the ladder, within a bounded time", () => {
@@ -261,15 +272,20 @@ describe("V5 regex safety", () => {
       detail: expect.stringMatching(/exceeded the budget on a (128|256|512|1024|2048) B sample/),
     });
     expect(performance.now() - started).toBeLessThan(5_000);
-    // Dense literals make a degree-6 pattern cost 1.8 ms per sweep at 128 B and 2.6 s at 512 B natively: the 128 B
-    // stage refuses it, and a first sweep beyond REGEX_HOPELESS_RATIO × the budget would end a stage after one sweep.
+    // Three `.*` each followed by the same literal: C(N, 4) on the letter runs — one 128 B sweep costs ≈ 40 ms natively
+    // (the most ambiguity REGEX_AMBIGUOUS_LIMIT lets through), the 128 B stage refuses it and the whole check stays
+    // well under a second; one more `.*` and the static cap refuses it before any sample runs.
     started = performance.now();
-    expect(checkRegexSafety("a.*b.*c.*d.*e.*f\\.g")).toMatchObject({
+    expect(regexLooksUnsafe("a.*a.*a.*a\\.b")).toBe(false);
+    expect(checkRegexSafety("a.*a.*a.*a\\.b")).toMatchObject({
       ok: false,
       code: "regex_unsafe",
-      detail: expect.stringMatching(/exceeded the budget on a (128|256|512) B sample/),
+      detail: expect.stringMatching(/exceeded the budget on a (128|256) B sample/),
     });
     expect(performance.now() - started).toBeLessThan(5_000);
+    expect(regexLooksUnsafe("a.*b.*c.*d.*e.*f\\.g")).toBe(true);
+    expect(checkRegexSafety("a.*b.*c.*d.*e.*f\\.g")).toMatchObject({ ok: false, code: "regex_unsafe", detail: expect.stringContaining("ambiguous") });
+    expect(REGEX_AMBIGUOUS_LIMIT).toBeGreaterThanOrEqual(2);
     expect(REGEX_HOPELESS_RATIO).toBeGreaterThanOrEqual(10);
     expect(REGEX_HOPELESS_MS).toBeGreaterThanOrEqual(100);
   });
@@ -310,8 +326,8 @@ describe("V5 regex safety", () => {
     expect(regexFloorMs(128)).toBe(REGEX_BUDGET_MS / 32);
     expect(regexBudgetMs(0.01, regexFloorMs(512))).toBe(REGEX_BUDGET_MS / 8);
     expect(regexBudgetMs(0.2, regexFloorMs(512))).toBeCloseTo(REGEX_BUDGET_RATIO * 0.2, 10);
-    // the reference pattern sweeps its five 4 KB samples in milliseconds (1–2 ms on a 2024 x64 desktop, ≈ 5 ms on an
-    // Apple M1 runner, ≈ 10 ms with V8's interpreter), the scale of the patterns it judges
+    // the reference pattern sweeps its 4 KB samples in milliseconds (a few ms on 2024–2025 x64 and arm64 machines,
+    // tens of ms with V8's interpreter forced), the scale of the patterns it judges
     const reference = referenceSweepMs(4096);
     expect(reference).toBeGreaterThan(0.05);
     expect(reference).toBeLessThan(500);

@@ -109,8 +109,8 @@ Five extraction calls, $0.031–0.051 each on the `sonnet` alias (resolved to `c
 Run 42489023967 on `redesign/v0.6`, the first run of `.github/workflows/ci.yml`: Windows and package-verify green;
 ubuntu Node 24 / 20 and macOS red on two tests. No product bug in the hooks; behind the tests one validator defect
 (V5, which the worker's extraction validator, the snapshot builder, `hm memory:add` and the proposal fixes run) and
-one import edge case. Three adversarial review workflows (`review-ci-fix`, `-v2`, `-v3`) ran on the fix before the
-push; each caught something real, recorded below.
+one import edge case. Four adversarial review workflows (`review-ci-fix`, `-v2`, `-v3`, `-v4`) ran on the fix; each
+caught something real, recorded below, and the fourth's remaining nits are listed at the end as known limits.
 
 - **`locateAutoMemory` case test.** The case-different-root test expected `null` on a case-sensitive volume. The
   `scan_case` fallback (case-insensitive match over `<projects>/*/memory`) finds the canonical directory there, which
@@ -133,38 +133,49 @@ push; each caught something real, recorded below.
   over 2 ms there. A fixed millisecond line makes V5's verdict depend on the machine that runs the worker — a
   validator defect, not a test problem.
 
-  **Fix: a machine-relative budget on a ladder.** `checkRegexSafety` runs the samples at 128 B, 256 B, 512 B, 1 KB,
-  2 KB and 4 KB (`REGEX_STAGE_BYTES`). At each stage one timed sweep within the floor (`REGEX_BUDGET_MS` = 2 ms at
-  4 KB, scaled with the sample below) passes at once — the common case, microseconds. Otherwise a reference pattern
-  of the same shape as the patterns it judges — `ref .*\.x` (`REGEX_REFERENCE_SOURCE`), a literal prefix, `.*` and
-  an escaped literal its seed sample cannot contain, so it backtracks to the end from every fifth character the way
-  the accepted fixtures do from every seventh or eleventh — is swept over its own samples of the same size in the
-  same process, and the pattern passes when the fastest of `REGEX_BUDGET_ROUNDS` = 5 sweeps is within
+  **Fix: a machine-relative budget on a ladder, against a reference of the same shape.** `checkRegexSafety` runs
+  the samples at 128 B, 256 B, 512 B, 1 KB, 2 KB and 4 KB (`REGEX_STAGE_BYTES`). At each stage one timed sweep within
+  the floor (`REGEX_BUDGET_MS` = 2 ms at 4 KB, scaled with the sample below) passes at once — the common case,
+  microseconds. Otherwise the reference pattern `ref .*\.x` (`REGEX_REFERENCE_SOURCE`: a literal prefix, `.*` and an
+  escaped literal its samples cannot contain, so it backtracks to the end from every prefix the way the accepted
+  fixtures do) is swept over its own samples of the same size in the same process, with a timed round as long as the
+  candidate's first sweep, and the pattern passes when the fastest of `REGEX_BUDGET_ROUNDS` = 5 sweeps is within
   `REGEX_BUDGET_RATIO` = 2.5× that reference; a first sweep beyond 50× the budget (and 250 ms) is refused at once.
-  Three findings shaped this. The second review: a microsecond-scale reference slips into clean scheduler slices
-  while a candidate round longer than a slice never does, so a linear scan as the reference inflated the ratio 4–6×
-  at 6:1 oversubscription — a reference on the same millisecond scale carries the same waits. The second and third
-  reviews: with two stages only (512 B, 4 KB) a cubic or quartic pattern that passes the static check held the
-  validator for 0.5–1.6 s, and even with a ladder from 512 B a dense degree-6 pattern such as `a.*b.*c.*d.*e.*f\.g`
-  (2.6 s per 512 B sweep) held it for 13.5 s; from the second stage on each stage bounds the next by 2^degree, the
-  128 B start keeps the first sweep cheap, and a hopeless first sweep ends a stage after one sweep. And the first
-  calibration run on the CI matrix (`calibrate.yml`, run 42505220909): with a linear scan (`[a-z]!`) as the
-  reference the accepted fixtures cost 76–179× on x64 (ubuntu, Windows, Intel macOS, the author's desktop) but
-  342–523× on the Apple M1 runner, which refused `cat .*\.env` — the linear scan is relatively 3× faster on arm64
-  — while the cost of `cat .*\.env` relative to `[a-z]+[0-9]*\s+x` stayed within 1.4× across every native
-  environment (0.071–0.098). A reference must have the shape of the work it judges; the linear-scan table below is
-  kept as the record of that detour.
+  Before any sample runs, the static check refuses more than `REGEX_AMBIGUOUS_LIMIT` = 3 ambiguous quantifiers in one
+  alternative — atoms with a choice whose class can begin what must follow them. The samples are letter, digit and
+  space runs, a mixed text, the pattern's literal text repeated, and that text without its last word padded with
+  spaces to three times its length and repeated (`regexSamples`).
 
-  Against the reference pattern on the author's x64 desktop (4 KB, min of five sweeps; `scripts/regex-budget-
-  calibration.mjs`, which the manual `calibrate.yml` workflow runs on ubuntu, Windows, Intel and Apple-silicon macOS,
-  natively and with `--regexp-interpret-all`): `curl .* \| (ba)?sh` 0.44×, `cat .*\.env` 0.72–0.90×,
-  `curl .*\|.*sh` 0.68–0.71×; `[a-z]+\s+[0-9]+` and `[a-z]+[0-9]*\s+x` 10×, `.*\.env.*` 26–27×, `echo .* > .*\.env`
-  64×, `docker .* run .* -v .* /var/run/docker\.sock` 241×; the reference itself sweeps its five 4 KB samples in
-  1.7–2.2 ms here. The 2.5× line keeps ≈ 2.8× margin to the accepted patterns and ≈ 4× to the rejected ones on this
-  machine; the per-architecture numbers from the calibration workflow are recorded below as they come in.
+  What the four review rounds added. Round 2: a microsecond-scale reference slips into clean scheduler slices while
+  a candidate round longer than a slice never does, so at 6:1 oversubscription a linear-scan reference inflated the
+  ratio 4–6× — the reference's timed round is sized to the candidate's. Rounds 2 and 3: with two stages (512 B, 4 KB)
+  a cubic or quartic pattern that passes the static check held the validator for 0.5–1.6 s, and even a ladder from
+  512 B let a dense degree-6 pattern run 13.5 s — hence the 128 B start and the hopeless cutoff. Round 4: a sweep
+  cannot be interrupted and repeated-literal chains such as `a.*a.*a.*a.*a\.b` are C(N, k) on a dense sample (one
+  128 B sweep: 1.1 s; one more `.*`: minutes), so only a static cap bounds them — `REGEX_AMBIGUOUS_LIMIT`; the
+  samples were not adversarial for `prefix .* a .* b` shapes whose full literal text matches at once, nor for
+  digit-run quadratics — hence the sparse truncated-literal sample and the digit runs (`\d+\s+\d+` is now refused
+  like `[a-z]+\s+[0-9]+`); and HEAD had dropped the matched round length — restored. The first calibration on the
+  CI matrix (`calibrate.yml`, run 42505220909) is why the reference is a pattern and not a linear scan: with `[a-z]!`
+  the accepted fixtures cost 76–179× on x64 (ubuntu, Windows, Intel macOS, the author's desktop) but 342–523× on
+  the Apple M1 runner, which refused `cat .*\.env`, while the cost of `cat .*\.env` relative to `[a-z]+[0-9]*\s+x`
+  stayed within 1.6× across every native environment (0.060–0.098).
+
+  Against the reference on the author's x64 desktop (4 KB, min of five sweeps; `scripts/regex-budget-calibration.mjs`):
+  `curl .* \| (ba)?sh` 0.48×, `cat .*\.env` 0.88×, `curl .*\|.*sh` 0.77×; `[a-z]+\s+[0-9]+`, `[a-z]+[0-9]*\s+x` and
+  `\d+\s+\d+` 7.2–7.7×, `.*\.env.*` 27×, `echo .* > .*\.env` 53×, `docker .* run .* -v .* /var/run/docker\.sock`
+  237×; with the interpreter forced 0.65–0.82× against 9.7–10×. The reference sweeps its 4 KB samples in 2.4–2.8 ms
+  here. The 2.5× line sits at the geometric middle: ≈ 2.8× margin to the costliest accepted fixture and ≈ 2.9× to
+  the cheapest refused one. A pattern of the accepted shape costs ≈ 5 / (length of its literal text), so a
+  2-character literal sits on the line; `sudo .* apt(-get)? .* install` — two `.*` before a literal the sparse sample
+  lacks — is ≈ 2.7× and flips, which is why it is measured but not a fixture.
+
+    The per-runner ratios against this reference come from the `calibrate.yml` run on this commit and are recorded here in
+  the follow-up commit.
 
   Superseded calibration against a linear scan (4 KB, min of five sweeps, ms per sweep and ratio to `[a-z]!`, which
-  is 0.0076–0.0089 ms native and 0.087–0.10 ms interpreted on x64; `ci-fix/calib-*.log`):
+  is 0.0076–0.0089 ms native and 0.087–0.10 ms interpreted on x64; `ci-fix/calib-*.log`; the last three rows are the
+  Apple M1 runner, native, from run 42505220909):
 
   | pattern | Windows Node 24 | WSL Node 24 | WSL Node 20 | `--regexp-interpret-all` (all three) |
   |---|---|---|---|---|
@@ -175,30 +186,35 @@ push; each caught something real, recorded below.
   | `[a-z]+[0-9]*\s+x` — rejected | 17.0 ms, 1 904× | 19.1 ms, 2 505× | 21.5 ms, 2 813× | 112–115 ms, 1 147–1 283× |
   | `.*\.env.*` — rejected | 43.7 ms, 4 895× | 46.1 ms, 6 053× | 51.2 ms, 6 690× | 177–193 ms, 1 759–2 220× |
   | `echo .* > .*\.env` — rejected (cubic) | 107 ms, 11 944× | 108 ms, 14 250× | 135 ms, 17 630× | 402–465 ms, 4 066–5 344× |
-  | Apple M1 runner, native: `curl .* \| (ba)?sh` | 2.86 ms, 342× | | | |
-  | Apple M1 runner, native: `cat .*\.env` | 4.37 ms, 523× | | | |
-  | Apple M1 runner, native: `[a-z]+[0-9]*\s+x` — rejected | 61.4 ms, 7 342× | | | |
+  | M1: `curl .* \| (ba)?sh` | 2.86 ms, 342× | | | |
+  | M1: `cat .*\.env` | 4.37 ms, 523× | | | |
+  | M1: `[a-z]+[0-9]*\s+x` — rejected | 61.4 ms, 7 342× | | | |
 
-  Every other pattern the `accepts` list held before is linear on all five samples; `curl .* \| (ba)?sh` was its
-  one quadratic fixture. On a quadratic pattern the ratio to the reference is the same at every stage of the ladder,
-  so the rejected ones fall at the first stage whose floor they exceed (`.*\.env.*` at 256 B, the pair at 512 B on
-  the author's desktop; the stage depends on the machine and the tests do not pin it) and the smaller stages only
-  keep patterns of a higher degree from getting expensive. Cost through the real `checkRegexSafety` on the author's
-  desktop (`scripts/regex-budget-calibration.mjs`): patterns within the floor 0.1–1 ms; the accepted over-floor
-  patterns 1.0–1.9 ms (one sweep plus the reference's rounds); the refused ones 1.1–2.3 ms for the quadratic
-  fixtures (refused at 256–512 B), 10–14 ms for the cubic and quartic ones (1 KB), 1.5–8 ms for the dense degree-4 /
-  5 / 6 patterns (128 B) — against ≈ 35–105 ms for the old loop's two 4 KB rounds on the quadratic pair and
-  0.3–13.5 s on the dense patterns. Paid wherever `compileSignature` runs in the worker or the CLI; the hooks never
-  sample — PreToolUse matches through the `regex_source` the snapshot builder compiled — except for a hand-written
-  manual rule with an `arg_pattern`, which `PolicyEngine` compiles once per process. Tests: the loop with an injected
-  clock (fastest round wins, early exit, passes), the floor and ratio helpers and the ladder constants, the reference
-  (itself V5-safe), `cat .*\.env` / `curl .*\|.*sh` as the regression for the ratio, the quadratic pair refused at
-  whatever stage the machine reaches, and the quartic `docker .* run .* -v .* /var/run/docker\.sock` and dense
-  degree-6 `a.*b.*c.*d.*e.*f\.g` refused below 4 KB within a bounded time.
+  Every other pattern the `accepts` list held before is linear on all the samples; `curl .* \| (ba)?sh` was its one
+  quadratic fixture. Cost through the real `checkRegexSafety` on the author's desktop: patterns within the floor
+  0.1–1 ms; the accepted over-floor patterns 1.6–3 ms when the first 4 KB sweep is inside the floor and ≈ 25–40 ms
+  when it is not (one sweep plus the quick and the matched reference rounds); the refused ones 0.7–5.5 ms for the
+  quadratic fixtures (128–512 B), 28–31 ms for the quartic `docker` fixture (1 KB), 2.6–2.8 ms for the dense
+  degree-4 chain (128 B) and ≈ 200 ms for the three-link repeated-literal chain `a.*a.*a.*a\.b` (its 38 ms first sweep
+  at 128 B times five rounds — the most the static cap lets through), 0 ms for the statically refused ones — against
+  ≈ 35–105 ms for the old loop's two 4 KB rounds on the quadratic pair and 0.3–13.5 s on the dense patterns. Paid
+  wherever `compileSignature` runs in the worker or the CLI; the hooks never sample — PreToolUse matches through the
+  `regex_source` the snapshot builder compiled — except for a hand-written manual rule with an `arg_pattern`, which
+  `PolicyEngine` compiles once per process. Tests: the loop with an injected clock (fastest round wins, early exit,
+  passes), the floor and ratio helpers and the ladder constants, the reference (itself V5-safe), `cat .*\.env` /
+  `curl .*\|.*sh` as the regression for the ratio, the every-position trio refused at whatever stage the machine
+  reaches, the quartic `docker` fixture and the three-link chain refused below 4 KB within a bounded time, and the
+  static cap on four chains.
+
+  Known limits after round 4: a 2-character-literal pattern of the accepted shape (`cd.*\.\.`) sits on the 2.5× line
+  and is not reliably accepted; `prefix .* a .* b` shapes with a long prefix are on the line too; the per-stage ratio
+  of a quadratic pattern varies within ≈ 2×, so the stage that refuses it is machine-dependent (the tests do not pin
+  it); the verdict is still a timing, so a stall longer than REGEX_HOPELESS_MS on a first sweep refuses a pattern
+  that a retry would accept.
 - **Process.** Four lessons: a timing claim needs the exact pattern bytes it was measured on (write measurement
   scripts with the editor, never through a shell that rewrites backslashes); a failure on two runners of different
   OS and Node version is a sustained factor until proven otherwise; a budget measured in microseconds cannot be
   compared with one measured in milliseconds on a loaded host; and a bound claimed for a class of patterns must be
   measured on its dense member, not on two sparse fixtures. The Windows checkout is CRLF (`core.autocrlf = true`);
   patch scripts with multi-line anchors must normalise line endings before matching.
-- **Gates after the fix.** `npx tsc --noEmit` 0 errors. Windows (Node 24.14): `npm test` 81 files / 1158 tests passed (1 todo), `hm eval:replay` 13 / 13 scenarios, 350 / 350 checks. Linux (WSL Ubuntu-22.04, Node 24.14): 80 files passed + 1 skipped (1154 tests, 4 skipped), eval:replay 350 / 350, `hm eval:latency` p95 57–66 ms over three runs, `npm run test:latency` 9 / 9. The only red in the day's Linux runs was the recall-cost median test (`test/recall-hook.test.ts`, 10 ms line) while the review agents were running benchmarks on this machine; it passes alone and on an idle machine (median 8.7 ms), and CI judges it against 25 ms. The real `checkRegexSafety` gives the expected verdict on every fixture on Windows and WSL, Node 24 and 20, native and interpreted (`ci-fix/measure-v4-*.log`).
+- **Gates after the fix.** `npx tsc --noEmit` 0 errors. Windows (Node 24.14): `npm test` 81 files / 1161 tests passed (1 todo), `hm eval:replay` 13 / 13 scenarios, 350 / 350 checks. Linux (WSL Ubuntu-22.04, Node 24.14): 80 files passed + 1 skipped (1157 tests, 4 skipped), eval:replay 350 / 350, `hm eval:latency` p95 55–68 ms over three runs, `npm run test:latency` 9 / 9. The recall-cost median test (`test/recall-hook.test.ts`, 10 ms line) failed twice during the day while review agents ran benchmarks on this machine; it passes alone and on an idle machine, and CI judges it against 25 ms. CI and calibration results for this commit are recorded with the per-runner table above.

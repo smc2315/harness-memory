@@ -372,11 +372,14 @@ export const REGEX_BUDGET_MS = 2;
  * machine that runs the worker nor on how loaded it is. The reference has the shape of the patterns it judges:
  * a linear scan does not (the first CI calibration, run 42505220909, put the accepted fixtures at 76–179× a linear
  * scan on x64 but 342–523× on Apple M1, while the cost of `cat .*\.env` relative to `[a-z]+[0-9]*\s+x` stayed
- * within 1.4× across every native environment). Against this reference a pattern that backtracks from each literal
- * prefix costs ≈ 0.4–0.8× (`curl .* \| (ba)?sh`, `cat .*\.env`, `curl .*\|.*sh`), one that backtracks at every
- * position ≥ 5× (`[a-z]+\s+[0-9]+`, `[a-z]+[0-9]*\s+x`), a leading `.*` ≥ 20× (`.*\.env.*`); the line sits at
- * the geometric middle. On a quadratic pattern the ratio is the same at every stage of the ladder, so the smaller
- * stages only keep patterns of a higher degree from getting expensive.
+ * within 1.6× across every native environment). Against this reference a pattern that backtracks from each literal
+ * prefix costs ≈ 0.5–0.9× (`curl .* \| (ba)?sh`, `cat .*\.env`, `curl .*\|.*sh`; ≈ 5 / the length of its literal
+ * text, so a 2-character literal sits on the line), one that backtracks at every position ≥ 7× (`[a-z]+\s+[0-9]+`,
+ * `\d+\s+\d+`), a leading `.*` ≥ 24× (`.*\.env.*`), a `prefix .* a .* b` shape with a long prefix ≈ 2.7×
+ * (`sudo .* apt(-get)? .* install`, on the line by nature); the line sits at the geometric middle of the fixtures. On
+ * a quadratic pattern the ratio stays within ≈ 2× across the stages of the ladder (the microsecond stages are the
+ * noisiest and their floors mask them), so the smaller stages mostly keep patterns of a higher degree from getting
+ * expensive. Calibrated 2026-11-09 on the author's x64 desktop; `calibrate.yml` records the CI runners.
  */
 export const REGEX_BUDGET_RATIO = 2.5;
 /** Timed sweeps `fastestSweepMs` tries before it gives up on reaching `stopAtMs`; the fastest one counts. */
@@ -404,7 +407,20 @@ const REGEX_WARMUP_SUBJECT = "ab ".repeat(22);
  */
 export const REGEX_REFERENCE_SOURCE = "ref .*\\.x";
 const REGEX_REFERENCE = new RegExp(REGEX_REFERENCE_SOURCE);
+/** Rounds of the quick reference measurement that sizes the matched one. */
+const REGEX_REFERENCE_QUICK_ROUNDS = 3;
+/** Upper bound on the sweeps per matched-reference round (a candidate sweep this many times the reference is refused anyway). */
+const REGEX_REFERENCE_MAX_PASSES = 100;
 const OPTIONAL_RUN_LIMIT = 4;
+/**
+ * Static part of V5, second rule: at most this many ambiguous quantified atoms per top-level alternative — an atom
+ * with a choice (`*`, `+`, `?`, `{m,n}`, a quantified group) whose class can also begin what must follow it, so the
+ * engine has a position to retry at. Each such atom multiplies the backtracking work on a dense sample by about N
+ * (`a.*a.*a.*a.*a\.b` is C(N, 5): one 128 B sweep took 1.1 s, and the sweep is uninterruptible), so the time budget
+ * cannot bound them; three keeps every realistic signature (`curl .*\|.*sh`, `sudo .* apt(-get)? .* install`,
+ * `docker .* run .* -v .* /var/run/docker\.sock`) for the dynamic check, whose first sweep is then at most ≈ 40 ms.
+ */
+export const REGEX_AMBIGUOUS_LIMIT = 3;
 
 type ClassKind = "word" | "digit" | "space" | "nonword" | "nondigit" | "nonspace";
 type SetItem = { kind: "range"; lo: number; hi: number } | { kind: "class"; cls: ClassKind };
@@ -419,6 +435,8 @@ interface Atom {
   cls: AtomClass;
   min: number;
   max: number;
+  /** Ambiguity degree inside a group atom (the most ambiguous of its alternatives); 0 for every other atom. */
+  inner: number;
 }
 
 interface ParsedRegex {
@@ -426,6 +444,8 @@ interface ParsedRegex {
   branches: Atom[][];
   /** A quantified group that itself contains a quantifier or an alternation (`(a+)+`, `(a|aa)*`). */
   nested: boolean;
+  /** Ambiguous quantified atoms in the most ambiguous top-level alternative (see REGEX_AMBIGUOUS_LIMIT). */
+  degree: number;
 }
 
 const CLASS_REGEX: Readonly<Record<ClassKind, RegExp>> = {
@@ -580,7 +600,7 @@ function parseRegexAtoms(source: string): ParsedRegex {
     return null;
   };
 
-  const parseSequence = (): { branchAtoms: Atom[][]; hasQuantifier: boolean; hasAlternation: boolean } => {
+  const parseSequence = (): { branchAtoms: Atom[][]; branchDegrees: number[]; hasQuantifier: boolean; hasAlternation: boolean } => {
     const branchAtoms: Atom[][] = [[]];
     let hasQuantifier = false;
     let hasAlternation = false;
@@ -673,20 +693,44 @@ function parseRegexAtoms(source: string): ParsedRegex {
         if (group.hasQuantifier) hasQuantifier = true;
         if (quantifier !== null && quantifier.max > 1 && groupRepeatsUnsafely) nested = true;
       }
-      branchAtoms[branchAtoms.length - 1]!.push({ cls, min: quantifier?.min ?? 1, max: quantifier?.max ?? 1 });
+      branchAtoms[branchAtoms.length - 1]!.push({ cls, min: quantifier?.min ?? 1, max: quantifier?.max ?? 1, inner: group === null ? 0 : Math.max(0, ...group.branchDegrees) });
     }
 
     for (const atoms of branchAtoms) branches.push(atoms);
-    return { branchAtoms, hasQuantifier, hasAlternation };
+    return { branchAtoms, branchDegrees: branchAtoms.map(ambiguityDegree), hasQuantifier, hasAlternation };
   };
 
-  parseSequence();
-  return { branches, nested };
+  const top = parseSequence();
+  return { branches, nested, degree: Math.max(0, ...top.branchDegrees) };
 }
 
 /**
- * Static part of V5: nested quantifiers (`(a+)+`, `(.*)*`, `(a|aa)+`) and runs of overlapping
- * quantified atoms with nothing mandatory between them (`\w*\d*\w*`, `\s*\s*`, `a?a?a?a?`).
+ * Ambiguous quantified atoms of one sequence: an atom with a choice (`max > min`) whose class can also begin what
+ * must follow it — any atom up to and including the next mandatory one — plus the degree inside group atoms. A
+ * trailing quantifier with nothing mandatory after it adds nothing (`rm -rf .*`).
+ */
+function ambiguityDegree(atoms: readonly Atom[]): number {
+  let degree = 0;
+  for (let i = 0; i < atoms.length; i += 1) {
+    const atom = atoms[i]!;
+    degree += atom.inner;
+    if (atom.max <= atom.min) continue;
+    for (let j = i + 1; j < atoms.length; j += 1) {
+      const next = atoms[j]!;
+      if (classesOverlap(atom.cls, next.cls)) {
+        degree += 1;
+        break;
+      }
+      if (next.min >= 1) break;
+    }
+  }
+  return degree;
+}
+
+/**
+ * Static part of V5: nested quantifiers (`(a+)+`, `(.*)*`, `(a|aa)+`), runs of overlapping quantified atoms with
+ * nothing mandatory between them (`\w*\d*\w*`, `\s*\s*`, `a?a?a?a?`), and more than REGEX_AMBIGUOUS_LIMIT ambiguous
+ * quantified atoms in one alternative (`a.*a.*a.*a.*a\.b`, `(a.*a)(a.*a)(a.*a)(a.*a)\.b`, `a?aa?aa?aa?a`).
  */
 export function regexLooksUnsafe(source: string): boolean {
   let parsed: ParsedRegex;
@@ -696,6 +740,7 @@ export function regexLooksUnsafe(source: string): boolean {
     return true;
   }
   if (parsed.nested) return true;
+  if (parsed.degree > REGEX_AMBIGUOUS_LIMIT) return true;
   for (const atoms of parsed.branches) {
     for (let i = 0; i < atoms.length; i += 1) {
       const a = atoms[i]!;
@@ -716,16 +761,33 @@ export function regexLooksUnsafe(source: string): boolean {
   return false;
 }
 
+/**
+ * The samples a pattern is swept over: runs of letters, digits and spaces (every-position quadratics such as
+ * `[a-z]+\s+[0-9]+` or `\d+\s+\d+` backtrack through them), a mixed text, the pattern's literal text repeated (its
+ * prefixes everywhere, its metacharacters nowhere), and — the adversarial input for every `prefix .* literal` shape,
+ * the reference's own included — that text without its last word, padded with spaces to three times its length and
+ * repeated: every prefix is there, sparsely, as in a long command with several invocations, and the final literal
+ * never is, so `.*` backtracks to the end from each prefix (`sudo .* apt(-get)? .* install` is cubic there, while
+ * on its full literal text it matched at once). The padding keeps the sample from doubling the cost of the
+ * accepted shape relative to the every-position quadratics, which the reference's own run of it would otherwise do.
+ */
 function regexSamples(source: string, size: number): string[] {
   const literal = source.replace(/\\[dwsDWSbB]|[\\^$.*+?()[\]{}|]/g, "");
   const seed = literal.length > 0 ? literal : "a";
-  return [
+  const truncated = literal.replace(/\S+\s*$/, "");
+  const sparse = truncated.length > 0 && truncated !== literal ? `${truncated}${" ".repeat(truncated.length * 2)}` : null;
+  const repeated = (unit: string): string => `${unit.repeat(Math.ceil(size / unit.length)).slice(0, size - 1)}\u0001`;
+  const samples = [
     "a".repeat(size),
     `${"a".repeat(size - 1)}!`,
+    "1".repeat(size),
+    `${"1".repeat(size - 1)}!`,
     " ".repeat(size),
     "ab ".repeat(Math.ceil(size / 3)).slice(0, size),
-    `${seed.repeat(Math.ceil(size / seed.length)).slice(0, size - 1)}\u0001`,
+    repeated(seed),
   ];
+  if (sparse !== null) samples.push(repeated(sparse));
+  return samples;
 }
 
 /** Options of `fastestSweepMs`; `now` is injectable so the loop can be tested without a clock. */
@@ -780,17 +842,21 @@ export function regexBudgetMs(referenceMs: number, floorMs: number = REGEX_BUDGE
   return Math.max(floorMs, REGEX_BUDGET_RATIO * referenceMs);
 }
 
-/** Ms per sweep of the reference pattern over its own `size`-byte samples, measured now (fastest of the rounds). */
-export function referenceSweepMs(size: number, options: { rounds?: number; now?: () => number } = {}): number {
-  return fastestSweepMs(REGEX_REFERENCE, regexSamples(REGEX_REFERENCE_SOURCE, size), { rounds: options.rounds, now: options.now });
+/**
+ * Ms per sweep of the reference pattern over its own `size`-byte samples, measured now: the fastest of `rounds`
+ * timed rounds of `passes` sweeps each.
+ */
+export function referenceSweepMs(size: number, options: { rounds?: number; passes?: number; now?: () => number } = {}): number {
+  return fastestSweepMs(REGEX_REFERENCE, regexSamples(REGEX_REFERENCE_SOURCE, size), { rounds: options.rounds, passes: options.passes, now: options.now });
 }
 
 /**
  * One V5 stage over `size`-byte samples. One timed sweep within the stage's floor passes at once (the common case:
  * microseconds). Otherwise the reference pattern is swept over its own samples of the same size in the same process
- * — the same shape of work on the same millisecond scale, so a slow machine, a loaded one (a round longer than a
- * scheduler slice always carries a wait; a microsecond one would not) or a different CPU architecture moves both
- * numbers together. A first sweep within the resulting budget passes; one beyond REGEX_HOPELESS_RATIO times the
+ * — the same shape of work, so a slow machine or a different CPU architecture moves both numbers together — with a
+ * timed round as long as the candidate's first sweep (`passes`), so on a loaded host both minima carry the same
+ * scheduler waits (a round longer than a slice always carries one; a shorter one slips into clean slices and would
+ * inflate the ratio). A first sweep within the resulting budget passes; one beyond REGEX_HOPELESS_RATIO times the
  * budget (and REGEX_HOPELESS_MS) is refused at once, since no stall explains it; in between the remaining rounds run
  * against the budget, stopping at the first sweep inside it, and the fastest sweep decides. Cost: an accepted pattern
  * over the floor pays one sweep plus the reference's rounds, a refused one up to REGEX_BUDGET_ROUNDS sweeps plus
@@ -801,7 +867,9 @@ function withinBudget(regex: RegExp, source: string, size: number): { ok: true }
   const floor = regexFloorMs(size);
   const first = fastestSweepMs(regex, samples, { rounds: 1 });
   if (first <= floor) return { ok: true };
-  const reference = referenceSweepMs(size);
+  const quick = referenceSweepMs(size, { rounds: REGEX_REFERENCE_QUICK_ROUNDS });
+  const passes = Math.min(REGEX_REFERENCE_MAX_PASSES, Math.max(1, Math.round(first / Math.max(quick, 1e-4))));
+  const reference = referenceSweepMs(size, { passes });
   const budget = regexBudgetMs(reference, floor);
   if (first <= budget) return { ok: true };
   const hopeless = first > Math.max(REGEX_HOPELESS_RATIO * budget, REGEX_HOPELESS_MS);
@@ -829,7 +897,7 @@ export function checkRegexSafety(source: string): { ok: true; regex: RegExp } | 
   } catch (error) {
     return { ok: false, code: "invalid", detail: `regex does not compile: ${String(error)}` };
   }
-  if (regexLooksUnsafe(source)) return { ok: false, code: "regex_unsafe", detail: "nested or overlapping quantifiers" };
+  if (regexLooksUnsafe(source)) return { ok: false, code: "regex_unsafe", detail: `nested or overlapping quantifiers, or more than ${REGEX_AMBIGUOUS_LIMIT} ambiguous ones` };
   for (const size of REGEX_STAGE_BYTES) {
     const stage = withinBudget(regex, source, size);
     if (!stage.ok) return { ok: false, code: "regex_unsafe", detail: stage.detail };

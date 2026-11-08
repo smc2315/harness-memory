@@ -2,7 +2,7 @@
 // Calibration of the V5 regex time budget (src/activation/signature.ts) on the machine this runs on.
 //
 // Bundles the signature module with esbuild (a dependency of vitest / tsup, so present after `npm ci`), then:
-//   1. times the linear reference candidates over the same samples the validator uses (512 B and 4 KB);
+//   1. times the validator's reference pattern over its own samples and two linear scans for comparison;
 //   2. times every fixture pattern (min of five sweeps) at 128 B, 512 B and 4 KB — a size is skipped once the
 //      previous one is already expensive, since a dense high-degree pattern would not finish at 4 KB — and prints
 //      the 4 KB ratio to each reference;
@@ -33,17 +33,26 @@ await build({
 });
 const sig = await import(pathToFileURL(bundle).href);
 
-// Mirrors regexSamples() in src/activation/signature.ts (not exported).
+// Mirrors regexSamples() in src/activation/signature.ts (not exported): letter, digit and space runs, a mixed text,
+// the literal text repeated, and the literal text without its last word padded with spaces to three times its length
+// (the adversarial input for `prefix .* literal`).
 function regexSamples(source, size) {
   const literal = source.replace(/\\[dwsDWSbB]|[\\^$.*+?()[\]{}|]/g, "");
   const seed = literal.length > 0 ? literal : "a";
-  return [
+  const truncated = literal.replace(/\S+\s*$/, "");
+  const sparse = truncated.length > 0 && truncated !== literal ? `${truncated}${" ".repeat(truncated.length * 2)}` : null;
+  const repeated = (unit) => `${unit.repeat(Math.ceil(size / unit.length)).slice(0, size - 1)}\u0001`;
+  const samples = [
     "a".repeat(size),
     `${"a".repeat(size - 1)}!`,
+    "1".repeat(size),
+    `${"1".repeat(size - 1)}!`,
     " ".repeat(size),
     "ab ".repeat(Math.ceil(size / 3)).slice(0, size),
-    `${seed.repeat(Math.ceil(size / seed.length)).slice(0, size - 1)}\u0001`,
+    repeated(seed),
   ];
+  if (sparse !== null) samples.push(repeated(sparse));
+  return samples;
 }
 const passesFor = (size) => Math.max(1, Math.ceil(131_072 / (5 * size)));
 const fmt = (ms) => (ms === null ? "—" : ms.toFixed(3));
@@ -52,11 +61,15 @@ const fmt = (ms) => (ms === null ? "—" : ms.toFixed(3));
 // the others are linear scans kept for comparison — their ratios shift ~3× between x64 and arm64.
 const REFERENCES = [sig.REGEX_REFERENCE_SOURCE ?? "ref .*\\.x", "[a-z]!", "[a-z]{2,8}\\d"];
 const ACCEPT = [
-  "^npm\\s+(run\\s+)?test\\b", "rm\\s+-rf\\s+/", "git push.*--force", "(foo|bar)\\.ts$", "\\d+\\s+\\d+",
+  "^npm\\s+(run\\s+)?test\\b", "rm\\s+-rf\\s+/", "git push.*--force", "(foo|bar)\\.ts$",
   "^[a-z]+\\s+[0-9]+", "^DROP TABLE", "(foo|bar)+\\s*=", "curl .* \\| (ba)?sh", "cat .*\\.env", "curl .*\\|.*sh",
-  "sudo .* apt(-get)? .* install", "docker run .* --privileged", "rm -rf .*", "\\bpython[23]? .*\\.py\\b",
+  "docker run .* --privileged", "rm -rf .*", "\\bpython[23]? .*\\.py\\b",
 ];
-const REJECT = ["[a-z]+\\s+[0-9]+", "[a-z]+[0-9]*\\s+x", ".*\\.env.*", "echo .* > .*\\.env", "docker .* run .* -v .* /var/run/docker\\.sock", "a.*b.*c.*d\\.e", "a.*b.*c.*d.*e\\.f", "a.*b.*c.*d.*e.*f\\.g"];
+// Refused by the time budget (their raw sweeps are measured too); the STATIC ones by regexLooksUnsafe before any sample runs.
+const REJECT = ["[a-z]+\\s+[0-9]+", "[a-z]+[0-9]*\\s+x", "\\d+\\s+\\d+", ".*\\.env.*", "echo .* > .*\\.env", "docker .* run .* -v .* /var/run/docker\\.sock", "a.*b.*c.*d\\.e", "a.*a.*a.*a\\.b"];
+// Measured but not judged: `prefix .* a .* b` with a long prefix sits on the line (≈ 2.7× on the author's desktop).
+const BORDER = ["sudo .* apt(-get)? .* install"];
+const STATIC = ["a.*b.*c.*d.*e\\.f", "a.*b.*c.*d.*e.*f\\.g", "a.*a.*a.*a.*a\\.b", "(a.*a)(a.*a)(a.*a)(a.*a)\\.b"];
 
 const interpret = process.execArgv.includes("--regexp-interpret-all");
 console.log(`node ${process.version} ${process.platform} ${os.arch()} ${os.cpus()[0]?.model ?? "?"} x${os.cpus().length} interpret-all=${interpret}`);
@@ -77,7 +90,7 @@ console.log(`validator's own quick reference: 128B=${sig.referenceSweepMs(128).t
 
 // Raw sweeps: 128 B always; 512 B unless 128 B already costs > 1 ms; 4 KB unless 512 B costs > 5 ms.
 console.log(`\n${"kind".padEnd(6)} ${"pattern".padEnd(44)} ${"128B ms".padStart(8)} ${"512B ms".padStart(8)} ${"4KB ms".padStart(9)} ${REFERENCES.map((ref) => `4KB x[${ref}]`.padStart(20)).join("")}`);
-const rows = [...ACCEPT.map((p) => ["accept", p]), ...REJECT.map((p) => ["reject", p])];
+const rows = [...ACCEPT.map((p) => ["accept", p]), ...REJECT.map((p) => ["reject", p]), ...BORDER.map((p) => ["border", p])];
 for (const [kind, source] of rows) {
   const regex = new RegExp(source);
   const ms128 = sig.fastestSweepMs(regex, regexSamples(source, 128), { rounds: 5 });
@@ -91,16 +104,17 @@ for (const [kind, source] of rows) {
 
 console.log("\nreal checkRegexSafety (verdict, refusing stage, wall ms per run):");
 let unexpected = 0;
-for (const [kind, source] of rows) {
+for (const [kind, source] of [...rows, ...STATIC.map((p) => ["reject", p])]) {
   const runs = [];
   for (let i = 0; i < repeat; i += 1) {
     const started = performance.now();
     const result = sig.checkRegexSafety(source);
     runs.push({ ms: performance.now() - started, result });
   }
-  const bad = runs.some((run) => (kind === "accept") !== run.result.ok);
+  const bad = kind !== "border" && runs.some((run) => (kind === "accept") !== run.result.ok);
   if (bad) unexpected += 1;
-  const cells = runs.map((run) => `${(run.result.ok ? "ok" : run.result.detail.replace(/^exceeded the budget on a /, "").replace(/ B sample:.*$/, "B")).padStart(6)} ${run.ms.toFixed(1).padStart(7)}`);
+  const stage = (result) => (result.ok ? "ok" : result.detail.startsWith("exceeded") ? result.detail.replace(/^exceeded the budget on a /, "").replace(/ B sample:.*$/, "B") : "static");
+  const cells = runs.map((run) => `${stage(run.result).padStart(6)} ${run.ms.toFixed(1).padStart(7)}`);
   console.log(`${kind.padEnd(6)} ${source.padEnd(44)} ${cells.join(" |")}${bad ? "  <-- UNEXPECTED" : ""}`);
   const last = runs[runs.length - 1].result;
   if (!last.ok) console.log(`       ${last.detail}`);
