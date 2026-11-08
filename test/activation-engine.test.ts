@@ -42,6 +42,8 @@ describe("ActivationEngine", () => {
 
   test("activates only active memories matching trigger and scope in stable rank order", async () => {
     const highest = repository.create({
+      authority: "human",
+      sourceKind: "manual",
       type: "policy",
       summary: "Prefer explicit adapters",
       details: "Keep boundaries thin.",
@@ -54,6 +56,8 @@ describe("ActivationEngine", () => {
       updatedAt: "2026-03-28T00:00:00.000Z",
     });
     const second = repository.create({
+      authority: "human",
+      sourceKind: "manual",
       type: "workflow",
       summary: "Inspect db after migrate",
       details: "Run inspect after creating the sqlite file.",
@@ -66,6 +70,8 @@ describe("ActivationEngine", () => {
       updatedAt: "2026-03-28T00:10:00.000Z",
     });
     repository.create({
+      authority: "human",
+      sourceKind: "manual",
       type: "pitfall",
       summary: "Do not amend pushed commits",
       details: "Force-push risk is too high.",
@@ -76,6 +82,8 @@ describe("ActivationEngine", () => {
       updatedAt: "2026-03-28T00:20:00.000Z",
     });
     repository.create({
+      authority: "human",
+      sourceKind: "manual",
       type: "decision",
       summary: "Keep manual promotion in MVP",
       details: "Candidate memories stay inactive until reviewed.",
@@ -104,6 +112,8 @@ describe("ActivationEngine", () => {
 
   test("suppresses non-matching scopes with explicit reasons", async () => {
     repository.create({
+      authority: "human",
+      sourceKind: "manual",
       type: "workflow",
       summary: "Inspect db after migrate",
       details: "Run inspect after creating the sqlite file.",
@@ -127,6 +137,8 @@ describe("ActivationEngine", () => {
 
   test("enforces memory count and payload budgets deterministically", async () => {
     const first = repository.create({
+      authority: "human",
+      sourceKind: "manual",
       type: "policy",
       summary: "A",
       details: "A detail that fits the budget.",
@@ -139,6 +151,8 @@ describe("ActivationEngine", () => {
       updatedAt: "2026-03-28T00:00:00.000Z",
     });
     const second = repository.create({
+      authority: "human",
+      sourceKind: "manual",
       type: "workflow",
       summary: "B",
       details: "B detail that also fits the budget.",
@@ -177,6 +191,8 @@ describe("ActivationEngine", () => {
 
   test("suppresses memory when toolName does not match relevantTools", async () => {
     const memory = repository.create({
+      authority: "human",
+      sourceKind: "manual",
       type: "workflow",
       summary: "Use bash for workspace scripts",
       details: "Run scripted checks via bash tool.",
@@ -201,6 +217,8 @@ describe("ActivationEngine", () => {
 
   test("activates memory when toolName matches relevantTools", async () => {
     const memory = repository.create({
+      authority: "human",
+      sourceKind: "manual",
       type: "workflow",
       summary: "Use edit for source changes",
       details: "Prefer edit for code modifications.",
@@ -223,6 +241,8 @@ describe("ActivationEngine", () => {
 
   test("activates memory when relevantTools is null (backward compat)", async () => {
     const memory = repository.create({
+      authority: "human",
+      sourceKind: "manual",
       type: "workflow",
       summary: "General workflow memory",
       details: "Applies regardless of tool.",
@@ -249,6 +269,8 @@ describe("ActivationEngine", () => {
     );
 
     const denseMemory = repository.create({
+      authority: "human",
+      sourceKind: "manual",
       type: "workflow",
       summary: "Review migration plans",
       details: "Prefer staged rollouts for schema changes.",
@@ -259,6 +281,8 @@ describe("ActivationEngine", () => {
       embedding: vector(1, 0, 0),
     });
     const lexicalMemory = repository.create({
+      authority: "human",
+      sourceKind: "manual",
       type: "workflow",
       summary: "Urgent rollback checklist",
       details: "Use the urgent rollback runbook when releases fail.",
@@ -283,6 +307,8 @@ describe("ActivationEngine", () => {
 
   test("lexical-only path still works when no embeddings available", async () => {
     const lexicalMemory = repository.create({
+      authority: "human",
+      sourceKind: "manual",
       type: "workflow",
       summary: "Urgent rollback checklist",
       details: "Use the urgent rollback runbook when releases fail.",
@@ -309,6 +335,8 @@ describe("ActivationEngine", () => {
     );
 
     const denseMemory = repository.create({
+      authority: "human",
+      sourceKind: "manual",
       type: "workflow",
       summary: "Schema migration planning",
       details: "Prefer staged rollouts with explicit checkpoints.",
@@ -336,6 +364,8 @@ describe("ActivationEngine", () => {
     engine = new ActivationEngine(repository, embeddingService);
 
     repository.create({
+      authority: "human",
+      sourceKind: "manual",
       type: "workflow",
       summary: "Deployment recovery guide",
       details: "Capture timelines, approvals, and postmortem notes for incidents.",
@@ -346,6 +376,8 @@ describe("ActivationEngine", () => {
       embedding: vector(0.7, 0.7, 0),
     });
     const rescuedMemory = repository.create({
+      authority: "human",
+      sourceKind: "manual",
       type: "workflow",
       summary: "Incident recovery reference",
       details: "Document every subsystem, owner handoff, and dependency before choosing a rollback path.",
@@ -377,6 +409,8 @@ describe("ActivationEngine", () => {
     engine = new ActivationEngine(repository, embeddingService);
 
     repository.create({
+      authority: "human",
+      sourceKind: "manual",
       type: "workflow",
       summary: "Terminal retry strategy",
       details: "Recover failed commands with retries and exit codes.",
@@ -387,6 +421,8 @@ describe("ActivationEngine", () => {
       embedding: vector(1, 0, 0),
     });
     const webMemory = repository.create({
+      authority: "human",
+      sourceKind: "manual",
       type: "workflow",
       summary: "Route exception boundary",
       details: "Handle request failures inside the API route pipeline.",
@@ -415,6 +451,8 @@ describe("ActivationEngine", () => {
     engine = new ActivationEngine(repository, embeddingService);
 
     repository.create({
+      authority: "human",
+      sourceKind: "manual",
       type: "workflow",
       summary: "Error handling checklist",
       details: "Use the error handling checklist for service failures.",
@@ -425,6 +463,8 @@ describe("ActivationEngine", () => {
       embedding: vector(1, 0, 0),
     });
     const matchingMemory = repository.create({
+      authority: "human",
+      sourceKind: "manual",
       type: "workflow",
       summary: "Error handling checklist",
       details: "Use the error handling checklist for service failures.",
@@ -453,6 +493,8 @@ describe("ActivationEngine", () => {
     engine = new ActivationEngine(repository, embeddingService);
 
     repository.create({
+      authority: "human",
+      sourceKind: "manual",
       type: "workflow",
       summary: "Terminal recovery guide",
       details: "Capture command retries and exit code notes.",
@@ -463,6 +505,8 @@ describe("ActivationEngine", () => {
       embedding: vector(0, 1, 0),
     });
     const broadMemory = repository.create({
+      authority: "human",
+      sourceKind: "manual",
       type: "workflow",
       summary: "Route recovery guide",
       details: "Capture request retries and upstream fallback notes.",

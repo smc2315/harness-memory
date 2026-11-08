@@ -1,0 +1,22 @@
+{
+  "episode_summary": "npm test failed with a missing script; pnpm test ran the suite successfully.",
+  "nothing_to_learn": false,
+  "facts": [
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Run the test suite with pnpm test; npm test exits with a missing-script error in this repository.",
+      "details": "The repository defines its scripts for pnpm. `npm test` exits 1 with 'Missing script: test', while `pnpm test` runs the vitest suite.",
+      "scope_glob": "**/*",
+      "relevant_tools": ["bash"],
+      "trigger_signature": { "tool": "bash", "target": "command", "pattern_kind": "cmd", "pattern": "npm test" },
+      "lifecycle_triggers": ["before_tool"],
+      "confidence": 0.85,
+      "evidence_refs": ["e2002", "e2004"],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "A failure followed by a resolution with the pnpm equivalent of the same command.",
+      "aliases": ["pnpm test", "test runner", "테스트 실행"]
+    }
+  ]
+}

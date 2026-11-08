@@ -26,6 +26,8 @@ describe("memory:promote security scan", () => {
       scopeGlob: "**/*",
       lifecycleTriggers: ["before_model"],
       status: "candidate",
+      authority: "auto",
+      sourceKind: "extraction",
     });
 
     const result = scanMemoryContent(memory.summary, memory.details);
@@ -42,6 +44,8 @@ describe("memory:promote security scan", () => {
       scopeGlob: "src/**",
       lifecycleTriggers: ["before_tool"],
       status: "candidate",
+      authority: "human",
+      sourceKind: "manual",
     });
 
     const result = scanMemoryContent(memory.summary, memory.details);
@@ -57,6 +61,8 @@ describe("memory:promote security scan", () => {
       scopeGlob: "**/*",
       lifecycleTriggers: ["session_start"],
       status: "candidate",
+      authority: "auto",
+      sourceKind: "extraction",
     });
 
     const result = scanMemoryContent(memory.summary, memory.details);

@@ -154,6 +154,8 @@ export const TEST_MEMORIES: TestMemoryDef[] = [
   {
     tag: "M01",
     input: {
+      authority: "human",
+      sourceKind: "manual",
       type: "policy",
       summary: "TypeScript strict mode",
       details: "Always use strict TypeScript configuration with noImplicitAny and strictNullChecks enabled.",
@@ -171,6 +173,8 @@ export const TEST_MEMORIES: TestMemoryDef[] = [
   {
     tag: "M02",
     input: {
+      authority: "human",
+      sourceKind: "manual",
       type: "policy",
       summary: "No any types",
       details: "Never use `any` type annotation. Prefer `unknown` for untyped values and narrow with type guards.",
@@ -188,6 +192,8 @@ export const TEST_MEMORIES: TestMemoryDef[] = [
   {
     tag: "M03",
     input: {
+      authority: "human",
+      sourceKind: "manual",
       type: "workflow",
       summary: "Run tests before commit",
       details: "Always run npm test before creating a git commit. Verify all test suites pass.",
@@ -206,6 +212,8 @@ export const TEST_MEMORIES: TestMemoryDef[] = [
   {
     tag: "M04",
     input: {
+      authority: "human",
+      sourceKind: "manual",
       type: "pitfall",
       summary: "SQL injection in raw queries",
       details: "Use parameterized queries with $-prefixed placeholders. Never concatenate user input into SQL strings.",
@@ -224,6 +232,8 @@ export const TEST_MEMORIES: TestMemoryDef[] = [
   {
     tag: "M05",
     input: {
+      authority: "human",
+      sourceKind: "manual",
       type: "architecture_constraint",
       summary: "Repository pattern",
       details: "All database access must go through repository classes. No direct SQL in business logic or adapters.",
@@ -242,6 +252,8 @@ export const TEST_MEMORIES: TestMemoryDef[] = [
   {
     tag: "M06",
     input: {
+      authority: "human",
+      sourceKind: "manual",
       type: "workflow",
       summary: "Migration naming convention",
       details: "Name migration files as NNN_description.sql where NNN is a zero-padded sequence number.",
@@ -259,6 +271,8 @@ export const TEST_MEMORIES: TestMemoryDef[] = [
   {
     tag: "M07",
     input: {
+      authority: "human",
+      sourceKind: "manual",
       type: "decision",
       summary: "Use sql.js over better-sqlite3",
       details: "sql.js was chosen for WASM portability and zero native dependencies. Do not switch to better-sqlite3.",
@@ -276,6 +290,8 @@ export const TEST_MEMORIES: TestMemoryDef[] = [
   {
     tag: "M08",
     input: {
+      authority: "human",
+      sourceKind: "manual",
       type: "pitfall",
       summary: "ESM import extensions",
       details: "Always use .js file extension in ESM import paths. TypeScript outputs .js files, not .ts.",
@@ -294,6 +310,8 @@ export const TEST_MEMORIES: TestMemoryDef[] = [
   {
     tag: "M09",
     input: {
+      authority: "human",
+      sourceKind: "manual",
       type: "policy",
       summary: "Error handling pattern",
       details: "Never use empty catch blocks. Always log the error or rethrow. Use typed error classes where possible.",
@@ -311,6 +329,8 @@ export const TEST_MEMORIES: TestMemoryDef[] = [
   {
     tag: "M10",
     input: {
+      authority: "human",
+      sourceKind: "manual",
       type: "workflow",
       summary: "Git branch naming",
       details: "Use feature/, fix/, chore/ prefixes for branch names. Include ticket number if applicable.",
@@ -328,6 +348,8 @@ export const TEST_MEMORIES: TestMemoryDef[] = [
   {
     tag: "M11",
     input: {
+      authority: "human",
+      sourceKind: "manual",
       type: "policy",
       summary: "한국어 주석 금지",
       details: "코드 주석은 반드시 영어로 작성해야 합니다. 한국어 변수명이나 주석을 사용하지 마세요.",
@@ -346,6 +368,8 @@ export const TEST_MEMORIES: TestMemoryDef[] = [
   {
     tag: "M12",
     input: {
+      authority: "human",
+      sourceKind: "manual",
       type: "pitfall",
       summary: "패키지 버전 충돌",
       details: "@xenova/transformers는 ESM only 패키지입니다. CommonJS 프로젝트에서는 dynamic import를 사용하세요.",
@@ -364,6 +388,8 @@ export const TEST_MEMORIES: TestMemoryDef[] = [
   {
     tag: "M13",
     input: {
+      authority: "human",
+      sourceKind: "manual",
       type: "decision",
       summary: "벡터 DB 선택",
       details: "SQLite BLOB 저장 방식을 선택했습니다. 별도의 벡터 데이터베이스(Pinecone, Qdrant 등)를 사용하지 않습니다.",
@@ -382,6 +408,8 @@ export const TEST_MEMORIES: TestMemoryDef[] = [
   {
     tag: "M14",
     input: {
+      authority: "human",
+      sourceKind: "manual",
       type: "workflow",
       summary: "Dream consolidation flow",
       details: "Evidence events flow through: evidence capture → dream:run → candidate creation → manual review → promote/reject.",
@@ -399,6 +427,8 @@ export const TEST_MEMORIES: TestMemoryDef[] = [
   {
     tag: "M15",
     input: {
+      authority: "human",
+      sourceKind: "manual",
       type: "architecture_constraint",
       summary: "Plugin isolation",
       details: "Plugins must not directly access the database. All DB operations go through the adapter layer.",
@@ -417,6 +447,8 @@ export const TEST_MEMORIES: TestMemoryDef[] = [
   {
     tag: "M19",
     input: {
+      authority: "human",
+      sourceKind: "manual",
       type: "workflow",
       summary: "API versioning",
       details: "Use semver for package.json versioning. Document all breaking changes in CHANGELOG.md.",
@@ -434,6 +466,8 @@ export const TEST_MEMORIES: TestMemoryDef[] = [
   {
     tag: "M20",
     input: {
+      authority: "human",
+      sourceKind: "manual",
       type: "architecture_constraint",
       summary: "Activation budget limits",
       details: "Maximum 10 memories and 8KB payload per activation call. These limits are enforced in the activation engine.",
@@ -452,6 +486,8 @@ export const TEST_MEMORIES: TestMemoryDef[] = [
   {
     tag: "M16-stale",
     input: {
+      authority: "human",
+      sourceKind: "manual",
       type: "policy",
       summary: "Stale memory check",
       details: "Review stale memories weekly and either supersede or reactivate them.",
@@ -469,6 +505,8 @@ export const TEST_MEMORIES: TestMemoryDef[] = [
   {
     tag: "M17-superseded",
     input: {
+      authority: "human",
+      sourceKind: "manual",
       type: "decision",
       summary: "Manual promotion only",
       details: "Auto-promote was disabled because it was too noisy. Manual review required.",
@@ -486,6 +524,8 @@ export const TEST_MEMORIES: TestMemoryDef[] = [
   {
     tag: "M18-rejected",
     input: {
+      authority: "human",
+      sourceKind: "manual",
       type: "pitfall",
       summary: "Too many warnings",
       details: "Warning fatigue made users ignore all policy warnings. Keep warnings under 3 per activation.",

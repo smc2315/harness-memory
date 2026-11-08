@@ -244,6 +244,8 @@ describe("PolicyEngine", () => {
 
   test("ignores rules linked to non-active memories", () => {
     const staleMemory = memoryRepository.create({
+      authority: "human",
+      sourceKind: "manual",
       id: "mem_policy_stale",
       type: "policy",
       summary: "Legacy deployment policy",

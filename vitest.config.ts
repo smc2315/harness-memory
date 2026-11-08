@@ -10,6 +10,7 @@ export default defineConfig({
       ".local/**",
       "test/embedding/**",
       "test/benchmark-tier2/**",
+      "test/tmp-debug.test.ts",
     ],
   },
 });

@@ -1,17 +1,40 @@
 /**
  * SQLite Schema Type Definitions
- * 
- * This file defines TypeScript interfaces that match the SQLite schema.
- * Used for type-safe database operations and validation.
+ *
+ * This file defines TypeScript interfaces that match the SQLite schema (snake_case, one interface
+ * per table, final schema = migration 021 / user_version 21). Repositories map these rows onto
+ * camelCase records; nothing outside src/db and the repositories should read raw rows.
+ *
+ * Enumerated values live in src/core/vocabulary.ts (type-only imports here, so there is no runtime cycle).
  */
 
+import type {
+  Authority,
+  CloseReason,
+  Enforcement,
+  EpisodeStatus,
+  Host,
+  KnowledgeKind,
+  PatternKind,
+  ProposalCreator,
+  ProposalDecider,
+  ProposalKind,
+  ProposalStatus,
+  ProvenanceRelation,
+  ProviderName,
+  RunStatus,
+  SignatureTarget,
+  SourceKind,
+  TransitionActor,
+} from "../../core/vocabulary";
+
 /**
- * Memory record - core storage for project knowledge
+ * Memory record - core storage for project knowledge (migration 017 shape)
  */
 export interface Memory {
   id: string; // UUID
   content_hash: string; // SHA256 hash for deduplication
-  identity_key: string | null; // exact identity across type/scope/lifecycle
+  identity_key: string | null; // exact identity across type/scope/lifecycle; unique among live rows only
   type: 'policy' | 'workflow' | 'pitfall' | 'architecture_constraint' | 'decision';
   summary: string;
   details: string;
@@ -32,6 +55,165 @@ export interface Memory {
   created_at: string; // ISO 8601
   updated_at: string; // ISO 8601
   last_verified_at: string | null; // ISO 8601
+  // v0.6 (017) -----------------------------------------------------------------------------
+  semantic_key: string | null; // sha256(type|scope_glob|signature_key|normalize(summary)); unique among live rows
+  trigger_signature_json: string | null; // TriggerSignature (§4.6) or NULL
+  signature_key: string; // serialized canonical form of the signature ('' = none)
+  knowledge_kind: KnowledgeKind | null;
+  failure_classes_json: string | null; // JSON array of failure classes this memory addresses
+  status_reason: string | null; // e.g. ttl_expired, expiry, cap, human
+  superseded_by_memory_id: string | null;
+  source_ref: string | null; // 'episode:<id>' | 'import:<file>#L<n>' | 'cli'
+  revalidate_after: string | null;
+  last_fired_at: string | null;
+  open_proposal_id: string | null;
+  authority: Authority; // NOT NULL, no default: every inserter decides
+  enforcement: Enforcement; // default 'advise'
+  source_kind: SourceKind; // NOT NULL, no default
+  evidence_score: number;
+  evidence_count: number;
+  distinct_session_count: number;
+  fire_count: number;
+  override_count: number;
+  contested: 0 | 1;
+  needs_scope: 0 | 1;
+  import_unconfirmed: 0 | 1;
+  aliases_json: string; // JSON array of extractor-provided synonyms, default '[]'
+}
+
+/**
+ * Episode row (migration 018): one closed turn segment = one extraction queue entry.
+ */
+export interface Episode {
+  id: string;
+  host: Host;
+  session_id: string;
+  turn_key: string;
+  segment: number;
+  started_at: string;
+  closed_at: string;
+  close_reason: CloseReason;
+  ledger_ref: string; // 'ledger/<file>#<byte_start>-<byte_end>' | 'import:<path>'
+  correction_for: string | null;
+  context_ref: string | null;
+  scope_refs_json: string;
+  tools_json: string;
+  failure_signatures_json: string;
+  flags_json: string;
+  fired_json: string;
+  evidence_weight: number;
+  event_count: number;
+  status: EpisodeStatus;
+  skip_reason: string | null;
+  lease_until: string | null;
+  attempt_count: number;
+  next_attempt_at: string | null;
+  last_error: string | null;
+  extraction_run_id: string | null;
+}
+
+/**
+ * Extraction run row (migration 018).
+ */
+export interface ExtractionRun {
+  id: string; // createDeterministicId('run:' + episode_id + ':' + extractor_version)
+  episode_id: string;
+  provider: ProviderName;
+  model: string | null;
+  extractor_version: string;
+  prompt_sha256: string;
+  input_chars: number;
+  started_at: string;
+  finished_at: string | null;
+  duration_ms: number | null;
+  status: RunStatus;
+  facts_total: number;
+  facts_accepted: number;
+  raw_output_ref: string | null;
+  error: string | null;
+  outcomes_json: string; // JSON array of FactOutcome
+}
+
+/**
+ * Writer idempotency ledger (migration 018).
+ */
+export interface WriteOp {
+  id: string; // run id | 'decision:<proposal_id>:<decided_at>' | 'import:<file_sha256>' | 'dream:<started_at ISO>'
+  kind: string;
+  generation: number;
+  applied_at: string;
+}
+
+/**
+ * Key/value metadata (migration 018): db_generation, extractor_version, semantic_key_backfill, ...
+ */
+export interface MetaEntry {
+  key: string;
+  value: string;
+}
+
+/**
+ * Proposal row (migration 019).
+ */
+export interface Proposal {
+  id: string; // randomUUID()
+  kind: ProposalKind;
+  target_memory_id: string;
+  candidate_memory_id: string | null;
+  rationale: string;
+  confidence: number;
+  created_by: ProposalCreator;
+  support_count: number; // derived from proposal_support
+  support_sessions: number; // derived from proposal_support
+  status: ProposalStatus;
+  created_at: string;
+  expires_at: string;
+  decided_at: string | null;
+  decided_by: ProposalDecider | null;
+  decision_note: string | null;
+}
+
+/**
+ * Proposal support row (migration 019): one per (proposal, episode).
+ */
+export interface ProposalSupport {
+  proposal_id: string;
+  episode_id: string;
+  session_id: string;
+  extraction_run_id: string | null;
+  confidence: number;
+  created_at: string;
+  has_human_signal: 0 | 1;
+  deterministic: 0 | 1;
+}
+
+/**
+ * Memory provenance row (migration 019): the only source of derived confidence/evidence.
+ */
+export interface MemoryProvenance {
+  memory_id: string;
+  episode_id: string;
+  event_seq: number; // e<seq> cited by the extractor; 0 for import/manual rows
+  relation: ProvenanceRelation;
+  confidence: number;
+  excerpt: string; // <= 500 chars
+  extraction_run_id: string | null;
+  created_at: string;
+}
+
+/**
+ * Memory transition row (migration 019): every status change leaves one.
+ */
+export interface MemoryTransition {
+  id: string;
+  memory_id: string;
+  from_status: MemoryStatus;
+  to_status: MemoryStatus;
+  actor: TransitionActor;
+  proposal_id: string | null;
+  extraction_run_id: string | null;
+  reason: string;
+  created_at: string;
 }
 
 /**
@@ -57,6 +239,13 @@ export interface PolicyRule {
   trigger_kind: 'session_start' | 'before_model' | 'before_tool' | 'after_tool';
   scope_glob: string; // e.g., "src/**/*.ts"
   message: string; // Rule message/description
+  // v0.6 (020) -----------------------------------------------------------------------------
+  tool_pattern: string; // glob over canonical tools, default '*'
+  target_kind: SignatureTarget; // default 'any'
+  pattern_kind: PatternKind | null;
+  arg_pattern: string | null;
+  enforcement: Enforcement; // default 'advise'
+  derived_at: string | null; // NULL = manual rule; otherwise rewritten from active policy memories
   created_at: string; // ISO 8601
   updated_at: string; // ISO 8601
 }

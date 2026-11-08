@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { Database as SqlJsDatabase } from "sql.js";
+
 import { MemoryRepository } from "../src/memory";
+import { transitionMemory } from "../src/promotion";
 import { createTestDb } from "./helpers/create-test-db";
+
+const NOW = "2026-11-08T12:00:00.000Z";
 
 describe("memory:baseline behavior", () => {
   let db: SqlJsDatabase;
@@ -9,7 +13,7 @@ describe("memory:baseline behavior", () => {
 
   beforeEach(async () => {
     db = await createTestDb();
-    repository = new MemoryRepository(db);
+    repository = new MemoryRepository(db, { clock: () => NOW });
   });
 
   afterEach(() => {
@@ -25,6 +29,8 @@ describe("memory:baseline behavior", () => {
       lifecycleTriggers: ["session_start", "before_model"],
       status: "active",
       activationClass: "scoped",
+      authority: "human",
+      sourceKind: "manual",
     });
     const updated = repository.update(memory.id, { activationClass: "baseline" });
     expect(updated?.activationClass).toBe("baseline");
@@ -38,12 +44,14 @@ describe("memory:baseline behavior", () => {
       scopeGlob: "src/**",
       lifecycleTriggers: ["before_model"],
       status: "candidate",
+      authority: "human",
+      sourceKind: "manual",
     });
     const updated = repository.update(memory.id, { activationClass: "startup" });
     expect(updated?.activationClass).toBe("startup");
   });
 
-  test("promote with activation_class sets both status and class", () => {
+  test("promote goes through transitionMemory and the class through update", () => {
     const memory = repository.create({
       type: "pitfall",
       summary: "Watch out",
@@ -51,13 +59,21 @@ describe("memory:baseline behavior", () => {
       scopeGlob: "**/*",
       lifecycleTriggers: ["before_tool"],
       status: "candidate",
+      authority: "auto",
+      sourceKind: "extraction",
     });
-    const updated = repository.update(memory.id, {
-      status: "active",
-      activationClass: "baseline",
-      updatedAt: new Date().toISOString(),
-      lastVerifiedAt: new Date().toISOString(),
+    const promoted = transitionMemory(db, {
+      memoryId: memory.id,
+      to: "active",
+      actor: "human",
+      reason: "cli:memory:promote",
+      now: NOW,
     });
+    const updated = repository.update(memory.id, { activationClass: "baseline", updatedAt: NOW });
+
+    expect(promoted.status).toBe("active");
+    expect(promoted.authority).toBe("human");
+    expect(promoted.lastVerifiedAt).toBe(NOW);
     expect(updated?.status).toBe("active");
     expect(updated?.activationClass).toBe("baseline");
   });

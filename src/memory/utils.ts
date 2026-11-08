@@ -1,6 +1,11 @@
 import { createHash } from "crypto";
 
 import type { LifecycleTrigger, MemoryType } from "../db/schema/types";
+import {
+  PATTERN_KINDS,
+  SIGNATURE_TARGETS,
+  type TriggerSignature,
+} from "../core/vocabulary";
 
 const LIFECYCLE_TRIGGER_ORDER: readonly LifecycleTrigger[] = [
   "session_start",
@@ -159,4 +164,142 @@ export function createDeterministicId(seed: string): string {
 
 export function createMemoryId(contentHash: string): string {
   return createDeterministicId(`memory:${contentHash}`);
+}
+
+/**
+ * Id of a row that revives a fact whose earlier rows are all terminal (rejected/superseded):
+ * `memory:<identity_key>:<count of rows already carrying that identity_key>` (spec §5.7 step 4, R5).
+ */
+export function createRevivedMemoryId(identityKey: string, existingRowCount: number): string {
+  return createDeterministicId(`memory:${identityKey}:${String(existingRowCount)}`);
+}
+
+/** Sorted, de-duplicated, trimmed, empty strings dropped. Always a JSON array (never null). */
+export function serializeStringArray(values: readonly string[] | null | undefined): string {
+  if (values === null || values === undefined) {
+    return "[]";
+  }
+
+  const cleaned = values.map((value) => value.trim()).filter((value) => value.length > 0);
+
+  return JSON.stringify([...new Set(cleaned)].sort());
+}
+
+export function parseStringArray(serialized: string | null, column: string): string[] {
+  if (serialized === null || serialized === "") {
+    return [];
+  }
+
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(serialized);
+  } catch (error) {
+    throw new Error(`Invalid ${column} JSON: ${String(error)}`);
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error(`Invalid ${column} JSON: expected an array`);
+  }
+
+  const values: string[] = [];
+
+  for (const value of parsed) {
+    if (typeof value !== "string") {
+      throw new Error(`Invalid ${column} value: ${String(value)}`);
+    }
+
+    values.push(value);
+  }
+
+  return values;
+}
+
+export function serializeTriggerSignature(signature: TriggerSignature | null | undefined): string | null {
+  if (signature === null || signature === undefined) {
+    return null;
+  }
+
+  const normalized: TriggerSignature = {
+    tool: signature.tool,
+    target: signature.target,
+    pattern_kind: signature.pattern_kind,
+    pattern: signature.pattern,
+  };
+
+  if (signature.negate === true) {
+    normalized.negate = true;
+  }
+
+  return JSON.stringify(normalized);
+}
+
+export function parseTriggerSignature(serialized: string | null): TriggerSignature | null {
+  if (serialized === null || serialized === "") {
+    return null;
+  }
+
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(serialized);
+  } catch (error) {
+    throw new Error(`Invalid trigger_signature_json: ${String(error)}`);
+  }
+
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("Invalid trigger_signature_json: expected an object");
+  }
+
+  const record = parsed as Record<string, unknown>;
+  const tool = record.tool;
+  const target = record.target;
+  const patternKind = record.pattern_kind;
+  const pattern = record.pattern;
+
+  if (typeof tool !== "string" || tool.length === 0) {
+    throw new Error("Invalid trigger_signature_json: tool must be a non-empty string");
+  }
+
+  if (typeof target !== "string" || !(SIGNATURE_TARGETS as readonly string[]).includes(target)) {
+    throw new Error(`Invalid trigger_signature_json: unknown target ${String(target)}`);
+  }
+
+  if (typeof patternKind !== "string" || !(PATTERN_KINDS as readonly string[]).includes(patternKind)) {
+    throw new Error(`Invalid trigger_signature_json: unknown pattern_kind ${String(patternKind)}`);
+  }
+
+  if (typeof pattern !== "string" || pattern.length === 0) {
+    throw new Error("Invalid trigger_signature_json: pattern must be a non-empty string");
+  }
+
+  const signature: TriggerSignature = {
+    tool,
+    target: target as TriggerSignature["target"],
+    pattern_kind: patternKind as TriggerSignature["pattern_kind"],
+    pattern,
+  };
+
+  if (record.negate === true) {
+    signature.negate = true;
+  }
+
+  return signature;
+}
+
+/**
+ * Fallback signature key when the caller did not pass the canonical one from
+ * `activation/signature.ts` (`tool|target|kind|pattern`, `|!` appended for negated signatures).
+ * Reconcile always passes the compiled key; this keeps manual/import rows consistent.
+ */
+export function fallbackSignatureKey(signature: TriggerSignature | null | undefined): string {
+  if (signature === null || signature === undefined) {
+    return "";
+  }
+
+  const pattern =
+    signature.pattern_kind === "substring" ? signature.pattern.toLowerCase() : signature.pattern;
+  const key = [signature.tool, signature.target, signature.pattern_kind, pattern].join("|");
+
+  return signature.negate === true ? `${key}|!` : key;
 }

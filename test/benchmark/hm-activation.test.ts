@@ -80,6 +80,8 @@ describe("HM-ActivationBench", () => {
 
     test("baseline cap of 3 memories enforced", async () => {
       fixture.repository.create({
+        authority: "human",
+        sourceKind: "manual",
         type: "workflow",
         summary: "Extra baseline one",
         details: "Extra baseline memory for cap validation.",
@@ -91,6 +93,8 @@ describe("HM-ActivationBench", () => {
         status: "active",
       });
       fixture.repository.create({
+        authority: "human",
+        sourceKind: "manual",
         type: "decision",
         summary: "Extra baseline two",
         details: "Another extra baseline memory for cap validation.",
@@ -118,6 +122,8 @@ describe("HM-ActivationBench", () => {
 
     test("baseline payload cap of 2048 bytes enforced", async () => {
       fixture.repository.create({
+        authority: "human",
+        sourceKind: "manual",
         type: "policy",
         summary: "Large baseline payload",
         details: "X".repeat(7000),

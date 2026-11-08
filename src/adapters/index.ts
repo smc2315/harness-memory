@@ -1,17 +1,3 @@
-export { OpenCodeAdapter, type OpenCodeAdapterOptions } from "./opencode-adapter";
-export {
-  type AdapterAfterToolInput,
-  type AdapterAfterToolOutput,
-  type AdapterAfterToolResult,
-  type AdapterBeforeModelInput,
-  type AdapterBeforeModelRecord,
-  type AdapterBeforeModelResult,
-  type AdapterBeforeToolInput,
-  type AdapterBeforeToolResult,
-  type AdapterModelRef,
-  type AdapterSessionContext,
-  type AdapterSessionMetadata,
-  type AdapterSessionStartInput,
-  type AdapterToolEvidenceCapture,
-  type AdapterToolPolicyCheck,
-} from "./types";
+// v0.6 host adapters (hook-io, hook-core, hosts/claude-code) land in Phase B2 (implementation-plan.md §4).
+// The v0.5 OpenCode adapter, its test harness and the Adapter* types were retired; nothing is exported yet.
+export {};

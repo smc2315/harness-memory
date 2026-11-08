@@ -1,0 +1,38 @@
+{
+  "episode_summary": "The extractor cited events that do not exist in this episode.",
+  "nothing_to_learn": false,
+  "facts": [
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Use pnpm test instead of npm test; the npm scripts are not defined in this repository.",
+      "details": "Observed in an event that was never rendered.",
+      "scope_glob": "**/*",
+      "relevant_tools": ["bash"],
+      "trigger_signature": { "tool": "bash", "target": "command", "pattern_kind": "cmd", "pattern": "npm test" },
+      "lifecycle_triggers": ["before_tool"],
+      "confidence": 0.8,
+      "evidence_refs": ["e9001", "e9002"],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Hallucinated references.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "workflow",
+      "summary": "Run the linter before committing changes to the src directory of this repository.",
+      "details": "",
+      "scope_glob": "src/**",
+      "relevant_tools": ["bash"],
+      "trigger_signature": null,
+      "lifecycle_triggers": ["before_model"],
+      "confidence": 0.7,
+      "evidence_refs": ["e9003"],
+      "knowledge_kind": "convention",
+      "rationale": "Also hallucinated.",
+      "aliases": []
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "episode_summary": "npm test failed and pnpm test passed; two facts carry single-token command signatures.",
+  "nothing_to_learn": false,
+  "facts": [
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Prefer pnpm over npm for every package-manager invocation in this repository.",
+      "details": "Single-token signature with a before_tool-only trigger: nothing is left to fire on.",
+      "scope_glob": "**/*",
+      "relevant_tools": ["bash"],
+      "trigger_signature": { "tool": "bash", "target": "command", "pattern_kind": "cmd", "pattern": "npm" },
+      "lifecycle_triggers": ["before_tool"],
+      "confidence": 0.8,
+      "evidence_refs": ["e2002", "e2004"],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Too broad to gate a tool call.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Keep package scripts under src aligned with pnpm; npm-only script names break the suite.",
+      "details": "Single-token signature but the fact also has before_model, so it survives as a scope-only pitfall.",
+      "scope_glob": "src/**",
+      "relevant_tools": ["bash"],
+      "trigger_signature": { "tool": "bash", "target": "command", "pattern_kind": "cmd", "pattern": "git" },
+      "lifecycle_triggers": ["before_tool", "before_model"],
+      "confidence": 0.75,
+      "evidence_refs": ["e2002"],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Signature dropped, scope keeps it reachable.",
+      "aliases": []
+    }
+  ]
+}

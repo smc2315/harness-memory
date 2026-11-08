@@ -1,23 +1,4 @@
-export { DreamRepository } from "./repository";
-export { DreamWorker } from "./worker";
-export {
-  buildExtractionUserPrompt,
-  parseExtractionResponse,
-  callLlmForExtraction,
-  executeExtractionActions,
-} from "./llm-extract";
-export type {
-  CompleteDreamRunInput,
-  CreateDreamEvidenceEventInput,
-  CreateDreamRunInput,
-  DreamCandidateSuggestion,
-  DreamEvidenceEventRecord,
-  DreamExtractionAction,
-  DreamExtractedFact,
-  DreamExtractionResult,
-  DreamExtractionOptions,
-  DreamRunRecord,
-  DreamRunRequest,
-  DreamRunResult,
-  ListDreamEvidenceEventsInput,
-} from "./types";
+// v0.6 write path (ledger, episode, extract/*, reconcile, consolidate, worker) lands in Phases A3/B1
+// (implementation-plan.md §3–§4). The v0.5 DreamWorker/DreamRepository/llm-extract pipeline was retired;
+// nothing is exported yet.
+export {};

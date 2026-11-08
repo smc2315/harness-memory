@@ -1,0 +1,54 @@
+{
+  "episode_summary": "npm test failed and pnpm test passed; the extractor proposed unsafe regex signatures.",
+  "nothing_to_learn": false,
+  "facts": [
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Avoid running npm test; the repository scripts are only registered for pnpm.",
+      "details": "Nested quantifier signature that would hang the hook.",
+      "scope_glob": "**/*",
+      "relevant_tools": ["bash"],
+      "trigger_signature": { "tool": "bash", "target": "command", "pattern_kind": "regex", "pattern": "(a+)+$" },
+      "lifecycle_triggers": ["before_tool"],
+      "confidence": 0.9,
+      "evidence_refs": ["e2002"],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Catastrophic backtracking.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Use pnpm for every script invocation; npm invocations fail in this repository.",
+      "details": "Overlapping quantifiers with nothing mandatory between them.",
+      "scope_glob": "**/*",
+      "relevant_tools": ["bash"],
+      "trigger_signature": { "tool": "bash", "target": "command", "pattern_kind": "regex", "pattern": "(\\w+\\s?)+$" },
+      "lifecycle_triggers": ["before_tool"],
+      "confidence": 0.9,
+      "evidence_refs": ["e2002", "e2004"],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Exponential on long inputs.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Run tests through pnpm test rather than npm test so the configured scripts resolve.",
+      "details": "A safe regex that should be accepted.",
+      "scope_glob": "**/*",
+      "relevant_tools": ["bash"],
+      "trigger_signature": { "tool": "bash", "target": "command", "pattern_kind": "regex", "pattern": "^npm\\s+(run\\s+)?test\\b" },
+      "lifecycle_triggers": ["before_tool"],
+      "confidence": 0.9,
+      "evidence_refs": ["e2002", "e2004"],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Linear regex.",
+      "aliases": ["pnpm"]
+    }
+  ]
+}

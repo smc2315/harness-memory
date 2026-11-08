@@ -1,156 +1,76 @@
-# SQLite Schema and Migration Infrastructure
+# `src/db` — storage layer (v0.6)
 
-## Overview
+`memory.sqlite` is a sql.js database: the whole file is loaded into memory, changed, and written back
+as a whole. Nothing keeps it open between calls, hooks never touch it (they read `snapshot/*`), and
+every writer goes through one protocol. Spec: `docs/redesign/spec-v0.6.md` §4, §9.2, §9.4.
 
-This directory contains the SQLite schema definition and migration infrastructure for the Project Memory Layer MVP.
+## Files
 
-## Schema Design
+| File | Role |
+|---|---|
+| `migrations/NNN_*.sql` | Schema, tracked by `PRAGMA user_version` (001–016 are v0.5; 017–021 are the v0.6 redesign, final `user_version = 21`). |
+| `migrator.ts` | `runMigrationsOnDb(db, {logger?, target?})` applies pending files on an open connection (no transaction); `runMigrations(dbPath, …)` is the lock-free CLI path with `.bak-v<from>` backup, post-migrate and atomic save. |
+| `post-migrate.ts` | `runPostMigrate(db, {now})`: one-time data fix-ups after 021 (reject DreamWorker template candidates, backfill `semantic_key`, open `merge` proposals for live collisions). Idempotent via `meta.semantic_key_backfill`. |
+| `locks.ts` | `acquireDirLock(lockDir, {purpose, waitMs, …})`: `mkdirSync` directory lock with `owner.json`, 5 s heartbeat, stale/dead-owner takeover, jittered wait, `LockBusyError`. |
+| `store.ts` | `Store.withWriteLock(purpose, waitMs, fn)` = §9.2 steps 1–6; `Store.read(fn)` = lock-free read without migrations; `Store.rebuildSnapshot()`. Hooks (`postMigrate`, `deriveRules`, `buildSnapshot`) are injected by the composition root. |
+| `db-file.ts` | Header check, atomic save (`.tmp-<pid>` → fsync → `.prev` → rename with retries), `.prev` recovery (`.corrupt-<ts>`), orphan tmp cleanup. |
+| `meta.ts` | `meta` key/value helpers (`db_generation`) and the `write_ops` idempotency ledger. |
+| `sql.ts` | prepare/bind/step/free helpers (`selectAll`, `selectOne`, `selectValue`, `selectCount`, `tableExists`, `quickCheck`). |
+| `sqlite.ts` | `loadSqlJs()` (cached WASM runtime), plain `openSqlJsDatabase` / `saveSqlJsDatabase` for tooling. |
+| `schema/types.ts` | Row interfaces. |
+| `repositories/` | Table repositories (episodes, runs, proposals, provenance, transitions, meta, write-ops); owned by the data-layer module. |
 
-### Core Principles
+## Writer protocol (`Store.withWriteLock`)
 
-1. **UUID Primary IDs**: All tables use TEXT PRIMARY KEY for UUID identifiers
-2. **Content-Hash Deduplication**: `memories` table enforces UNIQUE constraint on `content_hash`
-3. **Idempotent Migrations**: All CREATE statements use `IF NOT EXISTS` clause
-4. **Version Tracking**: `PRAGMA user_version` tracks the current schema migration level
-5. **Foreign Key Relationships**: Proper cascading deletes and referential integrity
-
-### Tables
-
-#### `memories` (Core Memory Storage)
-- `id` (TEXT PRIMARY KEY): UUID identifier
-- `content_hash` (TEXT NOT NULL UNIQUE): SHA256 hash for deduplication
-- `type` (TEXT NOT NULL): One of `policy`, `workflow`, `pitfall`, `architecture_constraint`, `decision`
-- `summary` (TEXT NOT NULL): Brief summary of the memory
-- `details` (TEXT NOT NULL): Full details/content
-- `scope_glob` (TEXT NOT NULL): Glob pattern for scope matching (e.g., `src/**/*.ts`)
-- `lifecycle_triggers` (TEXT NOT NULL): JSON array of trigger types
-- `confidence` (REAL NOT NULL): 0.0-1.0 confidence score
-- `importance` (REAL NOT NULL): 0.0-1.0 importance score
-- `status` (TEXT NOT NULL): One of `candidate`, `active`, `stale`, `superseded`
-- `supersedes_memory_id` (TEXT): Optional reference to superseded memory
-- `created_at` (TEXT NOT NULL): ISO 8601 creation timestamp
-- `updated_at` (TEXT NOT NULL): ISO 8601 last update timestamp
-- `last_verified_at` (TEXT): ISO 8601 last verification timestamp
-
-**Indexes**:
-- `idx_memories_scope_glob`: For scope-based queries
-- `idx_memories_status`: For status filtering
-- `idx_memories_created_at`: For temporal queries
-
-#### `evidence` (Supporting Evidence)
-- `id` (TEXT PRIMARY KEY): UUID identifier
-- `memory_id` (TEXT NOT NULL): Foreign key to memories
-- `source_kind` (TEXT NOT NULL): One of `session`, `task`, `file`, `manual_note`
-- `source_ref` (TEXT NOT NULL): Reference to source (e.g., file path, session ID)
-- `excerpt` (TEXT NOT NULL): Relevant excerpt from source
-- `created_at` (TEXT NOT NULL): ISO 8601 creation timestamp
-
-**Indexes**:
-- `idx_evidence_memory_id`: For memory lookups
-- `idx_evidence_created_at`: For temporal queries
-
-#### `policy_rules` (Enforceable Rules)
-- `id` (TEXT PRIMARY KEY): UUID identifier
-- `memory_id` (TEXT): Optional foreign key to memories
-- `rule_code` (TEXT NOT NULL UNIQUE): Unique rule identifier
-- `severity` (TEXT NOT NULL): One of `info`, `warning`
-- `trigger_kind` (TEXT NOT NULL): One of `session_start`, `before_model`, `before_tool`, `after_tool`
-- `scope_glob` (TEXT NOT NULL): Glob pattern for scope matching
-- `message` (TEXT NOT NULL): Rule message/description
-- `created_at` (TEXT NOT NULL): ISO 8601 creation timestamp
-- `updated_at` (TEXT NOT NULL): ISO 8601 last update timestamp
-
-**Indexes**:
-- `idx_policy_rules_scope_glob`: For scope-based queries
-- `idx_policy_rules_trigger_kind`: For trigger-based queries
-- `idx_policy_rules_memory_id`: For memory lookups
-
-#### `activation_logs` (Audit Trail)
-- `id` (TEXT PRIMARY KEY): UUID identifier
-- `session_id` (TEXT NOT NULL): Session identifier
-- `lifecycle_trigger` (TEXT NOT NULL): One of `session_start`, `before_model`, `before_tool`, `after_tool`
-- `scope_ref` (TEXT NOT NULL): Scope reference (e.g., file path)
-- `activated_memory_ids` (TEXT NOT NULL): JSON array of activated memory IDs
-- `suppressed_memory_ids` (TEXT NOT NULL): JSON array of suppressed memory IDs
-- `reason` (TEXT NOT NULL): Reason for activation/suppression
-- `created_at` (TEXT NOT NULL): ISO 8601 creation timestamp
-
-**Indexes**:
-- `idx_activation_logs_session_id`: For session lookups
-- `idx_activation_logs_created_at`: For temporal queries
-- `idx_activation_logs_lifecycle_trigger`: For trigger-based queries
-
-## Migration Strategy
-
-### Version Tracking
-
-Migrations are tracked using SQLite's built-in `PRAGMA user_version` integer. Each migration file is named `NNN_description.sql` where `NNN` is the version number.
-
-### Idempotency
-
-All migrations are idempotent:
-- All CREATE statements use `IF NOT EXISTS`
-- Migrations are only applied if the current version is less than the migration version
-- Running migrations multiple times produces the same result
-
-### Current Migrations
-
-**Migration 001**: Initial schema
-- Creates all four MVP tables
-- Creates all indexes
-- Establishes foreign key relationships
-- Sets `PRAGMA user_version` to the applied migration version
-
-## Usage
-
-### Running Migrations
-
-```bash
-bun run db:migrate --db path/to/database.sqlite
+```
+1 lock      acquireDirLock(locks/db.lock): owner.json {pid, hostname, purpose, started_at, heartbeat_at};
+            takeover when heartbeat_at is older than 120 s or the owner pid on this host is dead;
+            otherwise jittered 25–250 ms waits until waitMs → LockBusyError (CLI exit 75)
+2 load      readFileSync → header "SQLite format 3\0" + PRAGMA quick_check(1);
+            damaged → keep as memory.sqlite.corrupt-<ts>, restore memory.sqlite.prev
+3 migrate   user_version < 21 → copy to memory.sqlite.bak-v<N> → runMigrationsOnDb → hooks.postMigrate (default runPostMigrate)
+4 apply     BEGIN; op = fn(db, ctx)
+            op.noop && !op.wrote → ROLLBACK, nothing saved
+            op.noop && op.wrote  → quick_check, COMMIT (no derive / generation / write_ops)
+            otherwise            → hooks.deriveRules, meta.db_generation += 1, INSERT write_ops(op.id), quick_check, COMMIT
+            any exception        → ROLLBACK, rethrow; an op.id already in write_ops → changes rolled back, reported as noop
+5 save      db.export() → memory.sqlite.tmp-<pid> → fsync → copy current → .prev → rename
+            (5 attempts, 20 ms apart; EPERM/EBUSY → copy fallback + warning)
+6 snapshot  hooks.buildSnapshot(db, ctx) when the file was saved (or alwaysSnapshot); finally release the lock
 ```
 
-### Inspecting Database
+`WriteOp = {id: string | null, kind, noop, wrote}`; `WriteContext = {paths, now, generation, userVersion, logger, alreadyApplied(id)}`
+where `generation` is the value this write produces. The lock is held for load → apply → save only
+(seconds); LLM calls happen outside it (§9.3).
 
-```bash
-bun run db:inspect --db path/to/database.sqlite
-```
+Read-only callers use `store.read(fn)`: no lock, no save, migrations are **not** applied; `ctx.userVersion`,
+`ctx.migrationNeeded` and `ctx.newerThanCode` tell the caller whether to refuse. A damaged main file is read
+from `.prev` in memory without touching the disk.
 
-## Design Notes
+## Migrations
 
-### Content-Hash Deduplication
+- Files run on a fresh connection **without a surrounding transaction**: 017 and 021 toggle
+  `PRAGMA foreign_keys`, which is a no-op inside a transaction, and dropping `memories` with foreign keys
+  ON would cascade-delete `evidence` and the dream links. Atomicity comes from in-memory application plus
+  the tmp → rename save; the `.bak-v<from>` copy is the rollback point (`hm db:rollback`).
+- `user_version > 21` → `DatabaseNewerThanCodeError`; nothing is changed, read paths stay usable.
+- Legacy fixtures (`test/fixtures/legacy-db/`, real v0.5 installs at versions 9 and 10) are asserted to
+  reach 21 with zero row loss in `test/db-migrations-legacy.test.ts`.
 
-The `memories` table uses a UNIQUE constraint on `content_hash` to prevent duplicate memories with identical content. This allows:
-- Efficient deduplication during memory insertion
-- Automatic conflict detection
-- Supersession tracking via `supersedes_memory_id`
+## Post-migrate (`runPostMigrate`)
 
-### Scope Globbing
+1. `status = 'candidate'` rows linked from `legacy_dream_memory_evidence_links` (only DreamWorker candidates
+   ever had links) → `rejected`, `status_reason = 'migration'`, plus a `memory_transitions` row
+   (`actor = 'migration'`, reason `dreamworker_template`).
+2. `semantic_key = sha256(type|scope_glob|signature_key|normalize(summary))` for live rows
+   (`candidate | active | stale`). Collisions: the oldest row keeps the key, the newer stays NULL (the partial
+   unique index must hold) and a `merge` proposal is opened (`created_by = 'migration'`, target = oldest,
+   candidate = newer, expires in 30 days).
 
-The `scope_glob` field uses glob patterns (e.g., `src/**/*.ts`, `docs/**/*.md`) to match files and scopes. This enables:
-- Efficient scope-based memory activation
-- Flexible scope matching without regex complexity
-- Clear, human-readable scope definitions
+Raw SQL on purpose: migration code is the one place allowed to bypass `transitionMemory`.
 
-### Lifecycle Triggers
+## Testing
 
-Memories and rules are activated at specific lifecycle points:
-- `session_start`: At the beginning of a session
-- `before_model`: Before calling the model
-- `before_tool`: Before using a tool
-- `after_tool`: After tool execution
-
-### Budget Constraints
-
-The activation system enforces:
-- Maximum 10 memories per activation
-- Maximum 8KB total payload per activation
-- Tracked in `activation_logs` for audit trail
-
-## Future Migrations
-
-Future migrations should:
-1. Follow the naming convention `NNN_description.sql`
-2. Use `IF NOT EXISTS` for all CREATE statements
-3. Include comments explaining the changes
-4. Be tested for idempotency
-5. Update this README with schema changes
+`test/helpers/create-test-db.ts`: `createTestDb()` (fresh, latest schema, FK on, post-migrated),
+`createTestDbAtVersion(n)`, `createTestDbFromFixture(path, {migrate?, postMigrate?})`, `LEGACY_FIXTURES`.
+Store tests use a temp `.harness-memory/` via `resolvePaths(tmpRoot)` and an injected clock.

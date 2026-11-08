@@ -1,0 +1,4 @@
+"seq":5000,"turn_key":"p5","text":"this first line was cut by the tail read","correction":0,"remember":0}
+{"kind":"prompt","ts":"2026-11-08T12:00:00.000Z","seq":5001,"turn_key":"p5","text":"check the lockfile","correction":0,"remember":0}
+{"kind":"tool_ok","ts":"2026-11-08T12:00:02.000Z","seq":5002,"turn_key":"p5","tool_use_id":"tu1","tool":"read","host_tool":"Read","shell_dialect":null,"input_digest":"pnpm-lock.yaml","scope_refs":["pnpm-lock.yaml"],"program_token":null,"output_head":"lockfileVersion: '9.0'","output_tail":"","resolution_of":null}
+{"kind":"assistant","ts":"2026-11-08T12:00:05.000Z","seq":5003,"turn_key":"p5","text":"The lockfile is pnpm v9; this trailing line is being written and has no newline ye
