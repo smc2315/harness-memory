@@ -17,7 +17,8 @@ const DIST_HOOK = resolve(__dirname, "..", "dist", "hook.js");
 const built = existsSync(DIST_HOOK) && existsSync(resolve(__dirname, "..", "dist", "hook-bundle.js"));
 /**
  * The hard p95 ≤ 90 ms gate is `hm eval:latency` (spec §13.3, exit 1). This suite measures the real launcher
- * when dist/ exists and fails only on a gross regression (2× the budget) unless HM_LATENCY_BUDGET_MS pins the
+ * when dist/ exists (run alone: `npm run test:latency`, excluded from `npm test` because parallel suites would
+ * inflate the numbers) and fails only on a gross regression (2× the budget) unless HM_LATENCY_BUDGET_MS pins the
  * gate, because a unit-test run shares the machine with other workers and start-up cost varies by host
  * (`node -e 0` alone was 33 ms at M0 and 50 ms during the C2 run on the same machine).
  */

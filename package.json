@@ -86,6 +86,7 @@
     "package:verify": "node scripts/verify-packed-install.mjs",
     "prepack": "npm run build",
     "test": "vitest run --config vitest.config.ts",
+    "test:latency": "vitest run --config vitest.latency.config.ts",
     "test:embedding": "vitest run --config vitest.embedding.config.ts"
   },
   "dependencies": {

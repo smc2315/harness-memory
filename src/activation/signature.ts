@@ -8,7 +8,6 @@
  */
 
 import { createRequire } from "node:module";
-import { performance } from "node:perf_hooks";
 
 import type { CompiledSignature } from "../core/snapshot-types";
 import {
