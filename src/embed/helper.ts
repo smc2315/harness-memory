@@ -41,6 +41,12 @@ export interface StartHelperOptions {
   socketPath?: string;
   /** Install SIGTERM / SIGINT handlers (default true). */
   signals?: boolean;
+  /**
+   * Load the model right after listen() instead of on the first request (default true). The helper exists because
+   * a hook just missed its dense leg and the next prompt arrives within seconds; a lazy load made that second prompt
+   * miss the 80 ms budget too (verification round, critic gap 11).
+   */
+  warmUp?: boolean;
 }
 
 export interface HelperHandle {
@@ -275,6 +281,11 @@ export async function startHelper(options: StartHelperOptions): Promise<HelperHa
     process.once("SIGINT", () => void shutdown(true));
   }
   log(`embedding helper listening on ${socketPath}`);
+  if (options.warmUp !== false) {
+    void getEmbedder()
+      .then((embedder) => log(`model ${embedder.model} warm`))
+      .catch((error: unknown) => log(`model warm-up failed: ${error instanceof Error ? error.message : String(error)}`));
+  }
 
   return {
     socketPath,

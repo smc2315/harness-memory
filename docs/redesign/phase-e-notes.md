@@ -166,7 +166,7 @@ ext4 tree (not under `/mnt/c`).
 | `npm ci` | 16 s, 169 packages (onnxruntime-node for Linux included) |
 | `npm run typecheck` | 0 errors, 11 s |
 | `npm test` | 986 passed, 4 skipped (the dist smoke suites skip until `npm run build` has run), 22 s |
-| `npm run test:latency` | 9 passed |
+| `npm run test:latency` | 8 passed, 1 skipped (the dist-backed test, dist not built yet) |
 | `npm run build` | all bundles |
 | `hm eval:replay` | 12/12 scenarios, 314/314 checks |
 | `hm eval:latency` ×3 | p95 174.9 / 102.5 / 99.9 ms while three other agents were building and testing on the same machine (see the re-run below) |
@@ -190,6 +190,16 @@ quiet-machine gate, and the CI workflow treats the latency steps as informationa
 
 Linux-only paths exercised for real for the first time: the unix-socket rendezvous path check in `hm doctor`, the
 `/proc/<pid>/stat` worker-pid validation, exec-form hooks under bash, and onnxruntime-node for Linux.
+
+**Addendum (critic gaps 5, 7, 14).** `linux-extra.sh` on the final tree: the dist-dependent suites that the earlier
+runs had skipped (`test/cli-dist-smoke.test.ts`, `test/ops-parallel-hooks.test.ts`, `test/eval-latency.test.ts`) pass
+6/6 after a build; the real-model suites pass 18/18 on Linux too, with the helper listening on
+`/run/user/1000/harness-memory-embed-<hash>.sock` (the `$XDG_RUNTIME_DIR` path) and the detached `dist/embed-helper.js`
+answering on it — the only failure was the legacy benchmark's 50 ms per-embed bound (62 ms while the helper file loaded
+the same model in a parallel vitest worker), now 150 ms with a comment. With a PATH that has no `claude` or `codex`,
+`hm install --host claude` prints the intended guidance: "provider none found — no extraction CLI found (claude or
+codex); install one or set HARNESS_MEMORY_CLAUDE_BIN". **Node 20.20.2** (the `engines` floor, never run before):
+`npm ci`, typecheck, build, `npm test` 995 passed / 1 skipped, `hm eval:replay` 12/12 (317 checks).
 
 ### 5.2 GitHub Actions
 
@@ -232,6 +242,13 @@ A CLI-level run in a temp project (embeddings enabled in `config.json`, one Engl
 `prompt` hooks with the Korean prompt) exercised the Windows named-pipe spawn path; the agent's report and the reviews
 are in the workflow transcript (see §9).
 
+**Addendum — cold miss.** Both the Windows and the Linux CLI runs showed the same shape: the first prompt spawns the
+helper and proceeds lexical-only (by design), but the *second* prompt also missed (`dense:false`, hook `dur` 105–110 ms)
+because the helper loaded the model lazily on its first `topk`; the first dense hit came on the third prompt. The
+helper now starts loading the model right after `listen()` (`StartHelperOptions.warmUp`, default true; the seam tests
+inject an embedder object, so nothing changes for them), so a prompt a few seconds after the spawn finds the model
+warm. The real-model suite still passes with the same rankings.
+
 ## 7. Packed-install verification
 
 `npm pack --dry-run`: 85 files, 2.8 MB tarball, 11.6 MB unpacked, nothing outside `dist/`, `README*`, `LICENSE`
@@ -247,9 +264,9 @@ that one expectation corrected the full run passed (pack → install into a temp
 
 ## 8. What still needs the user
 
-- `claude auth login` in any terminal (the desktop app's login does not carry over, §4), then a first dogfood
-  session in a real project so the live extraction prompt, validators V1–V11 and the `nested_refusal` classifier see
-  real `claude -p` output.
+- (done 20:05) `claude auth login`; what remains is a first dogfood session in a real project so the live extraction
+  prompt, validators V1–V12 and the `nested_refusal` / `probe_timeout` classifiers see real `claude -p` output over
+  days, not two synthetic sessions.
 - Approval to push `redesign/v0.6`: with §5 in place the first push runs the suite on ubuntu, macOS and Windows.
 - A project to dogfood in (hooks load at session start; corrections and failure→resolution episodes are what the
   extractor keys on).
@@ -299,3 +316,28 @@ Review findings that changed something:
 | `npm run test:embedding` | 18 / 18 (8 legacy + 10 helper, real model from the cache) | 8 / 8 legacy on the b8ef360 tree (the helper test did not exist yet) |
 | `npm run package:verify` | OK after the script fix | — |
 | Live `claude -p` | probe ok; two full extraction runs (§4b) | — |
+
+## 11. The critic's 18 gaps and what happened to each
+
+The completeness critic ran against commit 40db65d. Status after the follow-up work of the same evening:
+
+| # | Gap (claim without evidence) | Outcome |
+|---|---|---|
+| 1 | no Windows full gate on the committed tree | closed — `npm test` 996/996, `eval:replay` 317/317 and `test:embedding` 18/18 ran on the tree that became 40db65d (the critic saw an older log) |
+| 2 | `package:verify` never passed with the repo's own script | closed — ran after the fix: "OK packed install verified", 45 s |
+| 3 | no passing Windows latency measurement this round | open — the machine ran three Android emulators all evening; the A/B against the Phase D build shows no regression (§5.1); re-measure on a quiet machine |
+| 4 | hook-internal p95 203 ms in the live session | open as a measurement task — the 203 ms was the first PreToolUse of a session while three workers and `claude -p` started; re-run with one session and `hm dream` to characterise |
+| 5 | dist-dependent vitest suites and the helper Tier-2 suite never ran on Linux | closed — 6/6 and 18/18 on WSL, helper on the `/run/user/1000` socket (§5.1 addendum) |
+| 6 | two open advisories in the runtime tree | brace-expansion fixed in the lockfile (`npm audit fix`); minimatch stays on 10.x — 11.x breaks the glob compiler and the stored regex sources — recorded under Known limitations |
+| 7 | CI never ran; Node 20 and macOS untested | Node 20.20.2 full gate green in WSL (995/996, replay 12/12); macOS and the workflow itself wait for the first push |
+| 8 | ci.yml header asserted an unverified "Node 20 runtime removed on 2026-09-23" | closed — reworded to what the fetched `action.yml` files prove |
+| 9 | embedding job's download branch never executed | open — needs a 130 MB download or the first `workflow_dispatch` |
+| 10 | `--with-embeddings` from an installed package never run | open — documented path, seam-tested only |
+| 11 | helper cold miss: the first dense query after a spawn always misses | closed — the helper now warms the model right after `listen` (§6 addendum) |
+| 12 | dense threshold margins 0.01–0.03 | open — needs a paraphrase sweep before freezing `DENSE_HIT_THRESHOLD` |
+| 13 | review → accept → fire never exercised on live data | closed — `hm proposals:accept b039e6c2` turned the live-extracted lint policy into active/human; the next session's `git commit` received it as `additionalContext` (advise) |
+| 14 | "no provider found" guidance and the stop-failure event never exercised | closed — StopFailure stdin to `dist/hook.js stop-failure` exits 0 and logs `ok`; a claude-less PATH in WSL prints the "none found" guidance (§5.1 addendum) |
+| 15 | committed docs contradicted the evidence | closed — CHANGELOG known-limitation on live extraction rewritten, §5.1 cell corrected, login moved to done |
+| 16 | source maps in the tarball; `dist/audit` built but not exported | open, deliberately — release decisions |
+| 17 | the critic's input was truncated | n/a — the orchestrator read the full reviews from the journal; every fixer "applied" item is in the committed ci.yml |
+| 18 | zero dogfood days | open — only the user can start it |

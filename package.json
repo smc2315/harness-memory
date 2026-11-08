@@ -90,7 +90,7 @@
     "test:embedding": "vitest run --config vitest.embedding.config.ts"
   },
   "dependencies": {
-    "minimatch": "^10.0.1",
+    "minimatch": "^10.2.6",
     "minisearch": "^7.2.0",
     "sql.js": "^1.8.0"
   },
