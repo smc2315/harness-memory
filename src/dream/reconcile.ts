@@ -45,6 +45,7 @@ import { ProvenanceRepository, recomputeDerived } from "../db/repositories/prove
 import { ExtractionRunRepository } from "../db/repositories/runs";
 import { selectOne } from "../db/sql";
 import type { WriteOp } from "../db/store";
+import { PROBE_FAILURE_CACHE_MS } from "./extract/providers/types";
 import { createMemoryIdentityKey } from "../memory/utils";
 import {
   DuplicateMemoryContentError,
@@ -67,8 +68,11 @@ export const RECENT_REJECT_DAYS = 30;
 export const MAX_EXTRACTION_ATTEMPTS = 3;
 /** Backoff after the n-th failed attempt (1-based); the third failure makes the episode `dead` (§9.4 F3). */
 export const RETRY_BACKOFF_MS: readonly number[] = [60 * 60_000, 6 * 60 * 60_000];
-/** Provider-unavailable statuses do not burn an attempt; the episode waits for the next daily probe (m0-facts #3). */
-export const PROVIDER_UNAVAILABLE_RETRY_MS = 24 * 60 * 60_000;
+/**
+ * Provider-unavailable statuses do not burn an attempt; the episode is due again when the failed probe may be retried
+ * (`PROBE_FAILURE_CACHE_MS`, ten minutes — m0-facts #3), so a login is picked up by the next worker run.
+ */
+export const PROVIDER_UNAVAILABLE_RETRY_MS = PROBE_FAILURE_CACHE_MS;
 
 export const TYPE_IMPORTANCE: Readonly<Record<MemoryType, number>> = {
   policy: 0.8,

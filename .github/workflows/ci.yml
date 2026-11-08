@@ -1,0 +1,226 @@
+# CI for harness-memory: Claude Code hooks + a detached worker (TypeScript ESM, tsup, vitest).
+#
+# Jobs
+#   test            One sequence per OS / Node pair: npm ci -> typecheck -> build -> vitest -> `hm eval:replay`.
+#                   The hooks and the worker are real child processes, so Linux, macOS and Windows each run
+#                   the whole sequence; Node 20 is the `engines` floor, Node 24 the development version.
+#   package-verify  Packs the tarball, installs it into a throwaway consumer project and exercises install,
+#                   hooks, status, doctor, snapshot and uninstall (scripts/verify-packed-install.mjs; needs
+#                   the npm registry).
+#   embedding       Tier-2 real-model tests (`npm run test:embedding`), workflow_dispatch only: they load the
+#                   130 MB multilingual-e5-small model, which actions/cache keeps between runs and
+#                   .github/scripts/ensure-embedding-model.mjs puts into both directories the suites read.
+#
+# Actions are pinned to @v5. GitHub removed the Node 20 action runtime from hosted runners on 2026-09-23
+# (changelog "Node 20 is no longer available in GitHub Actions"); the @v4 releases of checkout, setup-node and
+# cache still declare `runs.using: node20`, the @v5 releases declare node24 and keep the inputs used here.
+#
+# Latency is informational here. `npm run test:latency` (test/eval-latency.test.ts) and `hm eval:latency`
+# (src/cli/commands/eval-latency.ts) spawn `node dist/hook.js pre-tool` fifty times and judge the p95 against
+# the spec's 90 ms budget. That budget is a developer-machine gate: hosted runners are shared 2-4 vCPU VMs
+# whose process start-up time swings by tens of milliseconds from run to run, so a hard gate would fail builds
+# for reasons unrelated to the code. Both steps therefore run with continue-on-error and append their output
+# to the job summary (GITHUB_STEP_SUMMARY), where the numbers can be read per OS and Node version; a failed
+# measurement shows as a warning on the step, never as a red build. The one wall-clock assertion inside the
+# blocking `npm test` step (test/hook-latency.test.ts, in-process p50) is relaxed for the same reason through
+# HM_LATENCY_BUDGET_MS on that step alone; see the comment there.
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+      - "redesign/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One group per event and ref: a push must not cancel a manual (workflow_dispatch) embedding run of the same
+# branch, nor a dispatch the branch's push run, and runs on master are never cancelled so every default-branch
+# commit keeps its result. pull_request runs use refs/pull/<n>/merge, a group of their own.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/master' }}
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            node: 20
+          - os: ubuntu-latest
+            node: 24
+          - os: macos-latest
+            node: 24
+          - os: windows-latest
+            node: 24
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: npm ci
+        run: npm ci
+
+      - name: npm run typecheck
+        run: npm run typecheck
+
+      # Build before the unit tests: test/cli-dist-smoke.test.ts, the process variant of
+      # test/ops-parallel-hooks.test.ts and the dist checks of test/eval-latency.test.ts are
+      # `describe.skipIf(!built)` and would silently skip on a runner that has no dist/ yet.
+      - name: npm run build
+        run: npm run build
+
+      # test/hook-latency.test.ts asserts the in-process pre-tool p50 over 31 runs against HM_LATENCY_BUDGET_MS
+      # (default 15 ms; its header says to override it on slow CI boxes). vitest runs that file in parallel with
+      # the 20-process ops suite and the replay suite, so on a shared runner the step relaxes the budget to 60 ms,
+      # which still fails on a gross regression (the whole hook process has 50-90 ms, spec §6.3). Step-scoped on
+      # purpose: test/eval-latency.test.ts reads the same variable (default 180 ms) in the informational step
+      # below and keeps its own default. --testTimeout lifts vitest's 5 s per-test default for the tests that
+      # spawn the CLI and hook processes (the dist smoke `hm install` alone takes ~2.4 s on a developer machine)
+      # so runner load cannot time them out; tests that set their own timeout keep it.
+      - name: npm test
+        env:
+          HM_LATENCY_BUDGET_MS: "60"
+        run: npm test -- --testTimeout=20000
+
+      # --verbose prints every check (314 at HEAD), not only the failed ones, so a red scenario can be read from
+      # the step log without re-running it locally with --keep.
+      - name: hm eval:replay
+        run: node dist/bin/harness-memory.js eval:replay --verbose
+
+      # The two latency measurements (see the header comment). These two steps set `shell: bash` because
+      # appending to $GITHUB_STEP_SUMMARY needs one redirection syntax on all three runners (Git Bash on
+      # Windows); every other step keeps the runner's default shell. NO_COLOR keeps vitest's ANSI colours
+      # (forced whenever CI is set) out of the summary.
+      - name: npm run test:latency (informational)
+        continue-on-error: true
+        shell: bash
+        env:
+          MATRIX_LABEL: ${{ matrix.os }}, node ${{ matrix.node }}
+          NO_COLOR: "1"
+        run: |
+          log="$RUNNER_TEMP/test-latency.log"
+          set +e
+          npm run test:latency > "$log" 2>&1
+          status=$?
+          set -e
+          cat "$log"
+          {
+            echo "### npm run test:latency — ${MATRIX_LABEL} (exit ${status}, informational)"
+            echo
+            echo '```'
+            tail -n 80 "$log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      - name: hm eval:latency (informational)
+        continue-on-error: true
+        shell: bash
+        env:
+          MATRIX_LABEL: ${{ matrix.os }}, node ${{ matrix.node }}
+          NO_COLOR: "1"
+        run: |
+          log="$RUNNER_TEMP/eval-latency.log"
+          set +e
+          node dist/bin/harness-memory.js eval:latency > "$log" 2>&1
+          status=$?
+          set -e
+          cat "$log"
+          {
+            echo "### hm eval:latency — ${MATRIX_LABEL} (exit ${status}, informational; spec gate p95 <= 90 ms)"
+            echo
+            echo '```'
+            tail -n 40 "$log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+  package-verify:
+    name: package:verify (ubuntu-latest, node 24)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: npm ci
+        run: npm ci
+
+      # `npm pack` runs `prepack` (npm run build), then the script `npm install`s the tarball into a temp
+      # consumer (sql.js, minisearch and minimatch come from the registry), checks the runtime bundles, and
+      # drives `hm install --host claude --skip-probe`, `node dist/hook.js session-start`, `hm status`,
+      # `hm doctor`, `hm snapshot:rebuild`, `hm db:migrate`, `hm memory:list` and `hm uninstall --purge`.
+      - name: npm run package:verify
+        run: npm run package:verify
+
+  embedding:
+    name: test:embedding (manual, ubuntu-latest, node 24)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: npm ci
+        run: npm ci
+
+      # Build first: test/embedding/helper-real-model.test.ts spawns dist/embed-helper.js as a child process
+      # and is `test.skipIf(!distBuilt)`, so without dist/ that check would silently skip.
+      - name: npm run build
+        run: npm run build
+
+      # Two model directories, both cached. test/embedding/real-model.test.ts builds `new EmbeddingService()`
+      # without a cacheDir, so @xenova/transformers loads from its own default cache,
+      # node_modules/@xenova/transformers/.cache (src/activation/embeddings.ts); the runtime helper
+      # (src/embed/helper.ts) and test/embedding/helper-real-model.test.ts use `config.embeddings.cache_dir ??
+      # modelsDir()` = ~/.harness-memory/models and never download. The restore has to come after `npm ci`,
+      # which wipes node_modules. restore/save are split because the plain action saves only in its post step
+      # and only when the job succeeded (post-if: success()), which would throw the 130 MB download away each
+      # time the suite is red; the save below runs right after the model step instead. The key carries the model
+      # name and a layout version (v2 = both directories), not a hash: the model files are immutable.
+      - uses: actions/cache/restore@v5
+        id: model-cache
+        with:
+          path: |
+            node_modules/@xenova/transformers/.cache
+            ~/.harness-memory/models
+          key: ${{ runner.os }}-model-Xenova-multilingual-e5-small-quantized-v2
+
+      # Downloads into the transformers cache on a miss and copies the model into ~/.harness-memory/models when
+      # that one is missing; a no-op when both are complete, so it runs on hits as well and a partial cache
+      # cannot pin the job red. Done before the suite because EmbeddingService.warmup() races the load against
+      # a 30 s timer, which is tight for a 130 MB download plus the ONNX session start on a shared runner.
+      - name: Ensure the model is in both caches
+        run: node .github/scripts/ensure-embedding-model.mjs
+
+      - uses: actions/cache/save@v5
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            node_modules/@xenova/transformers/.cache
+            ~/.harness-memory/models
+          key: ${{ runner.os }}-model-Xenova-multilingual-e5-small-quantized-v2
+
+      - name: npm run test:embedding
+        run: npm run test:embedding

@@ -1,11 +1,17 @@
 /**
- * Benchmark: Real Embedding Model (Tier 2 — requires model download)
+ * Benchmark: Real Embedding Model (Tier 2 — the cached multilingual-e5-small model)
  *
  * Uses the actual @xenova/transformers multilingual-e5-small model to
  * validate cross-language retrieval, prefix impact, and latency.
  *
  * Run separately via: npm run test:embedding
- * NOT included in the default npm test suite (model download ~100MB).
+ * NOT included in the default npm test suite (the model is ~130 MB).
+ *
+ * The model is read from the cache the runtime helper and `hm dream` use (model-cache.ts:
+ * `embeddings.cache_dir`, default ~/.harness-memory/models) and must already be there: the
+ * suite fails fast naming that directory instead of downloading inside vitest, where the
+ * download would race EmbeddingService's 30 s warmup timer and leave a second model copy in
+ * node_modules/@xenova/transformers/.cache.
  *
  * Expected output:
  *   - Cross-language similarity scores (Korean ↔ English)
@@ -22,14 +28,16 @@ import {
   cosineSimilarity,
   findTopK,
 } from "../../src/activation/embeddings";
+import { requireCachedModel, tier2CacheDir } from "./model-cache";
 
 describe("Tier 2: Real Embedding Model", () => {
   let service: EmbeddingService;
 
   beforeAll(async () => {
-    service = new EmbeddingService();
+    requireCachedModel(); // fail fast, never download inside vitest
+    service = new EmbeddingService({ cacheDir: tier2CacheDir() });
     await service.warmup();
-  }, 120_000); // Model download may take time on first run.
+  }, 120_000); // Loading the 118 MB ONNX session can take a while on a shared runner.
 
   afterAll(() => {
     // Release singleton for test isolation.

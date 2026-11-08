@@ -180,7 +180,7 @@ describe("decideProposal", () => {
     const row = memories.getById(target.id)!;
     expect(row.scopeGlob).toBe("src/db/**");
     expect(row.lifecycleTriggers).toEqual(["before_model", "before_tool"]);
-    expect(row.signatureKey).toBe("bash|command|cmd|pm test");
+    expect(row.signatureKey).toBe("bash|command|cmd|npm test");
     expect(row.needsScope).toBe(0);
     expect(row.authority).toBe("human");
   });

@@ -42,6 +42,7 @@ export function memoryTableRow(memory: MemoryRecord, summaryChars = 64): string[
   const flags: string[] = [];
   if (memory.importUnconfirmed === 1) flags.push("unconfirmed");
   if (memory.contested === 1) flags.push("contested");
+  else if (memory.openProposalId !== null) flags.push("proposal");
   if (memory.needsScope === 1) flags.push("needs_scope");
   const status = memory.statusReason !== null && memory.statusReason !== "human" && memory.status !== "active" ? `${memory.status}(${memory.statusReason})` : memory.status;
   return [
@@ -94,6 +95,7 @@ export function renderMemoryDetail(memory: MemoryRecord, extras: { proposals?: r
   ];
   const flags: string[] = [];
   if (memory.contested === 1) flags.push("contested");
+  else if (memory.openProposalId !== null) flags.push("proposal");
   if (memory.needsScope === 1) flags.push("needs_scope");
   if (memory.importUnconfirmed === 1) flags.push("import_unconfirmed");
   if (memory.openProposalId !== null) flags.push(`open_proposal ${shortId(memory.openProposalId)}`);

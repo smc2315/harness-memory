@@ -3,7 +3,7 @@
  *
  *   claude -p --output-format json --json-schema <schema> --tools "" --disallowedTools "mcp__*"
  *          --strict-mcp-config --no-session-persistence
- *          --settings '{"disableAllHooks":true,"autoMemoryEnabled":false}' [--model <cfg>]
+ *          --settings '{"disableAllHooks":true,"autoMemoryEnabled":false}' --model <cfg ?? sonnet>
  *
  * No `--max-turns` (it does not exist in 2.1.x; without tools there is one turn anyway). The prompt
  * goes in on stdin, the cwd is the empty per-repository worker directory outside any git checkout,
@@ -27,10 +27,22 @@ import {
   type ExtractOptions,
   type ExtractionProvider,
   type ProbeContext,
+  type ProbeOutcome,
   type ProviderResult,
 } from "./types";
 
 export const CLAUDE_SETTINGS_JSON = JSON.stringify({ disableAllHooks: true, autoMemoryEnabled: false });
+
+/**
+ * Model alias passed when `extraction.model` is null. The headless call must not depend on the interactive default
+ * in `~/.claude/settings.json`: on the reference machine that default was a gateway id (`anthropic.claude-opus-5[1m]`)
+ * the first-party API answers with 404, and background extraction wants a fast, cheap, JSON-reliable model anyway.
+ */
+export const CLAUDE_DEFAULT_EXTRACTION_MODEL = "sonnet";
+
+export function effectiveClaudeModel(model: string | null): string {
+  return model !== null && model.length > 0 ? model : CLAUDE_DEFAULT_EXTRACTION_MODEL;
+}
 
 const NOT_LOGGED_IN = /not logged in|please run \/login|authentication[_ ]?(?:required|failed)|invalid api key/i;
 const NESTED_REFUSAL =
@@ -109,13 +121,24 @@ export function parseClaudeEnvelope(stdout: string): ClaudeEnvelope | null {
   return null;
 }
 
+/** The answering model: 2.1.3xx lists a helper model beside it in `modelUsage`, so take the one with the most output tokens. */
 function modelOf(envelope: ClaudeEnvelope): string | undefined {
   const usage = envelope.modelUsage;
-  if (typeof usage === "object" && usage !== null && !Array.isArray(usage)) {
-    const keys = Object.keys(usage);
-    if (keys.length > 0) return keys[0];
+  if (typeof usage !== "object" || usage === null || Array.isArray(usage)) return undefined;
+  let best: string | undefined;
+  let bestTokens = -1;
+  for (const [model, stats] of Object.entries(usage as Record<string, unknown>)) {
+    const tokens = typeof stats === "object" && stats !== null && typeof (stats as { outputTokens?: unknown }).outputTokens === "number" ? (stats as { outputTokens: number }).outputTokens : 0;
+    if (tokens > bestTokens) {
+      best = model;
+      bestTokens = tokens;
+    }
   }
-  return undefined;
+  return best;
+}
+
+function costOf(envelope: ClaudeEnvelope): number | undefined {
+  return typeof envelope.total_cost_usd === "number" ? envelope.total_cost_usd : undefined;
 }
 
 /** Maps one finished child run onto a ProviderResult (m0-facts #3, #7). */
@@ -138,14 +161,18 @@ export function classifyClaudeRun(run: CommandRunResult): ProviderResult {
   }
   const resultText = typeof envelope.result === "string" ? envelope.result : "";
   if (envelope.is_error === true) {
-    const detail = `${resultText}\n${run.stderr}`.trim();
-    if (NOT_LOGGED_IN.test(detail)) return { status: "not_logged_in", raw: run.stdout, error: oneLine(detail) };
+    // 2.1.3xx envelopes carry the HTTP status of a failed API call (`api_error_status`): 401 is an auth failure however
+    // the message is worded; anything else stays in the message so `hm status` can show it (a 404 on the model, …).
+    const apiStatus = typeof envelope.api_error_status === "number" ? envelope.api_error_status : null;
+    const detail = `${apiStatus === null ? "" : `api ${String(apiStatus)}: `}${resultText}\n${run.stderr}`.trim();
+    if (apiStatus === 401 || NOT_LOGGED_IN.test(detail)) return { status: "not_logged_in", raw: run.stdout, error: oneLine(detail) };
     if (NESTED_REFUSAL.test(detail)) return { status: "nested_refusal", raw: run.stdout, error: oneLine(detail) };
     return { status: "provider_error", raw: run.stdout, error: oneLine(detail.length > 0 ? detail : "is_error without a message") };
   }
   const structured = envelope.structured_output;
   if (typeof structured === "object" && structured !== null) {
-    return { status: "ok", raw: JSON.stringify(structured), structured, model: modelOf(envelope) };
+    const costUsd = costOf(envelope);
+    return { status: "ok", raw: JSON.stringify(structured), structured, model: modelOf(envelope), ...(costUsd === undefined ? {} : { costUsd }) };
   }
   return { status: "invalid_output", raw: run.stdout, error: "structured_output missing from the result envelope", model: modelOf(envelope) };
 }
@@ -162,6 +189,8 @@ export function probeResultOf(result: ProviderResult): ProbeResult {
       return "probe_timeout";
     case "no_provider":
       return "missing";
+    case "provider_error":
+      return "provider_error";
     default:
       return "invalid_output";
   }
@@ -192,7 +221,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions = {}): Extra
     }
     const run = await runner({
       binary,
-      args: buildClaudeArgs(schemaJson, model),
+      args: buildClaudeArgs(schemaJson, effectiveClaudeModel(model)),
       cwd: ensureCwd(paths, options.cwd),
       env: options.env ?? claudeChildEnv(),
       stdin: prompt,
@@ -203,14 +232,16 @@ export function createClaudeProvider(options: ClaudeProviderOptions = {}): Extra
 
   return {
     name: "claude",
-    async probe(ctx: ProbeContext): Promise<ProbeResult> {
+    async probe(ctx: ProbeContext): Promise<ProbeOutcome> {
       const result = await call(PROBE_PROMPT, PROBE_SCHEMA_JSON, ctx.paths, ctx.config.extraction.model, ctx.config.extraction.probe_timeout_ms);
       if (result.status === "ok") {
         const structured = result.structured as { ok?: unknown } | null;
-        return structured !== null && typeof structured === "object" && "ok" in structured ? "ok" : "invalid_output";
+        return structured !== null && typeof structured === "object" && "ok" in structured
+          ? { result: "ok", detail: null }
+          : { result: "invalid_output", detail: "structured_output lacks the probe field" };
       }
       ctx.logger?.warn(`claude probe: ${result.status}${result.error === undefined ? "" : ` (${result.error})`}`);
-      return probeResultOf(result);
+      return { result: probeResultOf(result), detail: result.error ?? null };
     },
     extract(prompt: string, schemaJson: string, extractOptions: ExtractOptions): Promise<ProviderResult> {
       return call(prompt, schemaJson, extractOptions.paths, extractOptions.model, extractOptions.timeoutMs);

@@ -33,12 +33,12 @@ claude:  (fixes it, runs pnpm test) … Stop
          └─ Stop hook: closes the turn as an episode (evidence weight 2), writes queue/<id>.json,
             spawns the detached worker
 worker:  your own `claude -p` (headless, no tools) extracts one fact:
-         pitfall · signature bash/cmd "pm test" · scope packages/api → validated →
+         pitfall · signature bash/cmd "npm test" · scope packages/api → validated →
          active (authority auto, enforcement soft_deny, TTL 30 d) → snapshot rebuilt
 next turn, or next session:
 claude:  Bash: npm test
-         └─ PreToolUse hook (≈ 50 ms, no SQLite): signature matches — `npm test`, `pnpm test`,
-            `yarn test` all canonicalize to `pm test` → permissionDecision "deny":
+         └─ PreToolUse hook (≈ 50 ms, no SQLite): signature matches — `npm test`, `npm run test` and
+            `& npm.cmd test` canonicalize the same way; `pnpm test` never matches it → permissionDecision "deny":
             "[harness-memory] PITFALL (auto, provisional): Run pnpm test from packages/api …
              If this does not apply, call the tool again to proceed."
 claude:  Bash: pnpm test   ← the same (memory | tool) pair passes on retry within the turn
@@ -153,7 +153,7 @@ hm uninstall --purge   # also deletes .harness-memory/ except memory.sqlite.bak-
 ```text
 hooks (no DB)          ledger/*.jsonl ──► queue/<episode>.json ──► worker extract ──► memory.sqlite ──► snapshot/*.v1.*
                        state/*.json        (turn segment)           claude -p +         (one lock,        read by every hook
-                                                                    V1–V11 + reconcile   write_ops)
+                                                                    V1–V12 + reconcile   write_ops)
 ```
 
 ### 1. Ledger — what the hooks write
@@ -197,16 +197,16 @@ The hook spawns `node dist/worker.js <root> extract` detached (`stdio: ignore`, 
    ```text
    claude -p --output-format json --json-schema <schema> --tools "" --disallowedTools "mcp__*" \
      --strict-mcp-config --no-session-persistence \
-     --settings '{"disableAllHooks":true,"autoMemoryEnabled":false}' [--model <extraction.model>]
+     --settings '{"disableAllHooks":true,"autoMemoryEnabled":false}' --model <extraction.model, default sonnet>
    ```
 
-   with the prompt on stdin, cwd `~/.harness-memory/worker/<repo_hash>/` (outside every repository, so no `CLAUDE.md`, project hooks or auto-memory load), an **allowlisted environment** (no `CLAUDECODE`, `CLAUDE_CODE_*`; `HARNESS_MEMORY_DISABLE=1` so hooks inside the child exit immediately), a 120 s wall clock and the raw answer cached 24 h in `raw/<run_id>.json`. The binary is resolved from `HARNESS_MEMORY_CLAUDE_BIN`, then `CLAUDE_CODE_EXECPATH`, then `PATH`, then the winget package directory. A daily **probe** (a one-field schema call) classifies the provider as `ok`, `not_logged_in`, `missing`, `nested_refusal`, `probe_timeout` or `invalid_output`; unavailable providers leave episodes `queued` without burning an attempt.
+   with the prompt on stdin, cwd `~/.harness-memory/worker/<repo_hash>/` (outside every repository, so no `CLAUDE.md`, project hooks or auto-memory load), an **allowlisted environment** (no `CLAUDECODE`, `CLAUDE_CODE_*`; `HARNESS_MEMORY_DISABLE=1` so hooks inside the child exit immediately), a 120 s wall clock and the raw answer cached 24 h in `raw/<run_id>.json`. The binary is resolved from `HARNESS_MEMORY_CLAUDE_BIN`, then `CLAUDE_CODE_EXECPATH`, then `PATH`, then the winget package directory. A **probe** (a one-field schema call) classifies the provider as `ok`, `not_logged_in`, `missing`, `nested_refusal`, `probe_timeout` or `invalid_output`; an `ok` is trusted for a day, a failure is retried after ten minutes, and unavailable providers leave episodes `queued` without burning an attempt.
 
 The extractor answers a fixed JSON schema: `episode_summary`, `nothing_to_learn` and ≤ 8 `facts`, each with `action` (`create` | `reinforce` | `propose_supersede` | `propose_stale`), `type`, `summary` (12–160 chars), `details`, `scope_glob`, `relevant_tools`, `trigger_signature` (`{tool, target, pattern_kind, pattern}`), `lifecycle_triggers`, `confidence`, `evidence_refs` (`e<seq>` citations), `knowledge_kind`, `rationale` and `aliases` (≤ 8 synonyms, including the user's language). There is no `delete` and no `edit`: the LLM can only create, reinforce or propose.
 
-### 4. Validation — V1 to V11
+### 4. Validation — V1 to V12
 
-Each fact passes a deterministic validator before it touches the database: schema shape (V1); every `evidence_refs` entry resolves to a line of this episode (V2); the scope is a repository-relative glob that intersects the episode's files unless a signature carries the precision (V3); the signature's tool was actually used in the episode (V4); regexes compile, have no nested quantifiers and run in < 2 ms on 4 KB (V5); the security scanner passes and the text does not talk about harness-memory itself (V6); `reinforce` / `propose_*` targets exist (V7); the fact is not a restatement of the prompt (V8); no duplicate `semantic_key` within the batch (V9); signatures are specific — `cmd` ≥ 2 tokens, `substring` ≥ 8 chars, globs with a path fragment (V10); and `before_tool` is kept only where a hook can deliver it (V11). A run that is not JSON, has more than 8 facts or more than 50 % hallucinated citations is marked `suspect` and skipped whole; otherwise rejected facts are counted and the rest are applied.
+Each fact passes a deterministic validator before it touches the database: schema shape (V1); every `evidence_refs` entry resolves to a line of this episode (V2); the scope is a repository-relative glob that intersects the episode's files unless a signature carries the precision (V3); the signature's tool was actually used in the episode (V4); regexes compile, have no nested quantifiers and run in < 2 ms on 4 KB (V5); the security scanner passes and the text does not talk about harness-memory itself (V6); `reinforce` / `propose_*` targets exist (V7); the fact is not a restatement of the prompt (V8); no duplicate `semantic_key` within the batch (V9); signatures are specific — `cmd` ≥ 2 tokens, `substring` ≥ 8 chars, globs with a path fragment (V10); `before_tool` is kept only where a hook can deliver it (V11); and a signature is rejected when it also matches the command that resolved the cited failure while that command differs from the failing one — `pm test` would fire on the `pnpm test` that fixed `npm test` (V12). A run that is not JSON, has more than 8 facts or more than 50 % hallucinated citations is marked `suspect` and skipped whole; otherwise rejected facts are counted and the rest are applied.
 
 ### 5. Reconcile — one transaction, then the snapshot
 
@@ -285,7 +285,7 @@ Review is exception handling, with a budget (≤ 3 items per active day is the d
 | `before_tool` | `PreToolUse` | the ladder above | 3 items / 2 KB |
 | `after_tool` | `PostToolUseFailure` | `failure_index[failure_class]` hints (e.g. memories about `enoent` on this tool) as `additionalContext` | 2 items / 1 KB |
 
-`before_tool` in detail: the hook canonicalizes the tool (`Bash` / `PowerShell` → `bash`, `Edit` / `MultiEdit` / `NotebookEdit` → `edit`, `WebFetch` → `fetch`, `mcp__server__tool` → `mcp:server/tool`), picks the target (`command`, `file_path`, `url` or the MCP input JSON) and the path-like tokens in it, reads the ledger tail to learn what already fired this turn, then filters the snapshot: status and TTL → trigger → `relevant_tools` → signature match (`cmd` patterns match on the canonical command form, so `pm test` ≡ `npm test` ≡ `pnpm test` ≡ `yarn test`; `glob` / `regex` / `substring` on the target) or, for signature-less `policy` / `pitfall` rows, scope regex × path tokens → derived policy rules → ranking by enforcement, signature match, human first, score → quotas (policy 2, pitfall 2, workflow 1) → budget. Rows imported from a file the host already loads (`CLAUDE.md`, `CLAUDE.local.md`) are skipped at `session_start` / `before_model` so nothing is said twice. `hm memory:why --tool bash --target "npm test"` runs exactly this function and prints every activation and suppression reason.
+`before_tool` in detail: the hook canonicalizes the tool (`Bash` / `PowerShell` → `bash`, `Edit` / `MultiEdit` / `NotebookEdit` → `edit`, `WebFetch` → `fetch`, `mcp__server__tool` → `mcp:server/tool`), picks the target (`command`, `file_path`, `url` or the MCP input JSON) and the path-like tokens in it, reads the ledger tail to learn what already fired this turn, then filters the snapshot: status and TTL → trigger → `relevant_tools` → signature match (`cmd` patterns match on the canonical command form: `npm test` ≡ `npm run test` ≡ `& npm.cmd test`, while the family forms `pm test` / `bin vitest` cover every package manager / runner; `glob` / `regex` / `substring` on the target) or, for signature-less `policy` / `pitfall` rows, scope regex × path tokens → derived policy rules → ranking by enforcement, signature match, human first, score → quotas (policy 2, pitfall 2, workflow 1) → budget. Rows imported from a file the host already loads (`CLAUDE.md`, `CLAUDE.local.md`) are skipped at `session_start` / `before_model` so nothing is said twice. `hm memory:why --tool bash --target "npm test"` runs exactly this function and prints every activation and suppression reason.
 
 ## Embeddings (optional)
 
@@ -317,7 +317,7 @@ hm install --host claude --with-embeddings   # npm install @xenova/transformers 
 | `session_start.max_items` / `max_bytes` | 5 / 3072 | startup budget |
 | `after_tool.max_items` / `max_bytes` | 2 / 1024 | failure-hint budget |
 | `extraction.provider` | `auto` | `auto`, `claude`, `codex`, `replay` (`HARNESS_MEMORY_PROVIDER` overrides) |
-| `extraction.model` | `null` | passed as `--model` when set |
+| `extraction.model` | `null` | `--model` for the headless CLI. `null` makes the claude provider pass the `sonnet` alias (your interactive default in `~/.claude/settings.json` may be a gateway id the headless first-party call cannot reach) and lets codex use its own default |
 | `extraction.max_runs_per_day` | 40 | LLM calls per day; correction episodes are exempt |
 | `extraction.max_auto_activations_per_day` / `_per_episode` | 10 / 3 | auto activation caps |
 | `extraction.timeout_ms` / `probe_timeout_ms` / `lease_seconds` | 120000 / 20000 / 180 | provider wall clock, probe wall clock, episode lease |
@@ -389,10 +389,11 @@ Names and flags are taken from the dispatcher (`src/cli/registry.ts` and the com
 
 | Symptom | What it means / what to do |
 |---|---|
-| `probe not_logged_in`, `queue N (waiting: not_logged_in)` | The headless `claude -p` is not authenticated (the desktop app's login does not carry over). Run `claude` once in a terminal and `/login`; the next worker run re-probes once a day and drains the queue. Nothing is lost meanwhile. |
+| `probe not_logged_in`, `queue N (waiting: not_logged_in)` | The headless `claude -p` is not authenticated (the desktop app's login does not carry over). Run `claude auth login` in a terminal (older CLIs: `claude`, then `/login`); the worker re-probes within ten minutes and drains the queue, or run `hm install --host claude` to re-probe at once. Nothing is lost meanwhile. |
 | `probe missing` | No `claude` / `codex` binary found. Install one, or set `HARNESS_MEMORY_CLAUDE_BIN` / `HARNESS_MEMORY_CODEX_BIN`. |
 | `probe nested_refusal` | The probe ran inside a Claude Code session (`CLAUDECODE` inherited). Run `hm install` / `hm extract` from a plain terminal. |
-| `probe invalid_output` / `probe_timeout` | `claude -p --output-format json --json-schema` did not return structured output within `extraction.probe_timeout_ms`. Check `claude -p` in a terminal; the result is cached 24 h. |
+| `probe provider_error` | The headless CLI ran but its API call failed; `hm status` and `hm doctor` print the provider's message next to the result (for example `api 404: There's an issue with the selected model …`). Set `extraction.model` in `.harness-memory/config.json` to a model your account can use (the default is the `sonnet` alias) and run `hm install --host claude` to re-probe. |
+| `probe invalid_output` / `probe_timeout` | `claude -p --output-format json --json-schema` did not return structured output within `extraction.probe_timeout_ms`. Check `claude -p` in a terminal; a failed result is retried after ten minutes. |
 | Nothing fires, `hooks.calls` says `never` for every event | Claude Code is not calling the hooks: check `.claude/settings.local.json` (`hm doctor` compares it to the manifest), that you opened Claude Code *in this project*, and the node path (`install.node`). `hm doctor --self-test` runs the hook exactly as Claude Code would. |
 | `install.node FAIL` / `install.hook_script FAIL` | The recorded node binary or `dist/hook.js` moved (nvm switch, package reinstall, npx cache pruned). `hm doctor --fix`. |
 | `snapshot stale` for more than a minute | Hooks saw a database newer than the snapshot and requested a reindex (`snapshot/.reindex-requested`, throttled to one per 60 s) but `node dist/worker.js <root> reindex` did not run — look at `logs/worker.log`, or run `hm snapshot:rebuild`. |

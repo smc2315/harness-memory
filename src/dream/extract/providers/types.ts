@@ -42,13 +42,30 @@ export interface ProviderResult {
   raw: string;
   structured?: unknown;
   model?: string;
+  /** `total_cost_usd` of the envelope (claude), when the CLI reports it. */
+  costUsd?: number;
   error?: string;
+}
+
+/** What `probe()` reports: the classification plus the provider's own message for a failure (null when ok). */
+export interface ProbeOutcome {
+  result: ProbeResult;
+  detail: string | null;
+}
+
+/** Providers may return the bare result (replay, fakes) or an outcome with the message. */
+export function normalizeProbe(value: ProbeResult | ProbeOutcome): ProbeOutcome {
+  return typeof value === "string" ? { result: value, detail: null } : value;
 }
 
 export interface ExtractionProvider {
   name: ProviderName;
-  /** A real one-field schema call (20 s); cached daily by the worker through `meta.last_probe_*`. */
-  probe(ctx: ProbeContext): Promise<ProbeResult>;
+  /**
+   * A real one-field schema call (20 s); cached by the worker through `meta.last_probe_*` (a day when `ok`, ten
+   * minutes otherwise). The CLI providers return a ProbeOutcome so the provider's message (a 404 on the model, …)
+   * reaches `hm install` / `hm status` / `hm doctor`.
+   */
+  probe(ctx: ProbeContext): Promise<ProbeResult | ProbeOutcome>;
   extract(prompt: string, schemaJson: string, options: ExtractOptions): Promise<ProviderResult>;
 }
 
@@ -85,5 +102,11 @@ export const PROBE_SCHEMA_JSON = JSON.stringify(PROBE_SCHEMA);
 
 export const PROBE_PROMPT = 'Reply with the JSON object {"ok": true} and nothing else.';
 
-/** Cache lifetime of a probe result in `meta.last_probe_at` (spec §5.4: daily). */
+/** Cache lifetime of a successful (`ok`) probe in `meta.last_probe_at` (spec §5.4: daily). */
 export const PROBE_CACHE_MS = 24 * 60 * 60 * 1000;
+/**
+ * Cache lifetime of a failed probe (`not_logged_in`, `missing`, `nested_refusal`, `probe_timeout`, `invalid_output`):
+ * the worker retries after ten minutes, so a login or an install is picked up at the next run instead of a day later;
+ * `PROVIDER_UNAVAILABLE_RETRY_MS` (reconcile) requeues the waiting episodes for the same moment.
+ */
+export const PROBE_FAILURE_CACHE_MS = 10 * 60 * 1000;

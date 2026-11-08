@@ -40,7 +40,7 @@ export const s01 = defineScenario({
     run.equal("(a) status active", memory.status, "active");
     run.equal("(a) authority auto", memory.authority, "auto");
     run.equal("(a) enforcement soft_deny", memory.enforcement, "soft_deny");
-    run.equal("(a) type pitfall with the canonical cmd key", [memory.type, memory.signatureKey], ["pitfall", "bash|command|cmd|pm test"]);
+    run.equal("(a) type pitfall with the canonical cmd key", [memory.type, memory.signatureKey], ["pitfall", "bash|command|cmd|npm test"]);
     run.equal("(a) evidence_score 2 / evidence_count 1 / validation_count 0", [memory.evidenceScore, memory.evidenceCount, memory.validationCount], [2, 1, 0]);
     run.equal("(a) TTL 30 d for a correction row", memory.ttlExpiresAt, isoPlus(extractAt, { days: 30 }));
     run.equal("(a) aliases indexed", memory.aliases, ["pnpm test", "테스트 실행"]);

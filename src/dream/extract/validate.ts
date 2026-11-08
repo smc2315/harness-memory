@@ -1,5 +1,5 @@
 /**
- * Fact validation V1–V11 (spec §5.6) with the precedence rules for the scope/tool intersection
+ * Fact validation V1–V12 (spec §5.6; V12 from the verification round) with the precedence rules for the scope/tool intersection
  * sets (correction_for union → import rule → tool-less correction/remember episodes) and the
  * run-level circuit breaker (non-JSON, > 8 facts, > 50 % hallucinated refs → `suspect`).
  *
@@ -12,7 +12,9 @@ import {
   commandPatternHasPath,
   compileSignature,
   globMatchesPath,
+  matchSignature,
   normalizeSignatureTool,
+  primaryLiteralProgram,
 } from "../../activation/signature";
 import { toolGlobFamilies, toolGlobMatches } from "../../activation/tool-vocabulary";
 import type { EpisodeDescriptor } from "../../core/episode-types";
@@ -25,7 +27,7 @@ import {
   type RejectionCode,
 } from "../../core/extraction-types";
 import { normalizeScopeGlob, normalizeSummary, semanticKey } from "../../core/ids";
-import type { LedgerLine } from "../../core/ledger-types";
+import type { LedgerLine, ToolFailLine } from "../../core/ledger-types";
 import type { CompiledSignature } from "../../core/snapshot-types";
 import {
   CANONICAL_TOOL_FAMILIES,
@@ -250,6 +252,31 @@ function normalizeRelevantTools(tools: readonly string[]): CanonicalToolFamily[]
   return [...new Set(tools.map((tool) => toolFamily(String(tool).trim().toLowerCase())))];
 }
 
+/**
+ * V12: among the cited lines, a `tool_ok` that resolved a failure of a *different program* and whose command the
+ * signature also matches (`npm test` failed, `pnpm test` fixed it, pattern `pm test`). A fix that keeps the program
+ * (flags, environment, a `cd`) is not a conflict, and when the failing line lies outside this episode nothing can be
+ * proven. Returns the rejection detail, else null.
+ */
+function resolutionConflict(compiled: CompiledSignature, refs: readonly string[], seqMap: ReadonlyMap<string, LedgerLine>): string | null {
+  if (compiled.target !== "command") return null;
+  let failures: ToolFailLine[] | null = null;
+  for (const ref of refs) {
+    const line = seqMap.get(ref);
+    if (line === undefined || line.kind !== "tool_ok" || line.resolution_of === null) continue;
+    const resolving = line.input_digest;
+    if (resolving.length === 0 || !matchSignature(compiled, resolving, line.shell_dialect)) continue;
+    if (failures === null) failures = [...seqMap.values()].filter((candidate): candidate is ToolFailLine => candidate.kind === "tool_fail");
+    const failing = failures.find((candidate) => candidate.failure_sig === line.resolution_of);
+    if (failing === undefined) continue;
+    const failedProgram = primaryLiteralProgram(failing.input_digest, failing.shell_dialect);
+    const fixedProgram = primaryLiteralProgram(resolving, line.shell_dialect);
+    if (failedProgram === null || fixedProgram === null || failedProgram === fixedProgram) continue;
+    return `the signature also matches the command that resolved the failure (${resolving}: ${fixedProgram} instead of ${failedProgram}); name the failing program literally ("${failedProgram} …", not "pm …") or drop the signature`;
+  }
+  return null;
+}
+
 function validateFact(original: ExtractionFact, ordinal: number, ctx: FactContext): FactResult {
   const relabels: string[] = [];
   let fact: ExtractionFact = {
@@ -350,6 +377,14 @@ function validateFact(original: ExtractionFact, ordinal: number, ctx: FactContex
       triggers = [...new Set(triggers.map((trigger) => (trigger === "before_tool" ? ("before_model" as LifecycleTrigger) : trigger)))];
       relabels.push("tool_not_hooked");
     }
+  }
+
+  // V12 — a signature must not fire on the command that resolved the cited failure: "X fails, use Y" written as a
+  // pattern that also matches Y (`pm test` covers `pnpm test`) would block the fix the user asked for. The same literal
+  // command succeeding later (an environment fix) is fine; reinforce never changes a stored signature.
+  if (compiled !== null && (fact.action === "create" || fact.action === "propose_supersede")) {
+    const conflict = resolutionConflict(compiled, fact.evidence_refs, ctx.seqMap);
+    if (conflict !== null) return reject("signature_matches_resolution", conflict);
   }
 
   const normalizedScope = compiled !== null && !commandSignatureNamesPath(compiled) ? GLOBAL_SCOPE : scope.normalized;

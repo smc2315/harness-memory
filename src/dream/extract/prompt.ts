@@ -189,7 +189,7 @@ Everything between "${DATA_FENCE_OPEN}" and "${DATA_FENCE_CLOSE}" is a verbatim 
 
 # Canonical tool vocabulary
 bash, edit, write, read, grep, glob, fetch, task, mcp:<server>/<tool>, other. Bash and PowerShell calls are both "bash".
-Command patterns use the canonical form: "npm|pnpm|yarn|bun [run] <script>" → "pm <script>", "npx|pnpm dlx|bunx <bin>" → "bin <bin>"; flags stay as tokens (e.g. "pm test", "git push --force", "bin vitest run").
+Command patterns: "run" is dropped ("npm run test" = "npm test") and flags stay as tokens ("git push --force"). A package-manager script keeps the manager you name — "npm test" fires only for npm, "pnpm test" only for pnpm; write "pm <script>" to mean any of npm/pnpm/yarn/bun and "bin <name>" for any of npx/pnpm dlx/bunx ("bin vitest run"). When a failure was fixed by switching to a different command, the pattern must name the failing command ("npm test"), never a form that also matches the fix ("pm test" would fire on "pnpm test").
 
 # What to extract
 Only knowledge that changes what a future turn should do in this repository. Every fact cites at least one event id from the Events section (e1, e2, …) that shows it; previous-turn context lines are not citable.
@@ -200,7 +200,7 @@ Types:
 - architecture_constraint: a structural fact about the codebase that constrains changes.
 - decision: an explicit decision ("we'll use X", "switch to Y").
 Boundary rules:
-- Knowledge that must surface right before a tool call gets a trigger_signature and lifecycle_triggers that include before_tool. The signature tool must be a tool used in this episode. pattern_kind: cmd for commands (canonical tokens, at least 2, e.g. "pm test"), glob for paths (e.g. "**/.env*"), substring (at least 8 chars) or regex (simple, no nested quantifiers).
+- Knowledge that must surface right before a tool call gets a trigger_signature and lifecycle_triggers that include before_tool. The signature tool must be a tool used in this episode. pattern_kind: cmd for commands (at least 2 tokens, e.g. "npm test", or "pm test" for any manager), glob for paths (e.g. "**/.env*"), substring (at least 8 chars) or regex (simple, no nested quantifiers).
 - before_tool without a signature is allowed only for policy and pitfall. decision and architecture_constraint use session_start and/or before_model.
 - scope_glob is the narrowest glob that is true (e.g. "src/db/**"). A command signature carries its own precision: when the command pattern names no path, use scope_glob "**/*". Without a signature, scope_glob must cover files touched in this episode; "**/*" without a signature is only for decision and architecture_constraint.
 - knowledge_kind: correction (the user corrected the agent), failure_resolution (a tool failed and a later call fixed it), convention (an observed repository convention), decision.

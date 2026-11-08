@@ -119,17 +119,29 @@ describe("canonicalizeCommand (§4.6 grammar)", () => {
 });
 
 describe("compileSignature / signatureKey", () => {
-  test("cmd patterns share one canonical key", () => {
-    const keys = ["npm test", "pnpm test", "yarn test", "bun test", "npm run test"].map((pattern) => compiled(cmd(pattern)).signature_key);
-    expect(new Set(keys)).toEqual(new Set(["bash|command|cmd|pm test"]));
+  test("cmd patterns: one manager shares one key, the family word `pm` covers every manager", () => {
+    const npmKeys = ["npm test", "npm run test", "npm run-script test", "npm t", "sudo npm test"].map((pattern) => compiled(cmd(pattern)).signature_key);
+    expect(new Set(npmKeys)).toEqual(new Set(["bash|command|cmd|npm test"]));
+    expect(compiled(cmd("pnpm test")).signature_key).toBe("bash|command|cmd|pnpm test");
+    expect(compiled(cmd("yarn test")).signature_key).toBe("bash|command|cmd|yarn test");
+    expect(compiled(cmd("pm test")).signature_key).toBe("bash|command|cmd|pm test");
     expect(compiled(cmd("npm test")).tokens).toEqual(["pm", "test"]);
+    expect(compiled(cmd("npm test")).program).toBe("npm");
+    expect(compiled(cmd("pm test")).program).toBeUndefined();
+    expect(compiled(cmd("git push --force")).program).toBeUndefined();
+    expect(compiled(cmd("pnpm dlx vitest run")).signature_key).toBe("bash|command|cmd|pnpm dlx vitest run");
+    expect(compiled(cmd("pnpm dlx vitest run")).tokens).toEqual(["bin", "vitest", "run"]);
+    expect(compiled(cmd("npx vitest run")).program).toBe("npx");
+    expect(compiled(cmd("bin vitest run")).program).toBeUndefined();
+    // the canonical pattern round-trips through compileSignature
+    expect(compiled(cmd(compiled(cmd("pnpm dlx vitest run")).pattern)).signature_key).toBe("bash|command|cmd|pnpm dlx vitest run");
   });
 
   test("negate is part of the key and round-trips through parseSignatureKey", () => {
     const sig = compiled(cmd("npm test", { negate: true }));
-    expect(sig.signature_key).toBe("bash|command|cmd|pm test|!");
+    expect(sig.signature_key).toBe("bash|command|cmd|npm test|!");
     expect(signatureKey(sig)).toBe(sig.signature_key);
-    expect(parseSignatureKey(sig.signature_key)).toEqual({ tool: "bash", target: "command", pattern_kind: "cmd", pattern: "pm test", negate: true });
+    expect(parseSignatureKey(sig.signature_key)).toEqual({ tool: "bash", target: "command", pattern_kind: "cmd", pattern: "npm test", negate: true });
   });
 
   test("tool globs and regex alternations survive the key format", () => {
@@ -214,8 +226,45 @@ describe("V5 regex safety", () => {
   });
 });
 
+describe("literal package manager in cmd patterns (verification round)", () => {
+  test("`npm test` fires on npm forms only; `pm test` on every manager", () => {
+    const npm = compiled(cmd("npm test"));
+    const cases: Array<[string, "bash" | "powershell", boolean]> = [
+      ["npm test", "bash", true],
+      ["npm run test", "bash", true],
+      ["FOO=1 sudo npm test", "bash", true],
+      ["cd pkg && npm test", "bash", true],
+      ["pnpm test", "bash", false],
+      ["yarn test", "bash", false],
+      ["bun test", "bash", false],
+      ["& npm.cmd test", "powershell", true],
+      ["& pnpm test", "powershell", false],
+    ];
+    for (const [command, dialect, expected] of cases) expect(matchSignature(npm, command, dialect), command).toBe(expected);
+    const family = compiled(cmd("pm test"));
+    for (const command of ["npm test", "pnpm test", "yarn test", "bun run test"]) expect(matchSignature(family, command, "bash"), command).toBe(true);
+    expect(matchSignature(family, "npm run build", "bash")).toBe(false);
+  });
+
+  test("bin runners: `npx vitest` pins npx, `pnpm dlx vitest` pins pnpm dlx, `bin vitest` covers all", () => {
+    expect(matchSignature(compiled(cmd("npx vitest run")), "npx vitest run --reporter dot", "bash")).toBe(true);
+    expect(matchSignature(compiled(cmd("npx vitest run")), "pnpm dlx vitest run", "bash")).toBe(false);
+    expect(matchSignature(compiled(cmd("pnpm dlx vitest run")), "pnpm dlx vitest run", "bash")).toBe(true);
+    expect(matchSignature(compiled(cmd("pnpm dlx vitest run")), "bunx vitest run", "bash")).toBe(false);
+    const any = compiled(cmd("bin vitest run"));
+    for (const command of ["npx vitest run", "pnpm dlx vitest run", "bunx vitest run", "yarn dlx vitest run"]) expect(matchSignature(any, command, "bash"), command).toBe(true);
+  });
+
+  test("canonicalizeCommand exposes the literal program beside the folded tokens", () => {
+    const result = canonicalizeCommand("cd pkg && pnpm dlx vitest run; yarn test", "bash");
+    expect(result.segments).toEqual([["cd", "pkg"], ["bin", "vitest", "run"], ["pm", "test"]]);
+    expect(result.literals).toEqual(["cd", "pnpm dlx", "yarn"]);
+    expect(result.programTokens).toEqual(["cd", "bin vitest", "pm test"]);
+  });
+});
+
 describe("matchSignature", () => {
-  const pmTest = compiled(cmd("npm test"));
+  const pmTest = compiled(cmd("pm test"));
   const forcePush = compiled(cmd("git push --force"));
 
   test.each([

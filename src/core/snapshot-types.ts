@@ -30,6 +30,8 @@ export interface CompiledSignature {
   negate: boolean;
   /** Canonical tokens for `cmd` patterns (first = program), null otherwise. */
   tokens: string[] | null;
+  /** Literal program pinned by a folded `cmd` pattern (`npm`, `pnpm dlx`, `npx`): the matching segment's literal must equal it. Absent for the family words (`pm`, `bin`) and for unfolded programs (§4.6). */
+  program?: string;
   /** Regex source for `glob` (minimatch.makeRe) and `regex` patterns, null otherwise. */
   regex_source: string | null;
   signature_key: string;

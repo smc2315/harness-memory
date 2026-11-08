@@ -33,12 +33,12 @@ claude:  (고치고 pnpm test 실행) … Stop
          └─ Stop 훅: 턴을 에피소드로 닫고(증거 가중치 2) queue/<id>.json을 쓴 뒤
             분리된 worker를 스폰
 worker:  당신의 `claude -p`(헤드리스, 툴 없음)가 fact 하나를 추출:
-         pitfall · 시그니처 bash/cmd "pm test" · scope packages/api → 검증 통과 →
+         pitfall · 시그니처 bash/cmd "npm test" · scope packages/api → 검증 통과 →
          active(authority auto, enforcement soft_deny, TTL 30 d) → 스냅샷 재빌드
 다음 턴, 또는 다음 세션:
 claude:  Bash: npm test
-         └─ PreToolUse 훅(≈ 50 ms, SQLite 없음): 시그니처 일치 — `npm test`, `pnpm test`,
-            `yarn test`는 모두 `pm test`로 정규화된다 → permissionDecision "deny":
+         └─ PreToolUse 훅(≈ 50 ms, SQLite 없음): 시그니처 일치 — `npm test`, `npm run test`,
+            `& npm.cmd test`는 같은 형태로 정규화되고 `pnpm test`는 절대 걸리지 않는다 → permissionDecision "deny":
             "[harness-memory] PITFALL (auto, provisional): Run pnpm test from packages/api …
              If this does not apply, call the tool again to proceed."
 claude:  Bash: pnpm test   ← 같은 턴 안에서 같은 (memory | tool) 쌍의 재시도는 통과한다
@@ -153,7 +153,7 @@ hm uninstall --purge   # memory.sqlite.bak-v<N> 백업을 제외한 .harness-mem
 ```text
 훅(DB 없음)            ledger/*.jsonl ──► queue/<episode>.json ──► worker extract ──► memory.sqlite ──► snapshot/*.v1.*
                        state/*.json        (턴 세그먼트)             claude -p +         (lock 하나,       모든 훅이 읽는다
-                                                                    V1–V11 + reconcile   write_ops)
+                                                                    V1–V12 + reconcile   write_ops)
 ```
 
 ### 1. Ledger — 훅이 쓰는 것
@@ -197,16 +197,16 @@ evidence_weight = correction 2 + remember 3 + (실패마다 resolution 2 | 미�
    ```text
    claude -p --output-format json --json-schema <schema> --tools "" --disallowedTools "mcp__*" \
      --strict-mcp-config --no-session-persistence \
-     --settings '{"disableAllHooks":true,"autoMemoryEnabled":false}' [--model <extraction.model>]
+     --settings '{"disableAllHooks":true,"autoMemoryEnabled":false}' --model <extraction.model, 기본 sonnet>
    ```
 
-   프롬프트는 stdin으로, cwd는 `~/.harness-memory/worker/<repo_hash>/`(어떤 저장소 밖이므로 `CLAUDE.md`, 프로젝트 훅, auto-memory가 로드되지 않는다), **허용 목록 환경**(`CLAUDECODE`, `CLAUDE_CODE_*` 없음; 자식 안의 훅이 즉시 종료하도록 `HARNESS_MEMORY_DISABLE=1`), 벽시계 120 s, 원본 응답은 `raw/<run_id>.json`에 24 h 캐시. 바이너리는 `HARNESS_MEMORY_CLAUDE_BIN` → `CLAUDE_CODE_EXECPATH` → `PATH` → winget 패키지 디렉터리 순으로 찾는다. 하루 한 번의 **probe**(1필드 스키마 호출)가 provider를 `ok`, `not_logged_in`, `missing`, `nested_refusal`, `probe_timeout`, `invalid_output`으로 분류한다; 사용할 수 없는 provider는 시도 횟수를 소모하지 않고 에피소드를 `queued`로 남긴다.
+   프롬프트는 stdin으로, cwd는 `~/.harness-memory/worker/<repo_hash>/`(어떤 저장소 밖이므로 `CLAUDE.md`, 프로젝트 훅, auto-memory가 로드되지 않는다), **허용 목록 환경**(`CLAUDECODE`, `CLAUDE_CODE_*` 없음; 자식 안의 훅이 즉시 종료하도록 `HARNESS_MEMORY_DISABLE=1`), 벽시계 120 s, 원본 응답은 `raw/<run_id>.json`에 24 h 캐시. 바이너리는 `HARNESS_MEMORY_CLAUDE_BIN` → `CLAUDE_CODE_EXECPATH` → `PATH` → winget 패키지 디렉터리 순으로 찾는다. **probe**(1필드 스키마 호출)가 provider를 `ok`, `not_logged_in`, `missing`, `nested_refusal`, `probe_timeout`, `invalid_output`으로 분류한다; `ok`는 하루 동안 신뢰하고 실패는 10분 뒤 다시 시도하며, 사용할 수 없는 provider는 시도 횟수를 소모하지 않고 에피소드를 `queued`로 남긴다.
 
 추출기는 고정된 JSON 스키마로 답한다: `episode_summary`, `nothing_to_learn`, 그리고 ≤ 8개의 `facts`. 각 fact는 `action`(`create` | `reinforce` | `propose_supersede` | `propose_stale`), `type`, `summary`(12–160자), `details`, `scope_glob`, `relevant_tools`, `trigger_signature`(`{tool, target, pattern_kind, pattern}`), `lifecycle_triggers`, `confidence`, `evidence_refs`(`e<seq>` 인용), `knowledge_kind`, `rationale`, `aliases`(≤ 8개 동의어, 사용자 언어 포함)를 가진다. `delete`도 `edit`도 없다: LLM은 생성·강화·제안만 할 수 있다.
 
-### 4. 검증 — V1에서 V11까지
+### 4. 검증 — V1에서 V12까지
 
-각 fact는 데이터베이스에 닿기 전에 결정적 검증기를 통과한다: 스키마 모양(V1); 모든 `evidence_refs`가 이 에피소드의 라인으로 해석됨(V2); 시그니처가 정밀도를 담당하지 않는 한 scope는 에피소드의 파일과 교차하는 저장소 상대 glob이어야 함(V3); 시그니처의 툴이 실제로 에피소드에서 쓰였음(V4); regex가 컴파일되고 중첩 수량자가 없으며 4 KB에서 2 ms 안에 끝남(V5); 보안 스캐너를 통과하고 harness-memory 자신을 언급하지 않음(V6); `reinforce` / `propose_*`의 대상이 실재함(V7); 프롬프트의 재진술이 아님(V8); 배치 안에 같은 `semantic_key`가 없음(V9); 시그니처가 구체적임 — `cmd` ≥ 2 토큰, `substring` ≥ 8자, 경로 조각이 있는 glob(V10); `before_tool`은 훅이 전달할 수 있는 곳에만 남김(V11). JSON이 아니거나, fact가 8개를 넘거나, 환각 인용이 50 %를 넘는 run은 `suspect`로 표시되어 통째로 건너뛴다; 그 외에는 거부된 fact를 세고 나머지를 적용한다.
+각 fact는 데이터베이스에 닿기 전에 결정적 검증기를 통과한다: 스키마 모양(V1); 모든 `evidence_refs`가 이 에피소드의 라인으로 해석됨(V2); 시그니처가 정밀도를 담당하지 않는 한 scope는 에피소드의 파일과 교차하는 저장소 상대 glob이어야 함(V3); 시그니처의 툴이 실제로 에피소드에서 쓰였음(V4); regex가 컴파일되고 중첩 수량자가 없으며 4 KB에서 2 ms 안에 끝남(V5); 보안 스캐너를 통과하고 harness-memory 자신을 언급하지 않음(V6); `reinforce` / `propose_*`의 대상이 실재함(V7); 프롬프트의 재진술이 아님(V8); 배치 안에 같은 `semantic_key`가 없음(V9); 시그니처가 구체적임 — `cmd` ≥ 2 토큰, `substring` ≥ 8자, 경로 조각이 있는 glob(V10); `before_tool`은 훅이 전달할 수 있는 곳에만 남김(V11); 인용된 실패를 해결한 명령이 실패 명령과 다른데 시그니처가 그 해결 명령에도 걸리면 거부 — `pm test`는 `npm test`를 고친 `pnpm test`에도 발화할 것이다(V12). JSON이 아니거나, fact가 8개를 넘거나, 환각 인용이 50 %를 넘는 run은 `suspect`로 표시되어 통째로 건너뛴다; 그 외에는 거부된 fact를 세고 나머지를 적용한다.
 
 ### 5. Reconcile — 트랜잭션 하나, 그다음 스냅샷
 
@@ -285,7 +285,7 @@ evidence_weight = correction 2 + remember 3 + (실패마다 resolution 2 | 미�
 | `before_tool` | `PreToolUse` | 위의 사다리 | 3개 / 2 KB |
 | `after_tool` | `PostToolUseFailure` | `failure_index[failure_class]` 힌트(예: 이 툴의 `enoent`에 관한 메모리)를 `additionalContext`로 | 2개 / 1 KB |
 
-`before_tool` 상세: 훅은 툴을 정규화하고(`Bash` / `PowerShell` → `bash`, `Edit` / `MultiEdit` / `NotebookEdit` → `edit`, `WebFetch` → `fetch`, `mcp__server__tool` → `mcp:server/tool`), 대상(`command`, `file_path`, `url` 또는 MCP 입력 JSON)과 그 안의 경로형 토큰을 고르고, ledger 꼬리를 읽어 이 턴에 이미 무엇이 발화했는지 알아낸 뒤 스냅샷을 필터링한다: status와 TTL → 트리거 → `relevant_tools` → 시그니처 일치(`cmd` 패턴은 정규 명령형 위에서 맞춰지므로 `pm test` ≡ `npm test` ≡ `pnpm test` ≡ `yarn test`; `glob` / `regex` / `substring`은 대상에 대해) 또는 시그니처 없는 `policy` / `pitfall` 행은 scope regex × 경로 토큰 → 파생 정책 규칙 → enforcement, 시그니처 일치, human 우선, 점수 순 정렬 → 쿼터(policy 2, pitfall 2, workflow 1) → 예산. 호스트가 이미 로드하는 파일(`CLAUDE.md`, `CLAUDE.local.md`)에서 import된 행은 `session_start` / `before_model`에서 건너뛰어 같은 말을 두 번 하지 않는다. `hm memory:why --tool bash --target "npm test"`는 정확히 이 함수를 실행해 모든 활성화와 억제 이유를 출력한다.
+`before_tool` 상세: 훅은 툴을 정규화하고(`Bash` / `PowerShell` → `bash`, `Edit` / `MultiEdit` / `NotebookEdit` → `edit`, `WebFetch` → `fetch`, `mcp__server__tool` → `mcp:server/tool`), 대상(`command`, `file_path`, `url` 또는 MCP 입력 JSON)과 그 안의 경로형 토큰을 고르고, ledger 꼬리를 읽어 이 턴에 이미 무엇이 발화했는지 알아낸 뒤 스냅샷을 필터링한다: status와 TTL → 트리거 → `relevant_tools` → 시그니처 일치(`cmd` 패턴은 정규 명령형 위에서 맞춰진다: `npm test` ≡ `npm run test` ≡ `& npm.cmd test`, 계열형 `pm test` / `bin vitest`는 모든 패키지 매니저 / 러너를 덮는다; `glob` / `regex` / `substring`은 대상에 대해) 또는 시그니처 없는 `policy` / `pitfall` 행은 scope regex × 경로 토큰 → 파생 정책 규칙 → enforcement, 시그니처 일치, human 우선, 점수 순 정렬 → 쿼터(policy 2, pitfall 2, workflow 1) → 예산. 호스트가 이미 로드하는 파일(`CLAUDE.md`, `CLAUDE.local.md`)에서 import된 행은 `session_start` / `before_model`에서 건너뛰어 같은 말을 두 번 하지 않는다. `hm memory:why --tool bash --target "npm test"`는 정확히 이 함수를 실행해 모든 활성화와 억제 이유를 출력한다.
 
 ## 임베딩(선택)
 
@@ -317,7 +317,7 @@ hm install --host claude --with-embeddings   # 패키지 루트에서 npm instal
 | `session_start.max_items` / `max_bytes` | 5 / 3072 | 시작 예산 |
 | `after_tool.max_items` / `max_bytes` | 2 / 1024 | 실패 힌트 예산 |
 | `extraction.provider` | `auto` | `auto`, `claude`, `codex`, `replay`(`HARNESS_MEMORY_PROVIDER`가 덮어쓴다) |
-| `extraction.model` | `null` | 설정되면 `--model`로 전달 |
+| `extraction.model` | `null` | 헤드리스 CLI의 `--model`. `null`이면 claude provider는 `sonnet` 별칭을 넘기고(`~/.claude/settings.json`의 대화용 기본 모델은 헤드리스 first-party 호출이 못 쓰는 게이트웨이 id일 수 있다) codex는 자기 기본값을 쓴다 |
 | `extraction.max_runs_per_day` | 40 | 하루 LLM 호출 수; 교정 에피소드는 예외 |
 | `extraction.max_auto_activations_per_day` / `_per_episode` | 10 / 3 | 자동 활성화 캡 |
 | `extraction.timeout_ms` / `probe_timeout_ms` / `lease_seconds` | 120000 / 20000 / 180 | provider 벽시계, probe 벽시계, 에피소드 lease |
@@ -389,10 +389,11 @@ hm install --host claude --with-embeddings   # 패키지 루트에서 npm instal
 
 | 증상 | 의미 / 할 일 |
 |---|---|
-| `probe not_logged_in`, `queue N (waiting: not_logged_in)` | 헤드리스 `claude -p`가 인증되지 않았다(데스크톱 앱 로그인은 이어지지 않는다). 터미널에서 `claude`를 한 번 실행하고 `/login`; 다음 worker 실행이 하루 한 번 다시 probe하고 큐를 비운다. 그동안 잃는 것은 없다. |
+| `probe not_logged_in`, `queue N (waiting: not_logged_in)` | 헤드리스 `claude -p`가 인증되지 않았다(데스크톱 앱 로그인은 이어지지 않는다). 터미널에서 `claude auth login`(구버전 CLI: `claude` 실행 후 `/login`); worker가 10분 안에 다시 probe하고 큐를 비우며, 바로 다시 probe하려면 `hm install --host claude`를 실행한다. 그동안 잃는 것은 없다. |
 | `probe missing` | `claude` / `codex` 바이너리를 찾지 못했다. 하나를 설치하거나 `HARNESS_MEMORY_CLAUDE_BIN` / `HARNESS_MEMORY_CODEX_BIN`을 설정한다. |
 | `probe nested_refusal` | probe가 Claude Code 세션 안에서 돌았다(`CLAUDECODE` 상속). `hm install` / `hm extract`를 일반 터미널에서 실행한다. |
-| `probe invalid_output` / `probe_timeout` | `claude -p --output-format json --json-schema`가 `extraction.probe_timeout_ms` 안에 구조화 출력을 돌려주지 않았다. 터미널에서 `claude -p`를 확인한다; 결과는 24 h 캐시된다. |
+| `probe provider_error` | 헤드리스 CLI는 떴지만 API 호출이 실패했다; `hm status`와 `hm doctor`가 provider의 메시지를 결과 옆에 보여준다(예: `api 404: There's an issue with the selected model …`). `.harness-memory/config.json`의 `extraction.model`을 계정이 쓸 수 있는 모델로 정하고(기본값은 `sonnet` 별칭) `hm install --host claude`로 다시 probe한다. |
+| `probe invalid_output` / `probe_timeout` | `claude -p --output-format json --json-schema`가 `extraction.probe_timeout_ms` 안에 구조화 출력을 돌려주지 않았다. 터미널에서 `claude -p`를 확인한다; 실패 결과는 10분 뒤 다시 시도된다. |
 | 아무것도 발화하지 않고 `hooks.calls`가 모든 이벤트에 `never` | Claude Code가 훅을 호출하지 않는다: `.claude/settings.local.json`(`hm doctor`가 매니페스트와 비교한다), Claude Code를 *이 프로젝트에서* 열었는지, node 경로(`install.node`)를 확인한다. `hm doctor --self-test`는 Claude Code가 하는 것과 똑같이 훅을 실행한다. |
 | `install.node FAIL` / `install.hook_script FAIL` | 기록된 node 바이너리나 `dist/hook.js`가 옮겨졌다(nvm 전환, 패키지 재설치, npx 캐시 정리). `hm doctor --fix`. |
 | `snapshot stale`이 1분 넘게 지속 | 훅이 스냅샷보다 새로운 데이터베이스를 보고 reindex를 요청했지만(`snapshot/.reindex-requested`, 60 s에 한 번) `node dist/worker.js <root> reindex`가 돌지 않았다 — `logs/worker.log`를 보거나 `hm snapshot:rebuild`를 실행한다. |

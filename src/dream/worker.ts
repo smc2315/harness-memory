@@ -642,6 +642,8 @@ function probeFailureStatus(result: ProbeResult): Exclude<RunStatus, "started" |
       return "no_provider";
     case "probe_timeout":
       return "timeout";
+    case "provider_error":
+      return "provider_error";
     default:
       return "invalid_output";
   }
@@ -667,14 +669,14 @@ export interface UnlockedPhaseOptions {
 
 export interface UnlockedPhaseResult {
   extracted: ExtractedWork[];
-  probeResult: { result: ProbeResult; cacheable: boolean } | null;
+  probeResult: { result: ProbeResult; detail: string | null; cacheable: boolean } | null;
 }
 
 /** Phase C for one lease batch: prompt → raw cache or probe + provider → raw cache. */
 export async function unlockedPhase(batch: readonly LeasedWork[], options: UnlockedPhaseOptions): Promise<UnlockedPhaseResult> {
   const { paths, config, provider, logger } = options;
   const extracted: ExtractedWork[] = [];
-  let probeResult: { result: ProbeResult; cacheable: boolean } | null = null;
+  let probeResult: { result: ProbeResult; detail: string | null; cacheable: boolean } | null = null;
   let probed = false;
 
   for (const work of batch) {
@@ -718,14 +720,14 @@ export async function unlockedPhase(batch: readonly LeasedWork[], options: Unloc
     if (options.probe.needed && !probed) {
       probed = true;
       const probe = await probeWithCache(provider, options.probe.cached, { config, paths, now: options.clock(), logger });
-      probeResult = { result: probe.result, cacheable: probe.cacheable };
-      logger.line("probe", { provider: provider.name, result: probe.result, cached: probe.fromCache });
+      probeResult = { result: probe.result, detail: probe.detail, cacheable: probe.cacheable };
+      logger.line("probe", { provider: provider.name, result: probe.result, cached: probe.fromCache, ...(probe.detail === null ? {} : { detail: probe.detail }) });
     }
     if (probeResult !== null && probeResult.result !== "ok") {
       // A failed probe says nothing about this episode: it is recorded for `doctor` but waits like `no_provider`
       // (§9.4 F3 "N episodes waiting") instead of consuming one of its three attempts.
       const status = probeFailureStatus(probeResult.result);
-      extracted.push({ work, descriptor, runId, seqMap: built.seqMap, run, result: { status, raw: "", error: `probe: ${probeResult.result}` }, fromCache: false, providerUnavailable: true });
+      extracted.push({ work, descriptor, runId, seqMap: built.seqMap, run, result: { status, raw: "", error: `probe: ${probeResult.result}${probeResult.detail === null ? "" : ` — ${probeResult.detail}`}` }, fromCache: false, providerUnavailable: true });
       continue;
     }
 
@@ -752,7 +754,15 @@ export async function unlockedPhase(batch: readonly LeasedWork[], options: Unloc
         // best effort
       }
     }
-    logger.line("provider", { episode: descriptor.id, run: runId, provider: provider.name, status: result.status, chars: built.prompt.length });
+    logger.line("provider", {
+      episode: descriptor.id,
+      run: runId,
+      provider: provider.name,
+      status: result.status,
+      chars: built.prompt.length,
+      ...(result.model === undefined ? {} : { model: result.model }),
+      ...(result.costUsd === undefined ? {} : { cost_usd: result.costUsd }),
+    });
     extracted.push({ work, descriptor, runId, seqMap: built.seqMap, run: { ...run, rawOutputRef, model: result.model ?? run.model }, result, fromCache: false, providerUnavailable: false });
   }
 
@@ -913,7 +923,7 @@ async function extractLoop(ctx: LoopContext): Promise<void> {
       logger,
     });
     if (unlocked.probeResult !== null && unlocked.probeResult.cacheable) {
-      probeToCache = { at: ctx.clock(), result: unlocked.probeResult.result };
+      probeToCache = { at: ctx.clock(), result: unlocked.probeResult.result, detail: unlocked.probeResult.detail };
     }
 
     for (const item of unlocked.extracted) {

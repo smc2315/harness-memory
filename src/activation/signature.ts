@@ -28,6 +28,8 @@ import {
 export interface CanonicalCommand {
   /** Canonical tokens per command segment (split on `&&`, `||`, `;`, `|`, newline). */
   segments: string[][];
+  /** Literal program per segment (`npm`, `pnpm dlx`, `npx`, `git`): what was actually invoked, kept beside the folded tokens so a cmd pattern can pin one package manager (§4.6). */
+  literals: string[];
   /** One entry per segment: the program token, or `pm <script>` / `bin <name>` for folded package-manager calls (§5.1). */
   programTokens: string[];
   /** Segments joined with `; ` — the serialized canonical form used in signature keys. */
@@ -224,7 +226,13 @@ function foldBin(rest: readonly string[]): string[] {
   return ["bin", stripVersion(rest[index]!), ...rest.slice(index + 1)];
 }
 
-function foldPackageManager(program: string, rest: readonly string[]): string[] {
+/** A canonical segment: the folded tokens plus the literal program that was invoked (`npm`, `pnpm dlx`, `git`). */
+interface CanonicalSegment {
+  tokens: string[];
+  literal: string;
+}
+
+function foldPackageManager(program: string, rest: readonly string[]): CanonicalSegment {
   const tokens = [...rest];
   const runIndex = tokens.findIndex((token) => !token.startsWith("-"));
   if (runIndex >= 0 && RUN_SUBCOMMANDS.has(tokens[runIndex]!)) tokens.splice(runIndex, 1);
@@ -232,19 +240,19 @@ function foldPackageManager(program: string, rest: readonly string[]): string[] 
   if (subIndex >= 0) {
     const sub = tokens[subIndex]!;
     if (BIN_SUBCOMMANDS[program]?.has(sub) === true) {
-      return foldBin(tokens.slice(subIndex + 1));
+      return { tokens: foldBin(tokens.slice(subIndex + 1)), literal: `${program} ${sub}` };
     }
     const alias = SCRIPT_ALIASES[sub];
     if (alias !== undefined) tokens[subIndex] = alias;
   }
-  return ["pm", ...tokens];
+  return { tokens: ["pm", ...tokens], literal: program };
 }
 
-function canonicalizeSegment(input: readonly string[]): string[] {
+function canonicalizeSegment(input: readonly string[]): CanonicalSegment | null {
   let tokens = input.filter((token) => token !== "{" && token !== "}");
   for (;;) {
     while (tokens.length > 0 && ASSIGNMENT_PREFIX.test(tokens[0]!)) tokens = tokens.slice(1);
-    if (tokens.length === 0) return [];
+    if (tokens.length === 0) return null;
     const wrapper = WRAPPERS[normalizeProgram(tokens[0]!)];
     if (wrapper === undefined) break;
     let index = 1;
@@ -258,9 +266,9 @@ function canonicalizeSegment(input: readonly string[]): string[] {
   }
   const program = normalizeProgram(tokens[0]!);
   const rest = tokens.slice(1);
-  if (BIN_RUNNERS.has(program)) return foldBin(rest);
+  if (BIN_RUNNERS.has(program)) return { tokens: foldBin(rest), literal: program };
   if (PACKAGE_MANAGERS.has(program)) return foldPackageManager(program, rest);
-  return [program, ...rest];
+  return { tokens: [program, ...rest], literal: program };
 }
 
 /** Program token of a canonical segment: `pm <script>` / `bin <name>` for folded calls, else the first token. */
@@ -273,16 +281,22 @@ export function programTokenOf(segment: readonly string[]): string {
 /**
  * §4.6 canonical form: quote-aware segment split, `VAR=value` and wrapper stripping, package-manager
  * folding (`npm|pnpm|yarn|bun [run] <script>` → `pm <script>`, `npx|pnpm dlx|bunx <bin>` → `bin <bin>`),
- * flags kept as tokens, program token lower-cased and reduced to its basename.
+ * flags kept as tokens, program token lower-cased and reduced to its basename. The literal program of each
+ * segment (`npm`, `pnpm dlx`, `git`) is kept in `literals` so a cmd pattern written with a real manager
+ * (`npm test`) pins it while the family word (`pm test`) covers every manager.
  */
 export function canonicalizeCommand(command: string, dialect: ShellDialect | null | undefined): CanonicalCommand {
   const segments: string[][] = [];
+  const literals: string[] = [];
   for (const raw of tokenizeShell(command, dialect ?? "unknown")) {
     const canonical = canonicalizeSegment(raw);
-    if (canonical.length > 0) segments.push(canonical);
+    if (canonical === null || canonical.tokens.length === 0) continue;
+    segments.push(canonical.tokens);
+    literals.push(canonical.literal);
   }
   return {
     segments,
+    literals,
     programTokens: segments.map(programTokenOf),
     canonical: segments.map((segment) => segment.join(" ")).join("; "),
   };
@@ -324,6 +338,15 @@ export function primaryProgramToken(command: string, dialect: ShellDialect | nul
     if (!SHELL_NAVIGATION.has(segments[i]![0]!)) return programTokens[i]!;
   }
   return programTokens[0] ?? null;
+}
+
+/** Literal program of the primary segment (`cd x && npm test` → `npm`, `pnpm dlx vitest run` → `pnpm dlx`), else null. */
+export function primaryLiteralProgram(command: string, dialect: ShellDialect | null | undefined): string | null {
+  const { segments, literals } = canonicalCommandFor(command, dialect);
+  for (let i = 0; i < segments.length; i += 1) {
+    if (!SHELL_NAVIGATION.has(segments[i]![0]!)) return literals[i] ?? null;
+  }
+  return literals[0] ?? null;
 }
 
 const PATH_TOKEN = /[\\/]|^\.{1,2}$|^[\w@.-]+\.[A-Za-z][A-Za-z0-9]{0,7}$/;
@@ -831,13 +854,18 @@ export function compileSignature(sig: TriggerSignature): CompileSignatureResult 
   let tokens: string[] | null = null;
   let regexSource: string | null = null;
   let canonicalPattern: string;
+  let program: string | null = null;
 
   switch (sig.pattern_kind) {
     case "cmd": {
       const command = canonicalizeCommand(sig.pattern, "bash");
       if (command.segments.length !== 1) return { ok: false, code: "invalid", detail: "cmd signature must be a single command" };
       tokens = command.segments[0]!;
-      canonicalPattern = tokens.join(" ");
+      // A folded call written with a real manager / runner (`npm test`, `pnpm dlx vitest`) pins that literal; the
+      // family words (`pm test`, `bin vitest`) leave `program` unset and match every manager (§4.6).
+      const literal = command.literals[0]!;
+      if (literal !== tokens[0]) program = literal;
+      canonicalPattern = program === null ? tokens.join(" ") : [program, ...tokens.slice(1)].join(" ");
       break;
     }
     case "glob": {
@@ -865,6 +893,7 @@ export function compileSignature(sig: TriggerSignature): CompileSignatureResult 
     pattern: canonicalPattern,
     negate,
     tokens,
+    ...(program === null ? {} : { program }),
     regex_source: regexSource,
     signature_key: buildSignatureKey(tool, sig.target, sig.pattern_kind, canonicalPattern, negate),
   };
@@ -927,7 +956,8 @@ function segmentMatches(segment: readonly string[], tokens: readonly string[], c
 
 /**
  * cmd: canonicalize the target with the call's dialect (memoized, see `canonicalCommandFor`); any segment
- * whose program equals the first pattern token and contains every remaining token matches. glob/regex:
+ * whose program equals the first pattern token, whose literal program equals `program` when the pattern pinned
+ * one, and which contains every remaining token matches. glob/regex:
  * precompiled RegExp on the target. substring: case-insensitive includes. `negate` inverts the result.
  */
 export function matchSignature(compiled: CompiledSignature, target: string, dialect: ShellDialect | null | undefined): boolean {
@@ -941,7 +971,9 @@ export function matchSignature(compiled: CompiledSignature, target: string, dial
         break;
       }
       const caseInsensitive = dialect === "powershell" || dialect === "cmd";
-      result = canonicalCommandFor(text, dialect).segments.some((segment) => segmentMatches(segment, tokens, caseInsensitive));
+      const command = canonicalCommandFor(text, dialect);
+      const pinned = compiled.program === undefined || compiled.program === null ? null : compiled.program.toLowerCase();
+      result = command.segments.some((segment, index) => segmentMatches(segment, tokens, caseInsensitive) && (pinned === null || command.literals[index]?.toLowerCase() === pinned));
       break;
     }
     case "glob": {
@@ -975,11 +1007,19 @@ export function compileSignatureKey(key: string): CompiledSignature | null {
   if (parsed === null) return null;
   let tokens: string[] | null = null;
   let regexSource: string | null = null;
+  let program: string | null = null;
   switch (parsed.pattern_kind) {
-    case "cmd":
-      tokens = parsed.pattern.split(" ").filter((token) => token.length > 0);
+    case "cmd": {
+      // The key stores the literal form (`npm test`, `pnpm dlx vitest run`, `pm test`): fold it the way compileSignature
+      // does so a pinned manager is honoured by matchSignatureKey (fire outcomes, roll-ups, resolution checks).
+      const command = canonicalizeCommand(parsed.pattern, "bash");
+      if (command.segments.length !== 1) return null;
+      tokens = command.segments[0]!;
       if (tokens.length === 0) return null;
+      const literal = command.literals[0]!;
+      if (literal !== tokens[0]) program = literal;
       break;
+    }
     case "glob":
       regexSource = compileGlobSource(parsed.pattern);
       if (regexSource === null) return null;
@@ -1002,6 +1042,7 @@ export function compileSignatureKey(key: string): CompiledSignature | null {
     pattern: parsed.pattern,
     negate: parsed.negate,
     tokens,
+    ...(program === null ? {} : { program }),
     regex_source: regexSource,
     signature_key: key,
   };

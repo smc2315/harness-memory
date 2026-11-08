@@ -238,7 +238,7 @@ export function probeGuidance(result: string | null): string | null {
     case "ok":
       return null;
     case "not_logged_in":
-      return "run `claude` once in a terminal and `/login`; extraction stays queued until the CLI is logged in";
+      return "run `claude auth login` in a terminal (older CLIs: `claude`, then `/login`); the worker re-probes within ten minutes, or run `hm install --host claude` to re-probe now; nothing is lost meanwhile";
     case "missing":
       return "no extraction CLI found (claude or codex); install one or set HARNESS_MEMORY_CLAUDE_BIN";
     case "nested_refusal":
@@ -247,6 +247,8 @@ export function probeGuidance(result: string | null): string | null {
       return "the provider did not answer within extraction.probe_timeout_ms; check `claude -p` works in a terminal";
     case "invalid_output":
       return "the provider answered without the expected JSON; check `claude -p --output-format json` in a terminal";
+    case "provider_error":
+      return "the headless CLI ran but its API call failed (its message is shown with the probe result); the usual cause is a model the account cannot use — set extraction.model in .harness-memory/config.json — then run `hm install --host claude` to re-probe";
     default:
       return `unexpected probe result ${result}`;
   }

@@ -1,6 +1,7 @@
 /**
- * Provider selection (`config.extraction.provider`, spec §5.4) and the daily probe cache kept in
- * `meta.last_probe_at` / `meta.last_probe_result` (read in lock session 1, written in lock session 2).
+ * Provider selection (`config.extraction.provider`, spec §5.4) and the probe cache kept in
+ * `meta.last_probe_at` / `meta.last_probe_result` (read in lock session 1, written in lock session 2): a
+ * successful probe is trusted for a day, a failed one for ten minutes.
  *
  * `auto`: claude when its binary resolves, else codex, else null (`no_provider`). An explicit name
  * yields that provider only when it is usable. `HARNESS_MEMORY_PROVIDER` (allowlisted by providerEnv)
@@ -17,7 +18,7 @@ import { META_KEYS, MetaRepository } from "../../../db/repositories/meta";
 import { createClaudeProvider, type ClaudeProviderOptions } from "./claude";
 import { createCodexProvider, type CodexProviderOptions } from "./codex";
 import { createReplayProvider, type ReplayProviderOptions } from "./replay";
-import { PROBE_CACHE_MS, type ExtractionProvider, type ProbeContext } from "./types";
+import { PROBE_CACHE_MS, PROBE_FAILURE_CACHE_MS, normalizeProbe, type ExtractionProvider, type ProbeContext } from "./types";
 
 export * from "./types";
 export { buildClaudeArgs, classifyClaudeRun, claudeChildEnv, createClaudeProvider, parseClaudeEnvelope, probeResultOf, CLAUDE_SETTINGS_JSON } from "./claude";
@@ -78,17 +79,28 @@ export function selectProvider(config: Pick<HarnessConfig, "extraction">, option
 export interface ProbeCache {
   at: string;
   result: ProbeResult;
+  /** The provider's message for a failed probe (`meta.last_probe_error`); null / absent when ok. */
+  detail?: string | null;
 }
 
-/** The cached probe when it is younger than 24 h, else null. */
-export function readProbeCache(db: SqlJsDatabase, now: string, maxAgeMs: number = PROBE_CACHE_MS): ProbeCache | null {
+function readProbeDetail(meta: MetaRepository): string | null {
+  const value = meta.get(META_KEYS.lastProbeError);
+  return value === null || value.length === 0 ? null : value;
+}
+
+/**
+ * The cached probe while it is still trusted — `okMaxAgeMs` (24 h) after an `ok`, `failureMaxAgeMs` (10 min) after any
+ * failure, so a login or an install is noticed at the next worker run — else null.
+ */
+export function readProbeCache(db: SqlJsDatabase, now: string, okMaxAgeMs: number = PROBE_CACHE_MS, failureMaxAgeMs: number = PROBE_FAILURE_CACHE_MS): ProbeCache | null {
   const meta = new MetaRepository(db);
   const at = meta.get(META_KEYS.lastProbeAt);
   const result = meta.get(META_KEYS.lastProbeResult);
   if (at === null || result === null || !(PROBE_RESULTS as readonly string[]).includes(result)) return null;
   const ageMs = Date.parse(now) - Date.parse(at);
+  const maxAgeMs = result === "ok" ? okMaxAgeMs : failureMaxAgeMs;
   if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > maxAgeMs) return null;
-  return { at, result: result as ProbeResult };
+  return { at, result: result as ProbeResult, detail: readProbeDetail(meta) };
 }
 
 /** Any stored probe, regardless of age (status / doctor / snapshot display). */
@@ -97,13 +109,15 @@ export function readLastProbe(db: SqlJsDatabase): ProbeCache | null {
   const at = meta.get(META_KEYS.lastProbeAt);
   const result = meta.get(META_KEYS.lastProbeResult);
   if (at === null || result === null || !(PROBE_RESULTS as readonly string[]).includes(result)) return null;
-  return { at, result: result as ProbeResult };
+  return { at, result: result as ProbeResult, detail: readProbeDetail(meta) };
 }
 
 export function writeProbeCache(db: SqlJsDatabase, cache: ProbeCache): void {
   const meta = new MetaRepository(db);
   meta.set(META_KEYS.lastProbeAt, cache.at);
   meta.set(META_KEYS.lastProbeResult, cache.result);
+  if (cache.detail === undefined || cache.detail === null || cache.detail.length === 0) meta.delete(META_KEYS.lastProbeError);
+  else meta.set(META_KEYS.lastProbeError, cache.detail);
 }
 
 /**
@@ -114,9 +128,9 @@ export async function probeWithCache(
   provider: ExtractionProvider,
   cached: ProbeCache | null,
   ctx: ProbeContext
-): Promise<{ result: ProbeResult; fromCache: boolean; cacheable: boolean }> {
-  if (provider.name === "replay") return { result: "ok", fromCache: false, cacheable: false };
-  if (cached !== null) return { result: cached.result, fromCache: true, cacheable: false };
-  const result = await provider.probe(ctx);
-  return { result, fromCache: false, cacheable: true };
+): Promise<{ result: ProbeResult; detail: string | null; fromCache: boolean; cacheable: boolean }> {
+  if (provider.name === "replay") return { result: "ok", detail: null, fromCache: false, cacheable: false };
+  if (cached !== null) return { result: cached.result, detail: cached.detail ?? null, fromCache: true, cacheable: false };
+  const outcome = normalizeProbe(await provider.probe(ctx));
+  return { result: outcome.result, detail: outcome.detail, fromCache: false, cacheable: true };
 }

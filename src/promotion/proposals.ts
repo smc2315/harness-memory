@@ -118,6 +118,9 @@ export interface OpenOrSupportResult {
   skipped: "recent_reject" | null;
 }
 
+/** Proposal kinds that contradict the target row; the others (activation, scope / signature fixes) only wait on a review. */
+const CONTESTING_KINDS: ReadonlySet<string> = new Set(["supersede", "stale", "revalidate"]);
+
 function flagTarget(db: SqlJsDatabase, targetId: string, now: string): void {
   const repository = new MemoryRepository(db, { clock: () => now });
   const target = repository.getById(targetId);
@@ -125,7 +128,7 @@ function flagTarget(db: SqlJsDatabase, targetId: string, now: string): void {
   const open = new ProposalRepository(db).listOpen({ targetId });
   const first = open[0] ?? null;
   const openProposalId = first === null ? null : target.openProposalId !== null && open.some((p) => p.id === target.openProposalId) ? target.openProposalId : first.id;
-  const contested: 0 | 1 = open.length > 0 ? 1 : 0;
+  const contested: 0 | 1 = open.some((proposal) => CONTESTING_KINDS.has(proposal.kind)) ? 1 : 0;
   if (target.openProposalId !== openProposalId || target.contested !== contested) {
     repository.setFlags(targetId, { openProposalId, contested, updatedAt: target.updatedAt });
   }

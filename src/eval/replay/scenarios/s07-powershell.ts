@@ -28,7 +28,7 @@ export const s07 = defineScenario({
     }
     const memory = await run.memory(id);
     run.equal("(i) the learned row is an active soft_deny pitfall", [memory?.type, memory?.status, memory?.enforcement], ["pitfall", "active", "soft_deny"]);
-    run.equal("the signature key is the canonical pm build form", memory?.signatureKey, "bash|command|cmd|pm build");
+    run.equal("the signature key names the manager that failed (npm build)", memory?.signatureKey, "bash|command|cmd|npm build");
     run.equal("failure classes recorded for after_tool hints", memory?.failureClasses, ["exit_1"]);
 
     run.advance({ minutes: 10 });

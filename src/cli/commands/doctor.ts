@@ -315,7 +315,7 @@ export function buildChecks(ctx: CommandContext, facts: Facts, hostDebug: string
     checks.push({ id: "extraction.probe", status: "info", summary: db.exists && !db.migrationNeeded ? "provider not probed yet (the first worker run probes it; `hm install` probes too)" : "probe unknown" });
   } else {
     const guidance = probeGuidance(db.probe.result);
-    checks.push({ id: "extraction.probe", status: db.probe.result === "ok" ? "ok" : "warn", summary: `probe ${db.probe.result} ${formatRelative(db.probe.at, nowMs)}${guidance === null ? "" : ` — ${guidance}`}` });
+    checks.push({ id: "extraction.probe", status: db.probe.result === "ok" ? "ok" : "warn", summary: `probe ${db.probe.result} ${formatRelative(db.probe.at, nowMs)}${db.probe.detail ? ` (${db.probe.detail})` : ""}${guidance === null ? "" : ` — ${guidance}`}` });
   }
   if (worker.waiting !== null) {
     const guidance = probeGuidance(worker.waiting) ?? (worker.waiting === "daily_cap" ? "extraction.max_runs_per_day reached; episodes resume tomorrow" : null);

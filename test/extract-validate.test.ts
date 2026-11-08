@@ -15,7 +15,7 @@ import {
   type ValidateExtractionInput,
 } from "../src/dream/extract/validate";
 import type { OffsetLedgerLine } from "../src/dream/ledger";
-import { loadExtractionFixture, loadLedgerFixture, promptLine, seqMapOf, toolOkLine } from "./helpers/ledger-fixture";
+import { loadExtractionFixture, loadLedgerFixture, promptLine, seqMapOf, toolFailLine, toolOkLine } from "./helpers/ledger-fixture";
 
 const NOW = "2026-11-08T23:30:00.000Z";
 
@@ -90,11 +90,12 @@ describe("fixtures", () => {
     expect(result.accepted).toHaveLength(1);
     const accepted = result.accepted[0]!;
     expect(accepted.ordinal).toBe(0);
-    expect(accepted.compiledSignature?.signature_key).toBe("bash|command|cmd|pm test");
+    expect(accepted.compiledSignature?.signature_key).toBe("bash|command|cmd|npm test");
     expect(accepted.compiledSignature?.tokens).toEqual(["pm", "test"]);
+    expect(accepted.compiledSignature?.program).toBe("npm");
     expect(accepted.normalizedScope).toBe("**/*");
     expect(accepted.scope_glob).toBe("**/*");
-    expect(accepted.semanticKey).toBe(semanticKey("pitfall", "**/*", "bash|command|cmd|pm test", accepted.summary));
+    expect(accepted.semanticKey).toBe(semanticKey("pitfall", "**/*", "bash|command|cmd|npm test", accepted.summary));
     expect(accepted.relabels).toEqual([]);
     expect(accepted.lifecycle_triggers).toEqual(["before_tool"]);
     expect(accepted.aliases).toEqual(["pnpm test", "test runner", "테스트 실행"]);
@@ -290,6 +291,41 @@ describe("validator table (§5.6)", () => {
     expect(mismatch.outcomes[0]).toMatchObject({ rejection: "scope_mismatch", relabel: "signature_dropped" });
     const toolFirst = run([fact({ trigger_signature: { tool: "edit", target: "path", pattern_kind: "glob", pattern: "*" }, lifecycle_triggers: ["before_tool", "before_model"] })]);
     expect(toolFirst.outcomes[0]).toMatchObject({ rejection: "signature_tool" });
+  });
+
+  test("V12: a signature that also matches the command which resolved the failure is rejected; the literal manager passes; the same command succeeding later is fine", () => {
+    // s02: `npm test` failed (e2002) and `pnpm test` resolved it (e2004) — the family form would block the fix.
+    const family = run([fact({ trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "pm test" } })]);
+    expect(family.accepted).toHaveLength(0);
+    expect(family.outcomes[0]).toMatchObject({ outcome: "rejected", rejection: "signature_matches_resolution" });
+    expect(family.outcomes[0]?.detail).toContain("pnpm test");
+    const literal = run([fact()]);
+    expect(literal.accepted).toHaveLength(1);
+    expect(literal.accepted[0]?.compiledSignature?.program).toBe("npm");
+    // The same literal command succeeding after an environment fix keeps its signature.
+    const lines: LedgerLine[] = [
+      promptLine("run the tests", { seq: 3001, turn_key: "p3" }),
+      toolFailLine("npm test", "Error: Cannot find module 'vitest'", { seq: 3002, turn_key: "p3", program_token: "pm test", failure_class: "exit_1" }),
+      toolOkLine("npm install", { seq: 3003, turn_key: "p3", program_token: "pm install" }),
+      toolOkLine("npm test", { seq: 3004, turn_key: "p3", program_token: "pm test", resolution_of: "bash|exit_1|pm test" }),
+    ];
+    const sameCommand = run([fact({ summary: "Run npm install before npm test after pulling; a missing module fails the suite.", evidence_refs: ["e3002", "e3004"] })], descriptorFor(lines), seqMapOf(lines));
+    expect(sameCommand.accepted).toHaveLength(1);
+    // A fix that keeps the program but adds flags is not a conflict either (`npx vitest run` → `npx vitest run --reporter dot`).
+    const flagLines: LedgerLine[] = [
+      promptLine("run vitest", { seq: 3101, turn_key: "p31" }),
+      toolFailLine("npx vitest run", "Error: unknown reporter", { seq: 3102, turn_key: "p31", program_token: "bin vitest", failure_class: "exit_1" }),
+      toolOkLine("npx vitest run --reporter dot", { seq: 3103, turn_key: "p31", program_token: "bin vitest", resolution_of: "bash|exit_1|bin vitest" }),
+    ];
+    const flags = run(
+      [fact({ summary: "Run vitest with --reporter dot here; the default reporter is not available.", trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "npx vitest run" }, evidence_refs: ["e3102", "e3103"] })],
+      descriptorFor(flagLines),
+      seqMapOf(flagLines)
+    );
+    expect(flags.accepted).toHaveLength(1);
+    // reinforce never carries a signature change, so V12 does not judge it.
+    const reinforce = run([fact({ action: "reinforce", target_memory_id: "mem-1", trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "pm test" } })]);
+    expect(reinforce.accepted).toHaveLength(1);
   });
 
   test("V11: unhooked signature tools and signature-less before_tool on other types move to before_model", () => {

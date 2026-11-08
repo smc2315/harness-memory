@@ -81,12 +81,18 @@ describe("claude provider", () => {
     const cwd = mkdtempSync(join(tmpdir(), "hm-provider-"));
     const provider = createClaudeProvider({ binary: "C:/fake/claude.exe", runner, cwd });
     const paths = resolvePaths(cwd);
-    expect(await provider.probe({ config: DEFAULT_CONFIG, paths, now: T0 })).toBe("ok");
+    expect(await provider.probe({ config: DEFAULT_CONFIG, paths, now: T0 })).toEqual({ result: "ok", detail: null });
     const result = await provider.extract("PROMPT", EXTRACTION_SCHEMA_JSON, { timeoutMs: 1000, model: null, paths });
     expect(result.status).toBe("ok");
-    expect(calls).toHaveLength(2);
+    const pinned = await provider.extract("PROMPT", EXTRACTION_SCHEMA_JSON, { timeoutMs: 1000, model: "claude-haiku-5-5", paths });
+    expect(pinned.status).toBe("ok");
+    expect(calls).toHaveLength(3);
     expect(calls[0]!.binary).toBe("C:/fake/claude.exe");
     expect(calls[0]!.timeoutMs).toBe(DEFAULT_CONFIG.extraction.probe_timeout_ms);
+    // extraction.model null → the sonnet alias, never the interactive default of ~/.claude/settings.json
+    expect(calls[0]!.args.slice(-2)).toEqual(["--model", "sonnet"]);
+    expect(calls[1]!.args.slice(-2)).toEqual(["--model", "sonnet"]);
+    expect(calls[2]!.args.slice(-2)).toEqual(["--model", "claude-haiku-5-5"]);
     expect(calls[1]!.stdin).toBe("PROMPT");
     expect(calls[1]!.args[4]).toBe(EXTRACTION_SCHEMA_JSON);
     expect(calls[1]!.cwd).toBe(cwd);
@@ -95,16 +101,35 @@ describe("claude provider", () => {
     rmSync(cwd, { recursive: true, force: true });
   });
 
-  test("probe maps failures: not_logged_in, nested_refusal, probe_timeout, missing binary", async () => {
+  test("probe maps failures: not_logged_in, nested_refusal, probe_timeout, provider_error (with the message), missing binary", async () => {
     const make = (result: CommandRunResult) => createClaudeProvider({ binary: "x", runner: async () => result, cwd: tmpdir() });
     const ctx = { config: DEFAULT_CONFIG, paths: resolvePaths(tmpdir()), now: T0 };
-    expect(await make(okRun(JSON.stringify({ type: "result", is_error: true, result: "Not logged in" }))).probe(ctx)).toBe("not_logged_in");
-    expect(await make(okRun(JSON.stringify({ type: "result", is_error: true, result: "nested session refused" }))).probe(ctx)).toBe("nested_refusal");
-    expect(await make(okRun("", { timedOut: true })).probe(ctx)).toBe("probe_timeout");
-    expect(await make(okRun(JSON.stringify({ type: "result", result: "no schema" }))).probe(ctx)).toBe("invalid_output");
+    expect(await make(okRun(JSON.stringify({ type: "result", is_error: true, result: "Not logged in" }))).probe(ctx)).toMatchObject({ result: "not_logged_in" });
+    expect(await make(okRun(JSON.stringify({ type: "result", is_error: true, result: "nested session refused" }))).probe(ctx)).toMatchObject({ result: "nested_refusal" });
+    expect(await make(okRun("", { timedOut: true })).probe(ctx)).toMatchObject({ result: "probe_timeout" });
+    expect(await make(okRun(JSON.stringify({ type: "result", result: "no schema" }))).probe(ctx)).toMatchObject({ result: "invalid_output" });
+    // The 2.1.317 envelope of a failed API call: is_error with api_error_status; 404 on the model keeps its message, 401 is auth.
+    const modelError = "There's an issue with the selected model (anthropic.claude-opus-5[1m]). It may not exist or you may not have access to it.";
+    expect(await make(okRun(JSON.stringify({ type: "result", subtype: "success", is_error: true, api_error_status: 404, result: modelError }), { exitCode: 1 })).probe(ctx)).toEqual({ result: "provider_error", detail: `api 404: ${modelError}` });
+    expect(await make(okRun(JSON.stringify({ type: "result", is_error: true, api_error_status: 401, result: "unauthorized" }), { exitCode: 1 })).probe(ctx)).toMatchObject({ result: "not_logged_in" });
     const missing = createClaudeProvider({ binary: null, runner: async () => okRun("") , cwd: tmpdir() });
-    expect(await missing.probe(ctx)).toBe("missing");
+    expect(await missing.probe(ctx)).toMatchObject({ result: "missing" });
     expect((await missing.extract("p", "{}", { timeoutMs: 10, model: null })).status).toBe("no_provider");
+  });
+});
+
+describe("claude provider — model and cost of a run", () => {
+  test("the answering model is the modelUsage entry with the most output tokens; total_cost_usd is carried", () => {
+    const envelope = {
+      type: "result",
+      is_error: false,
+      result: "{}",
+      structured_output: { ok: true },
+      total_cost_usd: 0.0231,
+      modelUsage: { "claude-haiku-4-5-20251001": { outputTokens: 12, costUSD: 0.0001 }, "claude-sonnet-5-5": { outputTokens: 1480, costUSD: 0.023 } },
+    };
+    expect(classifyClaudeRun(okRun(JSON.stringify(envelope)))).toMatchObject({ status: "ok", model: "claude-sonnet-5-5", costUsd: 0.0231 });
+    expect(classifyClaudeRun(okRun(JSON.stringify({ type: "result", structured_output: { ok: true } }))).costUsd).toBeUndefined();
   });
 });
 
@@ -134,7 +159,7 @@ describe("codex provider", () => {
         return okRun(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "{\"ok\":true}" } }));
       },
     });
-    expect(await provider.probe({ config: DEFAULT_CONFIG, paths: resolvePaths(cwd), now: T0 })).toBe("ok");
+    expect(await provider.probe({ config: DEFAULT_CONFIG, paths: resolvePaths(cwd), now: T0 })).toEqual({ result: "ok", detail: null });
     expect(seenArgs[3]!.startsWith(join(cwd, "schema-"))).toBe(true);
     rmSync(cwd, { recursive: true, force: true });
   });
@@ -177,20 +202,29 @@ describe("replay provider and selection", () => {
 });
 
 describe("probe cache", () => {
-  test("readProbeCache honours the 24 h window; probeWithCache skips the probe when cached and never caches replay", async () => {
+  test("readProbeCache trusts an ok probe for 24 h and a failed probe for 10 min; probeWithCache skips the probe when cached and never caches replay", async () => {
     const db = await createTestDb({ now: T0 });
     expect(readProbeCache(db, T0)).toBeNull();
     writeProbeCache(db, { at: T0, result: "not_logged_in" });
-    expect(readProbeCache(db, isoPlus(T0, { hours: 23 }))).toEqual({ at: T0, result: "not_logged_in" });
+    expect(readProbeCache(db, isoPlus(T0, { minutes: 9 }))).toEqual({ at: T0, result: "not_logged_in", detail: null });
+    expect(readProbeCache(db, isoPlus(T0, { minutes: 11 }))).toBeNull();
+    expect(readProbeCache(db, isoPlus(T0, { hours: 23 }))).toBeNull();
+    writeProbeCache(db, { at: T0, result: "ok" });
+    expect(readProbeCache(db, isoPlus(T0, { hours: 23 }))).toEqual({ at: T0, result: "ok", detail: null });
     expect(readProbeCache(db, isoPlus(T0, { hours: 25 }))).toBeNull();
 
     let probes = 0;
     const provider = createClaudeProvider({ binary: "x", cwd: tmpdir(), runner: async () => { probes += 1; return okRun(JSON.stringify({ type: "result", structured_output: { ok: true } })); } });
     const ctx = { config: DEFAULT_CONFIG, paths: resolvePaths(tmpdir()), now: T0 };
-    expect(await probeWithCache(provider, { at: T0, result: "not_logged_in" }, ctx)).toEqual({ result: "not_logged_in", fromCache: true, cacheable: false });
-    expect(await probeWithCache(provider, null, ctx)).toEqual({ result: "ok", fromCache: false, cacheable: true });
+    expect(await probeWithCache(provider, { at: T0, result: "not_logged_in", detail: "api 401: unauthorized" }, ctx)).toEqual({ result: "not_logged_in", detail: "api 401: unauthorized", fromCache: true, cacheable: false });
+    expect(await probeWithCache(provider, null, ctx)).toEqual({ result: "ok", detail: null, fromCache: false, cacheable: true });
     expect(probes).toBe(1);
-    expect(await probeWithCache(createReplayProvider(), null, ctx)).toEqual({ result: "ok", fromCache: false, cacheable: false });
+    expect(await probeWithCache(createReplayProvider(), null, ctx)).toEqual({ result: "ok", detail: null, fromCache: false, cacheable: false });
+    // The message round-trips through meta and is dropped again by an ok probe.
+    writeProbeCache(db, { at: T0, result: "provider_error", detail: "api 404: no such model" });
+    expect(readProbeCache(db, isoPlus(T0, { minutes: 1 }))).toEqual({ at: T0, result: "provider_error", detail: "api 404: no such model" });
+    writeProbeCache(db, { at: T0, result: "ok" });
+    expect(readProbeCache(db, isoPlus(T0, { minutes: 1 }))).toEqual({ at: T0, result: "ok", detail: null });
     db.close();
   });
 });

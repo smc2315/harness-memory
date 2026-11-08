@@ -31,7 +31,7 @@ export interface StatusReport {
     unreachable: number;
   } | null;
   last_extraction: { run_id: string; status: string; started_at: string; finished_at: string | null; provider: string; ago: string } | null;
-  probe: { result: string; at: string; guidance: string | null } | null;
+  probe: { result: string; at: string; detail: string | null; guidance: string | null } | null;
   snapshot: { state: SnapshotState; generation: number | null; built_at: string | null };
   hooks: { calls: number; p95_ms: number | null; p95_all_ms: number | null };
   waiting: string | null;
@@ -103,7 +103,7 @@ export async function collectStatus(ctx: CommandContext): Promise<StatusReport> 
             provider: db.lastRun.provider,
             ago: formatRelative(db.lastRun.finishedAt ?? db.lastRun.startedAt, nowMs),
           },
-    probe: db.probe === null ? null : { result: db.probe.result, at: db.probe.at, guidance: probeGuidance(db.probe.result) },
+    probe: db.probe === null ? null : { result: db.probe.result, at: db.probe.at, detail: db.probe.detail ?? null, guidance: probeGuidance(db.probe.result) },
     snapshot: { state: snapshot.state, generation: snapshot.generation, built_at: snapshot.builtAt },
     hooks: { calls: hookLog.total, p95_ms: hookLog.p95PreTool, p95_all_ms: hookLog.p95All },
     waiting: worker.waiting,
@@ -118,7 +118,7 @@ export async function runStatus(ctx: CommandContext): Promise<number> {
   const report = await collectStatus(ctx);
   ctx.out.result(report, (value) => {
     const lines = [value.line];
-    if (value.probe?.guidance !== null && value.probe?.guidance !== undefined) lines.push(`  probe: ${value.probe.guidance}`);
+    if (value.probe?.guidance !== null && value.probe?.guidance !== undefined) lines.push(`  probe: ${value.probe.detail ? `${value.probe.detail} — ` : ""}${value.probe.guidance}`);
     return lines;
   });
   return report.problem === null ? EXIT_CODES.ok : EXIT_CODES.error;

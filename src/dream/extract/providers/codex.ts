@@ -15,13 +15,13 @@ import { join } from "node:path";
 
 import { providerEnv, resolveCodexBinary } from "../../../core/process";
 import { workerCwd, type HarnessPaths } from "../../../core/paths";
-import type { ProbeResult } from "../../../core/vocabulary";
 import { probeResultOf } from "./claude";
 import { runCommand } from "./run-command";
 import {
   PROBE_PROMPT,
   PROBE_SCHEMA_JSON,
   type CommandRunResult,
+  type ProbeOutcome,
   type CommandRunner,
   type ExtractOptions,
   type ExtractionProvider,
@@ -163,17 +163,19 @@ export function createCodexProvider(options: CodexProviderOptions = {}): Extract
 
   return {
     name: "codex",
-    async probe(ctx: ProbeContext): Promise<ProbeResult> {
+    async probe(ctx: ProbeContext): Promise<ProbeOutcome> {
       const result = await call(PROBE_PROMPT, PROBE_SCHEMA_JSON, ctx.paths, ctx.config.extraction.model, ctx.config.extraction.probe_timeout_ms);
       if (result.status !== "ok") {
         ctx.logger?.warn(`codex probe: ${result.status}${result.error === undefined ? "" : ` (${result.error})`}`);
-        return probeResultOf(result);
+        return { result: probeResultOf(result), detail: result.error ?? null };
       }
       try {
         const parsed: unknown = JSON.parse(result.raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ""));
-        return typeof parsed === "object" && parsed !== null && "ok" in parsed ? "ok" : "invalid_output";
+        return typeof parsed === "object" && parsed !== null && "ok" in parsed
+          ? { result: "ok", detail: null }
+          : { result: "invalid_output", detail: "the probe answer lacks the ok field" };
       } catch {
-        return "invalid_output";
+        return { result: "invalid_output", detail: "the probe answer is not JSON" };
       }
     },
     extract(prompt: string, schemaJson: string, extractOptions: ExtractOptions): Promise<ProviderResult> {

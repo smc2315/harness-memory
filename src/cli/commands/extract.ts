@@ -36,7 +36,7 @@ export const dreamOptions: OptionSpecs = {
 
 export interface ExtractDryRunReport {
   provider: string;
-  probe: { result: string; at: string } | null;
+  probe: { result: string; at: string; detail: string | null } | null;
   runs_today: number;
   daily_cap: number;
   queue_files: Array<{ id: string; host: string; eligible: boolean; eligibility: string; inserted: boolean }>;
@@ -65,7 +65,7 @@ export function collectDryRun(db: SqlJsDatabase, ctx: CommandContext, providerNa
   const probe = readProbeCache(db, now);
   return {
     provider: providerName,
-    probe: probe === null ? null : { result: probe.result, at: probe.at },
+    probe: probe === null ? null : { result: probe.result, at: probe.at, detail: probe.detail ?? null },
     runs_today: new ExtractionRunRepository(db).countSince(startOfUtcDay(now), { excludeCorrection: true }),
     daily_cap: ctx.config.extraction.max_runs_per_day,
     queue_files: files,
@@ -86,7 +86,7 @@ export function renderDryRun(report: ExtractDryRunReport): string[] {
     `dry run: provider ${report.provider}; probe ${report.probe === null ? "not cached" : `${report.probe.result} (${report.probe.at})`}; runs today ${String(report.runs_today)}/${String(report.daily_cap)}`,
   ];
   const guidance = report.probe === null ? null : probeGuidance(report.probe.result);
-  if (guidance !== null) lines.push(`  ${guidance}`);
+  if (guidance !== null) lines.push(`  ${report.probe?.detail ? `${report.probe.detail} — ` : ""}${guidance}`);
   lines.push(`queue files to insert: ${String(report.queue_files.length)}`);
   if (report.queue_files.length > 0) {
     lines.push(...renderTable(report.queue_files.map((file) => [shortId(file.id), file.host, file.eligible ? "yes" : `no (${file.eligibility})`, file.inserted ? "yes" : "no"]), ["ID", "HOST", "ELIGIBLE", "IN DB"]));

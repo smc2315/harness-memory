@@ -29,7 +29,7 @@ export const s08 = defineScenario({
     run.equal(
       "(i) canonical cmd signatures",
       rows.map((row) => row?.signatureKey),
-      ["bash|command|cmd|pm test", "bash|command|cmd|pm build", "bash|command|cmd|pm lint", "bash|command|cmd|bin vitest run", "bash|command|cmd|pm typecheck", "bash|command|cmd|pm e2e"]
+      ["bash|command|cmd|npm test", "bash|command|cmd|npm build", "bash|command|cmd|yarn lint", "bash|command|cmd|npx vitest run", "bash|command|cmd|npm typecheck", "bash|command|cmd|npm e2e"]
     );
     const relabelled = result.processed.filter((entry) => entry.outcomes >= 0).length;
     run.equal("(i) all six runs processed", relabelled, 6);

@@ -1,7 +1,7 @@
 /**
  * `meta` key/value table (018) and the `write_ops` idempotency ledger (018), as used by the store.
  * Keys: db_generation, extractor_version, semantic_key_backfill, last_dream_at, last_probe_at,
- * last_probe_result, installed_version.
+ * last_probe_result, last_probe_error, installed_version.
  */
 
 import type { Database as SqlJsDatabase } from "sql.js";

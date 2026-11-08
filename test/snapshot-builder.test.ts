@@ -61,7 +61,7 @@ function seed() {
       scopeGlob: "**/*",
       lifecycleTriggers: ["before_tool"],
       triggerSignature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "npm test" },
-      signatureKey: "bash|command|cmd|pm test",
+      signatureKey: "bash|command|cmd|npm test",
       aliases: ["pnpm test", "테스트 실행"],
       failureClasses: ["exit_1"],
       embedding: new Float32Array([0.1, 0.2, 0.3, 0.4]),
@@ -118,7 +118,7 @@ describe("buildSnapshot", () => {
     const pitfall = active.memories.find((memory) => memory.id === rows.pitfall.id)!;
     expect(pitfall.details).toHaveLength(600);
     expect(pitfall.scope_regex).toBeNull();
-    expect(pitfall.signature).toMatchObject({ tool: "bash", target: "command", pattern_kind: "cmd", pattern: "pm test", tokens: ["pm", "test"], signature_key: "bash|command|cmd|pm test" });
+    expect(pitfall.signature).toMatchObject({ tool: "bash", target: "command", pattern_kind: "cmd", pattern: "npm test", tokens: ["pm", "test"], program: "npm", signature_key: "bash|command|cmd|npm test" });
     expect(pitfall.authority).toBe("auto");
     expect(pitfall.enforcement).toBe("soft_deny");
     expect(pitfall.aliases).toEqual(["pnpm test", "테스트 실행"]);

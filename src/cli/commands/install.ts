@@ -22,7 +22,7 @@ import { stateDirectories, type HarnessPaths } from "../../core/paths";
 import type { ProbeResult } from "../../core/vocabulary";
 import { META_KEYS, MetaRepository } from "../../db/repositories/meta";
 import type { Store } from "../../db/store";
-import { selectProvider, writeProbeCache, type ExtractionProvider } from "../../dream/extract/providers";
+import { normalizeProbe, selectProvider, writeProbeCache, type ExtractionProvider } from "../../dream/extract/providers";
 import type { CommandContext, NpmRunResult } from "../context";
 import { flagBoolean, flagString, type OptionSpecs } from "../lib/args";
 import { probeGuidance, readSnapshotFacts } from "../lib/diagnostics";
@@ -86,7 +86,7 @@ export interface InstallReport {
   /** `.harness-memory/.gitignore` (`*`), written for every scope and checkout layout; `created` is false when a file was already there. */
   git_ignore: { path: string; created: boolean };
   manifest: string;
-  probe: { provider: string | null; result: ProbeResult | null; skipped: boolean; guidance: string | null };
+  probe: { provider: string | null; result: ProbeResult | null; skipped: boolean; guidance: string | null; detail?: string | null };
   self_test: SelfTestResult | { skipped: true; reason: string };
   warnings: string[];
 }
@@ -211,15 +211,15 @@ export async function probeForInstall(
   config: HarnessConfig,
   now: string,
   provider: ExtractionProvider | null
-): Promise<{ provider: string | null; result: ProbeResult | null; guidance: string | null }> {
-  if (provider === null) return { provider: null, result: null, guidance: probeGuidance("missing") };
-  if (provider.name === "replay") return { provider: provider.name, result: "ok", guidance: null };
-  const result = await provider.probe({ config, paths, now });
+): Promise<{ provider: string | null; result: ProbeResult | null; detail: string | null; guidance: string | null }> {
+  if (provider === null) return { provider: null, result: null, detail: null, guidance: probeGuidance("missing") };
+  if (provider.name === "replay") return { provider: provider.name, result: "ok", detail: null, guidance: null };
+  const outcome = normalizeProbe(await provider.probe({ config, paths, now }));
   await store.withWriteLock("install:probe", CLI_LOCK_WAIT_MS, (db) => {
-    writeProbeCache(db, { at: now, result });
+    writeProbeCache(db, { at: now, result: outcome.result, detail: outcome.detail });
     return { id: null, kind: "probe", noop: true, wrote: true };
   });
-  return { provider: provider.name, result, guidance: probeGuidance(result) };
+  return { provider: provider.name, result: outcome.result, detail: outcome.detail, guidance: probeGuidance(outcome.result) };
 }
 
 export function renderInstallReport(report: InstallReport): string[] {
@@ -241,7 +241,7 @@ export function renderInstallReport(report: InstallReport): string[] {
   lines.push(`  git         ${report.git_ignore.path} ${report.git_ignore.created ? "written" : "kept"} (nothing under .harness-memory/ is ever committed)`);
   if (report.probe.skipped) lines.push("  provider    probe skipped");
   else if (report.probe.provider === null) lines.push(`  provider    none found — ${report.probe.guidance ?? ""}`.trimEnd());
-  else lines.push(`  provider    ${report.probe.provider} — probe ${report.probe.result ?? "?"}${report.probe.guidance === null ? "" : `; ${report.probe.guidance}`}`);
+  else lines.push(`  provider    ${report.probe.provider} — probe ${report.probe.result ?? "?"}${report.probe.detail ? ` (${report.probe.detail})` : ""}${report.probe.guidance === null ? "" : `; ${report.probe.guidance}`}`);
   if ("skipped" in report.self_test) lines.push(`  self-test   skipped (${report.self_test.reason})`);
   else if (report.self_test.ok) lines.push(`  self-test   ${report.self_test.event} ok (${formatMs(report.self_test.durationMs)}, hook status ${report.self_test.logEntry?.status ?? "?"})`);
   else lines.push(`  self-test   FAILED: ${report.self_test.error ?? "unknown error"}`);

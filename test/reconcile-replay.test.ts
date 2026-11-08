@@ -78,7 +78,7 @@ describe("(a) correction episode → active / auto / soft_deny; (j) evidence_wei
     expect(memory.evidenceCount).toBe(1);
     expect(memory.validationCount).toBe(0);
     expect(memory.promotionSource).toBe("auto");
-    expect(memory.signatureKey).toBe("bash|command|cmd|pm test");
+    expect(memory.signatureKey).toBe("bash|command|cmd|npm test");
     expect(memory.scopeGlob).toBe("**/*");
     expect(memory.activationClass).toBe("event");
     expect(memory.lifecycleTriggers).toEqual(["before_tool"]);
@@ -455,7 +455,7 @@ describe("normalization and guards", () => {
     const validated = {
       ...fact,
       ordinal: 0,
-      compiledSignature: { tool: "bash", target: "command" as const, pattern_kind: "cmd" as const, pattern: "pm test", negate: false, tokens: ["pm", "test"], regex_source: null, signature_key: "bash|command|cmd|pm test" },
+      compiledSignature: { tool: "bash", target: "command" as const, pattern_kind: "cmd" as const, pattern: "npm test", negate: false, tokens: ["pm", "test"], program: "npm", regex_source: null, signature_key: "bash|command|cmd|npm test" },
       semanticKey: "stale-key",
       normalizedScope: "**/*",
       relabels: [],
@@ -599,7 +599,7 @@ describe("normalization and guards", () => {
     let episode = episodes.getById(descriptor.id)!;
     expect(episode.status).toBe("queued");
     expect(episode.attemptCount).toBe(0);
-    expect(episode.nextAttemptAt).toBe(isoPlus(REPLAY_NOW, { days: 1 }));
+    expect(episode.nextAttemptAt).toBe(isoPlus(REPLAY_NOW, { minutes: 10 }));
 
     const retry = recordExtractionFailure(db, { episodeId: descriptor.id, runId: "run-t", run, status: "timeout", error: "killed", now: REPLAY_NOW, attemptCount: 2 });
     expect(retry.disposition).toBe("retry");
@@ -621,7 +621,7 @@ describe("normalization and guards", () => {
     for (const status of ["timeout", "invalid_output"] as const) {
       const waiting = recordExtractionFailure(db, { episodeId: descriptor.id, runId: `run-${status}`, run, status, error: `probe: ${status}`, now: REPLAY_NOW, attemptCount: 1, providerUnavailable: true });
       expect(waiting.disposition).toBe("waiting");
-      expect(episodes.getById(descriptor.id)).toMatchObject({ status: "queued", attemptCount: 0, nextAttemptAt: isoPlus(REPLAY_NOW, { days: 1 }) });
+      expect(episodes.getById(descriptor.id)).toMatchObject({ status: "queued", attemptCount: 0, nextAttemptAt: isoPlus(REPLAY_NOW, { minutes: 10 }) });
       expect(new ExtractionRunRepository(db).getById(`run-${status}`)?.status).toBe(status);
     }
   });

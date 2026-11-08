@@ -20,7 +20,7 @@ import { getDbGeneration, getMeta, hasWriteOp } from "../src/db/meta";
 import { EpisodeRepository, type EpisodeRecord } from "../src/db/repositories/episodes";
 import { ExtractionRunRepository } from "../src/db/repositories/runs";
 import { buildEpisodeDescriptor } from "../src/dream/episode";
-import { createReplayProvider, type ExtractionProvider, type ProviderResult } from "../src/dream/extract/providers";
+import { createReplayProvider, type ExtractionProvider, type ProbeOutcome, type ProviderResult } from "../src/dream/extract/providers";
 import { appendLedgerLine } from "../src/dream/ledger";
 import { composeStore, importTextFile, isEpisodeDescriptor, readEpisodeLines, rememberImportText, runWorker, silentWorkerLogger, type WorkerOptions } from "../src/dream/worker";
 import { MemoryRepository } from "../src/memory/repository";
@@ -78,13 +78,14 @@ function queueEpisode(lines: readonly LedgerLine[], overrides: Partial<EpisodeDe
   return descriptor;
 }
 
-function fakeProvider(options: { probe?: ProbeResult; extract?: (episodeId: string | undefined) => ProviderResult; name?: "claude" | "codex" }): ExtractionProvider & { probes: number; extracts: string[] } {
+function fakeProvider(options: { probe?: ProbeResult; probeDetail?: string; extract?: (episodeId: string | undefined) => ProviderResult; name?: "claude" | "codex" }): ExtractionProvider & { probes: number; extracts: string[] } {
   const provider = {
     name: options.name ?? ("claude" as const),
     probes: 0,
     extracts: [] as string[],
-    async probe(): Promise<ProbeResult> {
+    async probe(): Promise<ProbeResult | ProbeOutcome> {
       provider.probes += 1;
+      if (options.probeDetail !== undefined) return { result: options.probe ?? "ok", detail: options.probeDetail };
       return options.probe ?? "ok";
     },
     async extract(_prompt: string, _schema: string, extractOptions: { episodeId?: string }): Promise<ProviderResult> {
@@ -189,7 +190,7 @@ describe("worker extract", () => {
     expect(provider.probes).toBe(0);
   });
 
-  test("a failing probe leaves episodes queued without burning an attempt and is cached for a day", async () => {
+  test("a failing probe leaves episodes queued without burning an attempt and is retried after ten minutes", async () => {
     const descriptor = queueEpisode(s01);
     const provider = fakeProvider({ probe: "not_logged_in" });
     const result = await worker({ provider });
@@ -202,14 +203,14 @@ describe("worker extract", () => {
       const episode = new EpisodeRepository(db).getById(descriptor.id)!;
       expect(episode.status).toBe("queued");
       expect(episode.attemptCount).toBe(0);
-      expect(episode.nextAttemptAt).toBe("2026-11-09T15:00:00.000Z");
+      expect(episode.nextAttemptAt).toBe("2026-11-08T15:10:00.000Z");
       expect(new ExtractionRunRepository(db).getById(extractionRunId(descriptor.id))?.status).toBe("not_logged_in");
       expect(getMeta(db, "last_probe_result")).toBe("not_logged_in");
       expect(getMeta(db, "last_probe_at")).toBe(NOW);
     });
 
-    // Five hours later a new episode arrives: the cached probe keeps the worker from leasing or probing again.
-    clockNow = "2026-11-08T20:00:00.000Z";
+    // Five minutes later a new episode arrives: the cached failure keeps the worker from leasing or probing again.
+    clockNow = "2026-11-08T15:05:00.000Z";
     const second = queueEpisode(s01, {}, "k2");
     const later = await worker({ provider });
     expect(later.inserted).toBe(1);
@@ -218,8 +219,8 @@ describe("worker extract", () => {
     expect(provider.probes).toBe(1);
     await store.read((db) => expect(new EpisodeRepository(db).getById(second.id)).toMatchObject({ status: "queued", attemptCount: 0 }));
 
-    // After the daily window both episodes are due; a fresh probe succeeds and the cache flips to ok.
-    clockNow = "2026-11-09T16:00:00.000Z";
+    // After the ten-minute window both episodes are due; a fresh probe succeeds and the cache flips to ok.
+    clockNow = "2026-11-08T15:11:00.000Z";
     const good = fakeProvider({ probe: "ok", extract: () => ({ status: "ok", raw: JSON.stringify(outputFixture([factFixture({ evidence_refs: ["e1"] })])) }) });
     const recovered = await worker({ provider: good });
     expect(good.probes).toBe(1);
@@ -227,7 +228,7 @@ describe("worker extract", () => {
     expect(recovered.waiting).toBeNull();
     await store.read((db) => {
       expect(getMeta(db, "last_probe_result")).toBe("ok");
-      expect(getMeta(db, "last_probe_at")).toBe("2026-11-09T16:00:00.000Z");
+      expect(getMeta(db, "last_probe_at")).toBe("2026-11-08T15:11:00.000Z");
       expect(new EpisodeRepository(db).getById(descriptor.id)?.status).toBe("extracted");
       expect(new EpisodeRepository(db).getById(second.id)?.status).toBe("extracted");
     });
@@ -297,6 +298,34 @@ describe("worker extract", () => {
     expect(result.loops).toBe(1);
   });
 
+  test("a provider_error probe (an API error such as a missing model) waits like the other provider failures and keeps the message", async () => {
+    const descriptor = queueEpisode(s01);
+    const detail = "api 404: There's an issue with the selected model (anthropic.claude-opus-5[1m]).";
+    const provider = fakeProvider({ probe: "provider_error", probeDetail: detail });
+    const result = await worker({ provider });
+    expect(result.processed[0]).toMatchObject({ status: "provider_error", episodeId: descriptor.id });
+    expect(result.waiting).toEqual({ count: 1, reason: "provider_error" });
+    expect(provider.extracts).toEqual([]);
+    const store = composeStore({ paths, config, logger: silentWorkerLogger, clock });
+    await store.read((db) => {
+      expect(new EpisodeRepository(db).getById(descriptor.id)).toMatchObject({ status: "queued", attemptCount: 0, nextAttemptAt: "2026-11-08T15:10:00.000Z" });
+      const run = new ExtractionRunRepository(db).getById(extractionRunId(descriptor.id))!;
+      expect(run.status).toBe("provider_error");
+      expect(run.error).toContain("api 404");
+      expect(getMeta(db, "last_probe_result")).toBe("provider_error");
+      expect(getMeta(db, "last_probe_error")).toBe(detail);
+    });
+    // The operator fixes extraction.model; eleven minutes later the probe passes and the message is gone.
+    clockNow = "2026-11-08T15:11:00.000Z";
+    const good = fakeProvider({ probe: "ok", extract: () => ({ status: "ok", raw: JSON.stringify(outputFixture([factFixture({ evidence_refs: ["e1"] })])) }) });
+    const recovered = await worker({ provider: good });
+    expect(recovered.processed.map((entry) => entry.status)).toEqual(["ok"]);
+    await store.read((db) => {
+      expect(getMeta(db, "last_probe_result")).toBe("ok");
+      expect(getMeta(db, "last_probe_error")).toBeNull();
+    });
+  });
+
   test("a probe timeout (or garbage probe) leaves the batch queued without burning an attempt and never kills it", async () => {
     const descriptor = queueEpisode(s01);
     const provider = fakeProvider({ probe: "probe_timeout" });
@@ -306,7 +335,7 @@ describe("worker extract", () => {
     expect(provider.extracts).toEqual([]);
     const store = composeStore({ paths, config, logger: silentWorkerLogger, clock });
     await store.read((db) => {
-      expect(new EpisodeRepository(db).getById(descriptor.id)).toMatchObject({ status: "queued", attemptCount: 0, nextAttemptAt: "2026-11-09T15:00:00.000Z" });
+      expect(new EpisodeRepository(db).getById(descriptor.id)).toMatchObject({ status: "queued", attemptCount: 0, nextAttemptAt: "2026-11-08T15:10:00.000Z" });
       const run = new ExtractionRunRepository(db).getById(extractionRunId(descriptor.id))!;
       expect(run.status).toBe("timeout");
       expect(run.error).toContain("probe: probe_timeout");

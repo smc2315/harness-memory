@@ -124,7 +124,7 @@ export const EXTRACTION_SCHEMA: Readonly<Record<string, unknown>> = {
 
 export const EXTRACTION_SCHEMA_JSON = JSON.stringify(EXTRACTION_SCHEMA);
 
-/** Per-fact rejection codes (V1–V11 of §5.6). */
+/** Per-fact rejection codes (V1–V12 of §5.6; V12 added in the verification round). */
 export const REJECTION_CODES = [
   "schema", // V1
   "evidence_ref", // V2
@@ -138,6 +138,7 @@ export const REJECTION_CODES = [
   "restatement", // V8
   "duplicate_in_batch", // V9
   "trigger_unreachable", // V10 (signature dropped and nothing left for before_tool)
+  "signature_matches_resolution", // V12 (the signature would fire on the command that fixed the cited failure)
   "low_confidence",
   "skipped_recent_reject",
 ] as const;

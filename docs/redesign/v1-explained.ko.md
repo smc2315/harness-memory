@@ -21,7 +21,7 @@ v1 빌드에서 동작하는 것:
 - **평가 스위트가 실제 결함을 잡았습니다.** `hm eval:replay`(녹화된 12개 시나리오를 실제 훅과 worker로 재생, 314개 검사)가 "추출 프롬프트의 이벤트 id가 16자리 ledger seq라서 스키마 `^e[0-9]{1,4}$`에 전부 걸린다 → 실제 에피소드에서는 사실이 하나도 저장되지 않는다"는 blocker를 찾아냈고, 이벤트를 `e1..eN` 순번으로 바꿔 고쳤습니다(§3.3). 단위 테스트는 4자리 seq 픽스처만 써서 놓쳤던 것입니다 — v0.5가 "배선" 때문에 죽었다는 진단이 v0.6에서도 재현될 뻔했고, 이번엔 끝까지 도는 평가가 막았습니다.
 - **Phase D 적대적 리뷰를 통과했습니다.** 5개 차원(쓰기 경로 정합성, 훅 핫패스 안전성, 동시성·크래시, 보안, 모듈 간 일관성)에서 47건이 제기되어 각각 독립 반박 2회를 거쳐 34건이 살아남았고, 전부 고쳤습니다(§13, `phase-d-notes.md`). 가장 컸던 것 셋: 자격 증명 마스킹이 `DB_PASSWORD=` 같은 가장 흔한 형태를 놓치던 blocker, `db.lock` 탈취가 원자적이지 않아 두 writer가 동시에 잠금을 쥘 수 있던 문제, PolicyEngine이 훅 프로세스마다 minimatch를 로드하고 regex 안전성 샘플링을 돌려 지연 게이트를 넘기던 문제(고친 뒤 p95 84–87 ms로 게이트 통과).
 
-동작하지만 **이 머신에서 끝까지 검증하지 못한 것** 하나: 실제 `claude -p` 추출입니다. 이 PC의 `claude` CLI가 로그인되어 있지 않아(`/login` 필요) 추출 provider probe가 `not_logged_in`을 돌려줍니다. 그래서 추출 파이프라인은 녹화된 fixture를 재생하는 **replay provider**로 테스트했고, 실제 probe 실패 → 24 h 대기 → `hm status` 안내 경로는 실기로 확인했습니다(§9, §10).
+동작하지만 **이 머신에서 끝까지 검증하지 못한 것** 하나: 실제 `claude -p` 추출입니다. 이 PC의 `claude` CLI가 로그인되어 있지 않아(`/login` 필요) 추출 provider probe가 `not_logged_in`을 돌려줍니다. 그래서 추출 파이프라인은 녹화된 fixture를 재생하는 **replay provider**로 테스트했고, 실제 probe 실패 → 대기(실패한 probe는 10분 뒤 재시도; 처음 구현은 24 h였고 검증 라운드에서 고쳤습니다) → `hm status` 안내 경로는 실기로 확인했습니다(§9, §10).
 
 ---
 
@@ -87,7 +87,7 @@ extract end     exit=0
 - 잠금 세션 2(`reconcile`)에서 사실(fact)마다 `SAVEPOINT`를 걸고: 스키마·V1–V11 검증 → 기존 행과의 이웃 탐색(semantic_key, Jaccard 0.6, 코사인 0.85) → `reinforce`/`create`/`propose_*` 결정 → `recomputeDerived`(증거 점수·세션 수) → `decideTier`(active/candidate) → `transitionMemory`. 같은 run을 두 번 적용하면 `write_ops`에서 걸러져 **바이트 단위로 동일한 DB**가 됩니다(테스트 (d)).
 - 커밋 뒤 `buildSnapshot`이 스냅샷 3개 파일을 tmp+rename으로 다시 씁니다. 훅은 `snapshot.source {mtime, size}`를 DB 파일과 비교해 오래된 스냅샷이면 `worker reindex`를 분당 1회만 요청합니다.
 
-위 추적에서는 probe가 `not_logged_in`이라 사실이 만들어지지 않았고, episode는 attempt를 소모하지 않은 채 `queued`로 남아 24 h 뒤에 다시 시도됩니다. `hm status`는 이렇게 보여 줍니다:
+위 추적에서는 probe가 `not_logged_in`이라 사실이 만들어지지 않았고, episode는 attempt를 소모하지 않은 채 `queued`로 남아 10분 뒤에 다시 시도됩니다(로그인하면 다음 worker 실행이 바로 이어받습니다). `hm status`는 이렇게 보여 줍니다:
 
 ```
 active 0 (auto 0) | candidates 0 | proposals 0 | queue 0 | last extraction 21s ago not_logged_in | probe not_logged_in | snapshot fresh | p95 9ms
@@ -298,3 +298,21 @@ hm eval:latency   # 300 메모리 픽스처에 pre-tool 훅 50회 스폰, p95 �
 - **제안·일관성**: revalidate 거절이 아무 일도 안 하고 다음 dream에 다시 열리던 것 → 거절 = stale 전이; candidate가 죽은 supersede 수락과 payload 없는 fix_* 수락 → 쓰기 전 거부(`ProposalNotApplicableError`); 거절된 fix_signature는 30일 재제안 금지; V11 도달성의 tool-glob 의미를 검증기·스냅샷·매처에서 통일; idle sweep 두 구현(hook-core/worker)의 상태 불일치 정렬과 경쟁 중인 prompt 훅 보호; 불완전한 queue 파일이 모든 lease를 막던 것 → `.bad`로 격리; `hm <cmd> --help`의 usage 문자열과 실제 옵션 불일치 → 테스트로 고정.
 
 나머지 13건은 탈락했고 반박 사유 12건을 노트에 남겼습니다(예: "1 MB stdin 상한이 큰 Write를 fail-open으로 만든다", "heartbeat가 탈취당한 잠금을 다시 찍는다", "snapshot 빌드 시 떨어진 시그니처가 scope 전체 규칙이 된다" — 코드가 이미 다르게 동작함을 반박자가 보였습니다). fixer들이 영역 밖이라 넘긴 요청 중 제가 반영한 것: ledger `firedKeys`에 규칙 키, reconcile `decideTier`에 스캐너 판정(`scanSafe`) 배선(legacy 후보의 저장 텍스트가 스캔에 걸리면 강화는 되어도 자동 활성화 안 됨), consolidate의 fix_signature 30일 스킵과 고아 `import-*.json` GC, doctor의 helper 소켓 경로·길이 경고, 런처의 `uncaughtException`/`unhandledRejection` 가드, 그리고 README/CHANGELOG/업그레이드 문서의 해당 문구. 미룬 것은 §11.
+
+## 14. 검증 라운드: 로그인 뒤에 드러난 것들 (2026-11-08 저녁)
+
+Phase D가 끝난 뒤 "내가 뭘 해줘야 더 테스트 가능하지?"라는 질문에 이 PC를 점검했습니다. `claude` CLI는 로그인되어 있지 않았고, WSL Ubuntu에는 Node가 없었고, 저장소에는 CI가 없었고, codex는 설치되어 있지 않았습니다. 사용자 몫(CLI 로그인, 푸시 허락, 도그푸드할 프로젝트)과 제 몫(CI 작성, WSL 리눅스 실행, 임베딩 helper 실모델 e2e, 패키지 설치 검증)을 나눠 "진행해"로 제 몫을 병렬 에이전트 워크플로로 돌렸고, 그 사이 로그인이 되자 실제 `claude -p` 추출을 처음으로 끝까지 돌렸습니다. 기록 전체는 `docs/redesign/phase-e-notes.md`에 있습니다. 발견과 수정을 순서대로 적습니다.
+
+1. **실패한 probe가 하루 동안 캐시되었습니다.** 로그인 실패 결과가 성공과 똑같이 24 h 캐시되어, 로그인해도 다음 날까지 기다리거나 `hm install`을 다시 돌려야 했습니다. 실패는 10분만 신뢰하고(`PROBE_FAILURE_CACHE_MS`), 대기 중인 에피소드도 같은 시점에 다시 due가 됩니다. 성공은 여전히 하루 신뢰합니다.
+2. **로그인 후 첫 probe가 `invalid_output`으로 실패했습니다.** 같은 명령을 손으로 돌려 보니 `api 404: There's an issue with the selected model (anthropic.claude-opus-5[1m])` — `~/.claude/settings.json`의 대화용 기본 모델이 헤드리스 first-party 호출에서는 존재하지 않는 id였습니다. 두 가지를 고쳤습니다. claude provider는 `extraction.model`이 비어 있으면 `--model sonnet` 별칭을 명시해 대화용 기본값을 상속하지 않습니다(§7의 비용 참고). 그리고 provider 수준 오류를 `invalid_output`으로 뭉개던 분류를 `provider_error`로 분리하고, 오류 본문을 `meta.last_probe_error`에 저장해 `hm install`, `hm status`, `hm doctor`, `hm extract --dry-run`이 그대로 보여줍니다. `api_error_status` 401은 `not_logged_in`입니다.
+3. **실제 추출은 끝까지 돌았습니다.** 임시 프로젝트에서 `npm test` 실패 → "아니, pnpm test 써" 교정 → `pnpm test` 성공 → 한국어 "기억해" 턴을 훅 시퀀스로 재생하자, Stop 훅이 띄운 worker 하나가 lock을 잡고 세 에피소드를 실제 `claude -p`로 추출했습니다(호출당 22–27 s). 실패 에피소드가 pitfall 후보를 만들고, 교정 에피소드의 reinforce가 기존 id를 정확히 가리켜 evidence 3으로 **자동 활성화**했으며, 다음 세션의 `npm test`는 soft_deny로 막혔고, 한국어 턴은 `git commit` 트리거와 커밋/린트 별칭을 가진 정책 후보(사람 승인 대기)가 되었습니다. 설계한 핵심 루프가 실모델 출력 위에서 동작합니다.
+4. **그런데 `pnpm test`도 막혔습니다.** 추출기가 우리 훅이 계산한 실패 시그니처(`sig=bash|exit_1|pm test`)를 그대로 트리거 패턴으로 썼고, §4.6의 정규 명령 문법이 `npm|pnpm|yarn|bun [run] <script>`를 매칭에서도 `pm <script>`로 접었기 때문에 "npm은 틀리고 pnpm이 맞다"는 교훈을 시그니처로 표현할 길이 없었습니다. README의 대표 예시가 이 동작을 의도된 것처럼 설명하고 있었습니다. 수정: 정규화가 세그먼트마다 **리터럴 프로그램**(`npm`, `pnpm dlx`, `npx`)을 함께 보존하고, 패턴을 실제 매니저로 쓰면(`npm test`) 그 매니저에만 걸리며, 계열어(`pm test`, `bin vitest`)는 예전처럼 모든 매니저를 덮습니다. 실패 시그니처는 계열 수준을 유지해 `pnpm test`가 실패한 `npm test`를 여전히 "해결"합니다. 검증기 **V12**는 인용된 실패를 *다른 프로그램*이 해결했는데 시그니처가 그 해결 명령에도 걸리면 거부합니다(플래그만 바뀐 같은 프로그램은 통과). 프롬프트는 두 형태와 규칙을 설명합니다. 2차 라이브 실행에서 추출기는 `npm test`를 썼고, `npm test`는 막히고 `pnpm test`는 통과했습니다. 리플레이 시나리오 s06도 이 의미로 바뀌었습니다.
+5. **작은 것들.** 2.1.3xx 엔벨로프의 `modelUsage`가 보조 모델을 먼저 나열해 run의 모델이 `claude-haiku-4-5`로 기록되던 것을 출력 토큰이 가장 많은 항목으로 바꾸고, 호출당 `cost_usd`를 worker.log에 남깁니다. `hm memory:list`의 `[contested]`는 supersede/stale/revalidate 제안이 있을 때만, 활성화·scope 수정 제안은 `[proposal]`로 표시합니다. `scripts/verify-packed-install.mjs`가 빈 DB의 `hm memory:list`에 exit 2를 기대하던 것(실제 0)을 고쳐 `npm run package:verify`가 다시 끝까지 갑니다.
+
+워크플로 쪽 결과입니다. **리눅스**(WSL Ubuntu-22.04, 사용자 공간 Node 24.14.0): 전체 스위트 992 통과, eval:replay 12/12(317 checks), eval:latency p95 64–76 ms, 실모델 임베딩 테스트 통과 — 유닉스 소켓 경로, `/proc` pid 검사, 리눅스용 onnxruntime이 처음으로 실제 플랫폼에서 돌았습니다. **CI**: `.github/workflows/ci.yml`이 ubuntu(Node 20/24)·macOS·Windows 매트릭스로 typecheck → build → vitest → eval:replay를, 별도 job으로 패키지 설치 검증을, 수동 job으로 실모델 임베딩 테스트(모델 캐시)를 돌립니다. 지연 측정 두 개는 정보성(요약에만 기록)입니다. 아직 GitHub에서 돈 적은 없습니다(미푸시). **임베딩 helper**: 새 Tier-2 테스트 10개가 실모델로 worker의 임베딩 패스 → `dense.v1.bin` → named pipe `topk` → 한국어 질의가 영어 메모리를 1위로 올리는 것(0.82, 임계 0.80), prompt 훅 주입, idle 종료, 빌드된 번들 spawn까지 확인합니다(warm topk 중앙값 4–5 ms). **패키지**: 85 파일, 2.8 MB tarball, 의도 밖 파일 없음; 소스맵이 압축 해제 크기의 69 %라 제외 여부는 릴리스 때 결정하면 됩니다.
+
+비용 감각: sonnet 별칭으로 추출 한 번에 $0.03–0.04(프롬프트 5.5–5.9 k자, 1h 캐시 생성 포함), 하루 10 에피소드면 약 $0.35. `extraction.model: "haiku"`는 그 12분의 1이고 probe는 똑같이 통과했습니다. 이번에 `sonnet` 별칭은 추출 호출에서 `claude-sonnet-4-6`으로, probe에서는 `claude-sonnet-5-5`로 해석되었는데 별칭은 CLI가 고르는 것이므로 고정하려면 구체적 id를 적으면 됩니다.
+
+Windows 지연 게이트는 이 라운드 동안 p95 120–138 ms로 읽혔지만 이전 빌드도 같은 값이었고(안드로이드 에뮬레이터 3개가 돌고 있었음) 리터럴 매칭의 추가 비용은 세그먼트당 비교 하나뿐입니다. 조용한 기계 기준 게이트임을 CI 설명에도 적었습니다.
+
+남은 것: `redesign/v0.6` 푸시(첫 CI 실행), 실제 프로젝트 도그푸드, codex 호스트(0.6.1), `npm publish`, 그리고 §11의 이월 항목들입니다.

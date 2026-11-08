@@ -282,7 +282,7 @@ describe("hm memory:why", () => {
     expect(report.decision.enforcement).toBe("soft_deny");
     expect(report.decision.activated.map((item) => item.id)).toEqual([pitfallId]);
     expect(report.decision.suppressed.find((entry) => entry.id === policyId)?.kind).toBe("signature_mismatch");
-    expect(report.decision.fired?.signature_keys).toEqual(["bash|command|cmd|pm test"]);
+    expect(report.decision.fired?.signature_keys).toEqual(["bash|command|cmd|npm test"]);
 
     const miss = (await runHm(project, ["memory:why", "--tool", "bash", "--target", "npm run build", "--json"], clockOptions())).json<MemoryWhyReport>();
     expect(miss.decision.decision).toBe("none");

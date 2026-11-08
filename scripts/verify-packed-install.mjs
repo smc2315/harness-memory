@@ -97,7 +97,8 @@ try {
   run(["node", hm, "doctor", "--json"], consumerDir);
   run(["node", hm, "snapshot:rebuild"], consumerDir);
   run(["node", hm, "db:migrate", "--json"], consumerDir);
-  run(["node", hm, "memory:list"], consumerDir, { expectStatus: 2 });
+  // An empty database is not an error: `hm memory:list` prints "no memories match" and exits 0.
+  run(["node", hm, "memory:list"], consumerDir);
   run(["node", hm, "uninstall", "--purge", "--json"], consumerDir);
   if (existsSync(join(consumerDir, ".harness-memory", "memory.sqlite"))) throw new Error("purge left memory.sqlite");
   // install created the settings file, so uninstall deletes it once our entries are gone; a pre-existing

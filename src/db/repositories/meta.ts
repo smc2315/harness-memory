@@ -13,6 +13,7 @@ export const META_KEYS = {
   lastDreamAt: "last_dream_at",
   lastProbeAt: "last_probe_at",
   lastProbeResult: "last_probe_result",
+  lastProbeError: "last_probe_error",
   installedVersion: "installed_version",
 } as const;
 

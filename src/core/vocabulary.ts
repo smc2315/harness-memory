@@ -137,6 +137,7 @@ export const PROBE_RESULTS = [
   "probe_timeout",
   "not_logged_in",
   "invalid_output",
+  "provider_error",
 ] as const;
 export type ProbeResult = (typeof PROBE_RESULTS)[number];
 
