@@ -48,7 +48,9 @@ function regexSamples(source, size) {
 const passesFor = (size) => Math.max(1, Math.ceil(131_072 / (5 * size)));
 const fmt = (ms) => (ms === null ? "—" : ms.toFixed(3));
 
-const REFERENCES = ["[a-z]!", ".{0,32}\\d", "[a-z]{2,8}\\d", "(?:[a-z]|\\s)(?:[a-z]|\\s)\\d"];
+// The first entry is the validator's own reference (REGEX_REFERENCE_SOURCE, a quadratic pattern of the accepted shape);
+// the others are linear scans kept for comparison — their ratios shift ~3× between x64 and arm64.
+const REFERENCES = [sig.REGEX_REFERENCE_SOURCE ?? "ref .*\\.x", "[a-z]!", "[a-z]{2,8}\\d"];
 const ACCEPT = [
   "^npm\\s+(run\\s+)?test\\b", "rm\\s+-rf\\s+/", "git push.*--force", "(foo|bar)\\.ts$", "\\d+\\s+\\d+",
   "^[a-z]+\\s+[0-9]+", "^DROP TABLE", "(foo|bar)+\\s*=", "curl .* \\| (ba)?sh", "cat .*\\.env", "curl .*\\|.*sh",
@@ -60,10 +62,13 @@ const interpret = process.execArgv.includes("--regexp-interpret-all");
 console.log(`node ${process.version} ${process.platform} ${os.arch()} ${os.cpus()[0]?.model ?? "?"} x${os.cpus().length} interpret-all=${interpret}`);
 console.log(`constants: REGEX_BUDGET_MS=${sig.REGEX_BUDGET_MS} REGEX_BUDGET_RATIO=${sig.REGEX_BUDGET_RATIO} REGEX_BUDGET_ROUNDS=${sig.REGEX_BUDGET_ROUNDS} REGEX_STAGE_BYTES=${JSON.stringify(sig.REGEX_STAGE_BYTES)}`);
 
+// The validator's reference is swept over its OWN samples (its seed sample is what makes it quadratic); the linear
+// scans are swept over neutral samples so their numbers stay comparable with earlier calibrations.
+const refSamples = (ref, size) => (ref === REFERENCES[0] ? regexSamples(ref, size) : regexSamples("x", size));
 const refMs = {};
 for (const size of [128, 512, 4096]) {
   for (const ref of REFERENCES) {
-    refMs[`${ref}@${size}`] = sig.fastestSweepMs(new RegExp(ref), regexSamples("x", size), { passes: passesFor(size) });
+    refMs[`${ref}@${size}`] = sig.fastestSweepMs(new RegExp(ref), refSamples(ref, size), { passes: ref === REFERENCES[0] ? 1 : passesFor(size) });
   }
 }
 console.log("\nreference sweeps (ms per sweep, quick):");
@@ -80,7 +85,7 @@ for (const [kind, source] of rows) {
   // minutes at 4 KB (a dense quartic took 105 s), so the larger sizes are skipped once the smaller one is expensive.
   const ms512 = ms128 > 1 ? null : sig.fastestSweepMs(regex, regexSamples(source, 512), { rounds: 5 });
   const ms4 = ms512 === null || ms512 > 5 ? null : sig.fastestSweepMs(regex, regexSamples(source, 4096), { rounds: 5 });
-  const ratios = REFERENCES.map((ref) => (ms4 === null ? "—" : (ms4 / refMs[`${ref}@4096`]).toFixed(0)).padStart(20));
+  const ratios = REFERENCES.map((ref) => (ms4 === null ? "—" : (ms4 / refMs[`${ref}@4096`]).toFixed(ms4 / refMs[`${ref}@4096`] < 10 ? 2 : 0)).padStart(20));
   console.log(`${kind.padEnd(6)} ${source.padEnd(44)} ${fmt(ms128).padStart(8)} ${fmt(ms512).padStart(8)} ${fmt(ms4).padStart(9)} ${ratios.join("")}`);
 }
 

@@ -9,6 +9,7 @@ import {
   REGEX_BUDGET_ROUNDS,
   REGEX_HOPELESS_MS,
   REGEX_HOPELESS_RATIO,
+  REGEX_REFERENCE_SOURCE,
   REGEX_STAGE_BYTES,
   canonicalCommandFor,
   canonicalizeCommand,
@@ -205,9 +206,10 @@ describe("V5 regex safety", () => {
   );
 
   // The last three are quadratic on V5's seed sample with a small constant (`.*` backtracks to the end from every
-  // literal prefix; 0.7–1.6 ms per 4 KB sweep on a 2024 desktop): they pass through the 2 ms floor on a fast machine
-  // and through REGEX_BUDGET_RATIO × the linear reference on a slow one — the regression for the machine-relative
-  // budget (the first CI run rejected the curl pattern on runners 2–3.5× slower than the author's machine).
+  // literal prefix; 0.7–1.6 ms per 4 KB sweep on a 2024 x64 desktop, 2.9–4.4 ms on an Apple M1 runner): they pass
+  // through the 2 ms floor on a fast machine and through REGEX_BUDGET_RATIO × the reference pattern of the same
+  // shape on a slow one — the regression for the machine-relative budget (the first CI run rejected the curl pattern
+  // on runners 2–3.5× slower than the author's machine; a linear reference then rejected `cat .*\.env` on arm64).
   test.each([
     "^npm\\s+(run\\s+)?test\\b",
     "rm\\s+-rf\\s+/",
@@ -237,16 +239,14 @@ describe("V5 regex safety", () => {
   });
 
   test("a pattern that backtracks at every position passes the static check but trips the budget on any machine", () => {
-    // ≥ 1 860× the linear reference natively and ≥ 1 150× interpreted at 4 KB, against a 500× ceiling. On a quadratic
-    // pattern the ratio roughly halves with each smaller stage of the ladder (this pair: ~240–360× at 512 B, ~490–580×
-    // at 1 KB on 2024 x64 desktops), so it is normally refused at 1–2 KB and `.*\.env.*`, with its larger constant,
-    // already at 512 B; the stage depends on the machine and is not asserted (calibration in
-    // docs/redesign/phase-f-notes.md, CI follow-up).
+    // ≥ 5× the reference pattern (`ref .*\.x`, quadratic from every fifth character) on every machine measured, against
+    // a 2.5× ceiling: these two backtrack from every character. The stage that refuses them depends on the machine
+    // and is not asserted (calibration in docs/redesign/phase-f-notes.md, CI follow-up).
     expect(regexLooksUnsafe("[a-z]+\\s+[0-9]+")).toBe(false);
     expect(checkRegexSafety("[a-z]+\\s+[0-9]+")).toMatchObject({
       ok: false,
       code: "regex_unsafe",
-      detail: expect.stringMatching(/exceeded the budget on a \d+ B sample: .* linear scan/),
+      detail: expect.stringMatching(/exceeded the budget on a \d+ B sample: .* reference pattern/),
     });
     expect(checkRegexSafety(".*\\.env.*")).toMatchObject({ ok: false, code: "regex_unsafe" });
   });
@@ -294,10 +294,13 @@ describe("V5 regex safety", () => {
     expect(REGEX_BUDGET_ROUNDS).toBeGreaterThanOrEqual(3);
   });
 
-  test("the budget is the 2 ms floor on a fast machine and REGEX_BUDGET_RATIO × the linear reference on a slow one", () => {
-    expect(regexBudgetMs(0.001)).toBe(REGEX_BUDGET_MS);
-    expect(regexBudgetMs(0.01)).toBeCloseTo(REGEX_BUDGET_RATIO * 0.01, 10);
+  test("the budget is the 2 ms floor on a fast machine and REGEX_BUDGET_RATIO × the reference pattern on a slow one", () => {
+    expect(regexBudgetMs(0.1)).toBe(REGEX_BUDGET_MS);
+    expect(regexBudgetMs(4)).toBeCloseTo(REGEX_BUDGET_RATIO * 4, 10);
     expect(regexBudgetMs(REGEX_BUDGET_MS / REGEX_BUDGET_RATIO)).toBe(REGEX_BUDGET_MS);
+    // the reference is itself a V5-safe pattern of the accepted shape
+    expect(regexLooksUnsafe(REGEX_REFERENCE_SOURCE)).toBe(false);
+    expect(checkRegexSafety(REGEX_REFERENCE_SOURCE)).toMatchObject({ ok: true });
     // the smaller stages of the ladder scale the floor with the sample size
     expect(REGEX_STAGE_BYTES[REGEX_STAGE_BYTES.length - 1]).toBe(4096);
     expect([...REGEX_STAGE_BYTES].sort((left, right) => left - right)).toEqual([...REGEX_STAGE_BYTES]);
@@ -305,13 +308,13 @@ describe("V5 regex safety", () => {
     expect(regexFloorMs(4096)).toBe(REGEX_BUDGET_MS);
     expect(regexFloorMs(512)).toBe(REGEX_BUDGET_MS / 8);
     expect(regexFloorMs(128)).toBe(REGEX_BUDGET_MS / 32);
-    expect(regexBudgetMs(0.0001, regexFloorMs(512))).toBe(REGEX_BUDGET_MS / 8);
-    expect(regexBudgetMs(0.001, regexFloorMs(512))).toBeCloseTo(0.5, 10);
-    // a linear scan of five 4 KB samples is far below the floor on every machine this runs on (≈ 0.01 ms native,
-    // ≈ 0.1 ms with V8's interpreter); a reference anywhere near the floor would mean the budget is meaningless there
+    expect(regexBudgetMs(0.01, regexFloorMs(512))).toBe(REGEX_BUDGET_MS / 8);
+    expect(regexBudgetMs(0.2, regexFloorMs(512))).toBeCloseTo(REGEX_BUDGET_RATIO * 0.2, 10);
+    // the reference pattern sweeps its five 4 KB samples in milliseconds (1–2 ms on a 2024 x64 desktop, ≈ 5 ms on an
+    // Apple M1 runner, ≈ 10 ms with V8's interpreter), the scale of the patterns it judges
     const reference = referenceSweepMs(4096);
-    expect(reference).toBeGreaterThan(0);
-    expect(reference).toBeLessThan(REGEX_BUDGET_MS / 2);
+    expect(reference).toBeGreaterThan(0.05);
+    expect(reference).toBeLessThan(500);
   });
 });
 
