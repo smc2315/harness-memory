@@ -161,7 +161,7 @@ runner agent installed a user-space Node v24.14.0 (`~/hm-tools`, tarball checked
 cloned the branch into `~/hm-linux`, copied the e5-small model cache from the Windows side and ran everything in the
 ext4 tree (not under `/mnt/c`).
 
-| Step (b8ef360, Phase D tree) | Result |
+| Step (ac32b25, Phase D tree) | Result |
 |---|---|
 | `npm ci` | 16 s, 169 packages (onnxruntime-node for Linux included) |
 | `npm run typecheck` | 0 errors, 11 s |
@@ -313,7 +313,7 @@ Review findings that changed something:
 | `npm run build` | hook.js 0.4 KB, hook-bundle.js 154.8 KB, worker.js 384.7 KB, embed-helper.js 22.3 KB, bin 805.9 KB | ok |
 | `hm eval:replay` | 12 / 12 scenarios, 317 / 317 checks | 12 / 12, 317 / 317 |
 | `hm eval:latency` p95 | 120–138 ms during this round with three Android emulators running; the Phase D build measured the same back to back (no regression) | 64.5–76.2 ms |
-| `npm run test:embedding` | 18 / 18 (8 legacy + 10 helper, real model from the cache) | 8 / 8 legacy on the b8ef360 tree (the helper test did not exist yet) |
+| `npm run test:embedding` | 18 / 18 (8 legacy + 10 helper, real model from the cache) | 8 / 8 legacy on the ac32b25 tree (the helper test did not exist yet) |
 | `npm run package:verify` | OK after the script fix | — |
 | Live `claude -p` | probe ok; two full extraction runs (§4b) | — |
 
@@ -326,11 +326,11 @@ the design directions A / A′ / B / C are there.
 
 ## 11. The critic's 18 gaps and what happened to each
 
-The completeness critic ran against commit 40db65d. Status after the follow-up work of the same evening:
+The completeness critic ran against commit 8654058. Status after the follow-up work of the same evening:
 
 | # | Gap (claim without evidence) | Outcome |
 |---|---|---|
-| 1 | no Windows full gate on the committed tree | closed — `npm test` 996/996, `eval:replay` 317/317 and `test:embedding` 18/18 ran on the tree that became 40db65d (the critic saw an older log) |
+| 1 | no Windows full gate on the committed tree | closed — `npm test` 996/996, `eval:replay` 317/317 and `test:embedding` 18/18 ran on the tree that became 8654058 (the critic saw an older log) |
 | 2 | `package:verify` never passed with the repo's own script | closed — ran after the fix: "OK packed install verified", 45 s |
 | 3 | no passing Windows latency measurement this round | open — the machine ran three Android emulators all evening; the A/B against the Phase D build shows no regression (§5.1); re-measure on a quiet machine |
 | 4 | hook-internal p95 203 ms in the live session | open as a measurement task — the 203 ms was the first PreToolUse of a session while three workers and `claude -p` started; re-run with one session and `hm dream` to characterise |
