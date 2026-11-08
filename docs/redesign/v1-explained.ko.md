@@ -263,7 +263,7 @@ hm eval:latency   # 300 메모리 픽스처에 pre-tool 훅 50회 스폰, p95 �
 
 ## 11. 미뤄 둔 것 / 다음 단계
 
-- 0.6.0 릴리스: `redesign/v0.6`를 GitHub에 푸시 → PR → `master` 병합 → `npm publish`. 푸시는 2026-11-08 밤에 했고(당신의 "푸시해"), 첫 CI 실행의 후속 수정은 `phase-f-notes.md`의 "CI follow-up"에 있습니다. PR과 publish는 아직입니다.
+- 0.6.0 릴리스: `redesign/v0.6`를 GitHub에 푸시 → PR → `master` 병합 → `npm publish`. 푸시는 2026-11-08 밤에 했고(당신의 "푸시해"), 첫 CI 실행의 후속 수정은 `phase-f-notes.md`의 "CI follow-up"에 있습니다. `master`로 가는 PR은 2026-11-09에 열었습니다([#1](https://github.com/smc2315/harness-memory/pull/1), 당신의 "ㄱㄱ"); 병합과 publish는 아직입니다.
 - 0.6.1: Codex 호스트 어댑터(`notify` 훅 기반), `eval:live`.
 - 0.6.2: OpenCode V2 플러그인 어댑터(기존 사용자 이전 경로).
 - 로그인된 머신에서 첫 dogfood 후 `nested_refusal` 문구, 추출 프롬프트 품질, aliases 품질 튜닝.
@@ -315,7 +315,7 @@ Phase D가 끝난 뒤 "내가 뭘 해줘야 더 테스트 가능하지?"라는 �
 
 Windows 지연 게이트는 이 라운드 동안 p95 120–138 ms로 읽혔지만 이전 빌드도 같은 값이었고(안드로이드 에뮬레이터 3개가 돌고 있었음) 리터럴 매칭의 추가 비용은 세그먼트당 비교 하나뿐입니다. 조용한 기계 기준 게이트임을 CI 설명에도 적었습니다.
 
-남은 것: `master`로 가는 PR, 실제 프로젝트 도그푸드, codex 호스트(0.6.1), `npm publish`, 그리고 §11의 이월 항목들입니다(푸시와 첫 CI 실행은 2026-11-08에 끝났고, CI가 드러낸 두 테스트의 후속 수정은 phase-f-notes.md "CI follow-up" 참조).
+남은 것: [PR #1](https://github.com/smc2315/harness-memory/pull/1)의 `master` 병합, 실제 프로젝트 도그푸드, codex 호스트(0.6.1), `npm publish`, 그리고 §11의 이월 항목들입니다(푸시와 첫 CI 실행은 2026-11-08에, CI가 드러낸 두 테스트의 후속 수정과 PR은 2026-11-09에 끝났습니다; 후속 수정은 phase-f-notes.md "CI follow-up" 참조).
 
 **후속(같은 날 밤).** 워크플로의 critic이 "아직 증거 없는 주장" 18개를 적어 냈고, 그중 바로 닫을 수 있는 것을 처리했습니다. 실데이터에서 제안 승인 → 다음 세션 발화 루프 확인(`hm proposals:accept` 뒤 `git commit` 직전에 린트 정책이 맥락으로 붙음), stop-failure 훅과 "provider 없음" 안내 분기 실측, 리눅스에서 dist 의존 스위트와 실모델 helper 테스트(유닉스 소켓 `/run/user/1000/...sock`) 통과, Node 20.20.2 전체 게이트 통과, 문서 모순 세 곳 수정, 런타임 의존성 보안 권고 중 brace-expansion 수정(minimatch는 11.x가 glob 컴파일러를 깨서 보류, Known limitations에 기록). 그리고 helper가 뜨자마자 모델을 미리 올리도록 바꿔, 스폰 직후 두 번째 프롬프트도 dense 검색을 받게 했습니다. 남은 것은 조용한 기계에서의 Windows 지연 재측정, 임베딩 CI job의 다운로드 경로, 설치 패키지에서의 `--with-embeddings` 경로, 소스맵 포함 여부, 그리고 도그푸드입니다.
 
