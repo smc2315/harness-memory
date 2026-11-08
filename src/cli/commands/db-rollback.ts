@@ -75,7 +75,7 @@ export async function runDbRollback(ctx: CommandContext): Promise<number> {
       copyFileSync(ctx.paths.db, previousCopy);
     }
     copyFileSync(backup.path, ctx.paths.db);
-    for (const file of [ctx.paths.dbPrev, ctx.paths.snapshotActive, ctx.paths.snapshotLexical, ctx.paths.snapshotDense]) {
+    for (const file of [ctx.paths.dbPrev, ctx.paths.snapshotActive, ctx.paths.snapshotLexical, ctx.paths.snapshotRecall, ctx.paths.snapshotDense]) {
       if (!existsSync(file)) continue;
       rmSync(file, { force: true });
       removed.push(file);

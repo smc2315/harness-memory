@@ -1,8 +1,9 @@
 /**
  * `hm status` (spec §11): one line —
- *   `active 212 (auto 61) | candidates 7 | proposals 3 (2 expiring) | queue 2 | last extraction 2h ago ok | probe ok | snapshot fresh | p95 71ms`
+ *   `active 212 (auto 61) | candidates 7 | proposals 3 (2 expiring) | queue 2 | last extraction 2h ago ok | probe ok | snapshot fresh | recall 140 episodes | p95 71ms`
  * Counts come from the database (the source of truth; the snapshot may lag), freshness from the
- * snapshot's recorded `source` stat, p95 from `logs/hooks.log` pre-tool calls.
+ * snapshot's recorded `source` stat, p95 from `logs/hooks.log` pre-tool calls. `recall N episodes` (A′ recall
+ * layer: summarized episodes the prompt hook can recall) appears once there is at least one.
  */
 
 import { EXIT_CODES } from "../../core/errors";
@@ -33,6 +34,8 @@ export interface StatusReport {
   last_extraction: { run_id: string; status: string; started_at: string; finished_at: string | null; provider: string; ago: string } | null;
   probe: { result: string; at: string; detail: string | null; guidance: string | null } | null;
   snapshot: { state: SnapshotState; generation: number | null; built_at: string | null };
+  /** A′ recall layer: whether it is on and how many summarized episodes the prompt hook can recall (null when the database is unreadable). */
+  recall: { enabled: boolean; episodes: number } | null;
   hooks: { calls: number; p95_ms: number | null; p95_all_ms: number | null };
   waiting: string | null;
   line: string;
@@ -54,6 +57,7 @@ export function buildStatusLine(report: StatusReport): string {
   parts.push(report.last_extraction === null ? "last extraction never" : `last extraction ${report.last_extraction.ago} ${report.last_extraction.status}`);
   parts.push(`probe ${report.probe?.result ?? "none"}`);
   parts.push(`snapshot ${report.snapshot.state}`);
+  if (report.recall !== null && report.recall.enabled && report.recall.episodes > 0) parts.push(`recall ${String(report.recall.episodes)} episodes`);
   parts.push(`p95 ${report.hooks.p95_ms === null ? (report.hooks.p95_all_ms === null ? "-" : `${String(Math.round(report.hooks.p95_all_ms))}ms (no pre-tool calls yet)`) : `${String(Math.round(report.hooks.p95_ms))}ms`}`);
   if (counts !== null && counts.unreachable > 0) parts.push(`unreachable ${String(counts.unreachable)}`);
   return parts.join(" | ");
@@ -105,6 +109,7 @@ export async function collectStatus(ctx: CommandContext): Promise<StatusReport> 
           },
     probe: db.probe === null ? null : { result: db.probe.result, at: db.probe.at, detail: db.probe.detail ?? null, guidance: probeGuidance(db.probe.result) },
     snapshot: { state: snapshot.state, generation: snapshot.generation, built_at: snapshot.builtAt },
+    recall: db.recallEpisodes === null ? null : { enabled: ctx.config.recall.enabled, episodes: ctx.config.recall.enabled ? db.recallEpisodes : 0 },
     hooks: { calls: hookLog.total, p95_ms: hookLog.p95PreTool, p95_all_ms: hookLog.p95All },
     waiting: worker.waiting,
     line: "",

@@ -13,7 +13,7 @@ import { dirname, join, posix, resolve, sep } from "node:path";
 
 export const HARNESS_DIR_NAME = ".harness-memory";
 export const DB_FILE_NAME = "memory.sqlite";
-export const TARGET_USER_VERSION = 21;
+export const TARGET_USER_VERSION = 22;
 
 export interface HarnessPaths {
   /** Project root (directory that contains .harness-memory). */
@@ -26,6 +26,8 @@ export interface HarnessPaths {
   snapshotActive: string;
   snapshotLexical: string;
   snapshotDense: string;
+  /** `snapshot/recall.v1.json`: per-episode summaries the `prompt` hook and `hm recall` search (A′ recall layer). */
+  snapshotRecall: string;
   reindexRequested: string;
   ledgerDir: string;
   stateDir: string;
@@ -63,6 +65,7 @@ export function resolvePaths(root: string): HarnessPaths {
     snapshotActive: join(dir, "snapshot", "active.v1.json"),
     snapshotLexical: join(dir, "snapshot", "lexical.v1.json"),
     snapshotDense: join(dir, "snapshot", "dense.v1.bin"),
+    snapshotRecall: join(dir, "snapshot", "recall.v1.json"),
     reindexRequested: join(dir, "snapshot", ".reindex-requested"),
     ledgerDir: join(dir, "ledger"),
     stateDir: join(dir, "state"),

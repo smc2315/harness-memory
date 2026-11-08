@@ -109,7 +109,7 @@ export function renderWorkerResult(result: WorkerResult, providerName: string): 
   ];
   for (const item of result.processed) {
     lines.push(
-      `  episode ${shortId(item.episodeId)} run ${shortId(item.runId)} ${item.status}${item.fromCache ? " (raw cache)" : ""}: created ${String(item.created.length)}, activated ${String(item.activated.length)}, proposals ${String(item.proposals.length)}, outcomes ${String(item.outcomes)}`
+      `  episode ${shortId(item.episodeId)} run ${shortId(item.runId)} ${item.status}${item.fromCache ? " (raw cache)" : ""}: created ${String(item.created.length)}, activated ${String(item.activated.length)}, proposals ${String(item.proposals.length)}, outcomes ${String(item.outcomes)}${item.escalated.length > 0 ? `, escalated ${String(item.escalated.length)}` : ""}${item.remembered.length > 0 ? `, remembered ${String(item.remembered.length)}` : ""}`
     );
   }
   if (result.waiting !== null) {

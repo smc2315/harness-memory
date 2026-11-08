@@ -6,11 +6,11 @@
  * re-runs are idempotent; no TTY and no --yes is a usage error.
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
-import type { ImportReport } from "../src/cli/commands/import";
+import { IMPORT_VERBATIM_SKIP_REASON, type ImportReport } from "../src/cli/commands/import";
 import { bulletHash, buildImportDescriptor, importEpisodeId, importSourcePath, parseImportBullets } from "../src/cli/lib/import-file";
 import type { ExtractionFact } from "../src/core/extraction-types";
 import { EpisodeRepository } from "../src/db/repositories/episodes";
@@ -244,16 +244,114 @@ describe("hm import", () => {
     expect(text.stdout).not.toContain("sync: staled");
   });
 
-  test("without a provider the bullets stay queued and the report says so", async () => {
+  test("without a provider the bullets are imported verbatim (policy rows carrying the bullet text, login-optional); a later run with the provider retypes them", async () => {
     writeClaudeMd();
     await seedProject(project, () => {});
     const result = await runHm(project, ["import", "--yes", "--json"], clockOptions(CLI_NOW, { seams: { provider: null } }));
     expect(result.code).toBe(0);
     const report = result.json<ImportReport>();
     expect(report.worker?.waiting).toEqual({ count: 2, reason: "no_provider" });
-    expect(report.created).toEqual([]);
-    expect(report.rows.every((row) => row.episode_status === "queued")).toBe(true);
+    expect(report.verbatim).toHaveLength(2);
+    expect([...report.created].sort()).toEqual([...report.verbatim].sort());
+    expect(report.rows.every((row) => row.verbatim && row.episode_status === "skipped" && row.memories.length === 1)).toBe(true);
+    expect(report.confirmation).toBe("unconfirmed");
+    expect(report.unconfirmed).toHaveLength(2);
+    await readProject(project, (db) => {
+      const memories = new MemoryRepository(db).list({ status: "active" });
+      expect(memories.map((memory) => [memory.type, memory.summary, memory.sourceRef]).sort()).toEqual(
+        [
+          ["policy", BULLET_COMMIT, "import:CLAUDE.md#L5"],
+          ["policy", BULLET_TEST, "import:CLAUDE.md#L4"],
+        ].sort()
+      );
+      const episodes = new EpisodeRepository(db);
+      for (const memory of memories) {
+        expect(memory).toMatchObject({ authority: "human", sourceKind: "import", knowledgeKind: "import", importUnconfirmed: 1, enforcement: "advise", lifecycleTriggers: ["before_model"], scopeGlob: "**/*", details: "", triggerSignature: null });
+        const provenance = new ProvenanceRepository(db).listForMemory(memory.id);
+        expect(provenance.map((row) => [row.relation, row.extractionRunId])).toEqual([["import", null]]);
+        expect(episodes.getById(provenance[0]!.episodeId)).toMatchObject({ status: "skipped", skipReason: IMPORT_VERBATIM_SKIP_REASON });
+      }
+    });
+    // The hooks read them from the snapshot like any human import row (host-loaded CLAUDE.md rows stay out of session_start / before_model).
+    const snapshot = JSON.parse(readFileSync(project.paths.snapshotActive, "utf8")) as { memories: Array<{ source_file: string | null; summary: string; authority: string; import_unconfirmed: number }> };
+    expect(snapshot.memories.map((memory) => memory.summary).sort()).toEqual([BULLET_COMMIT, BULLET_TEST].sort());
+    expect(snapshot.memories.every((memory) => memory.source_file === "CLAUDE.md" && memory.authority === "human" && memory.import_unconfirmed === 1)).toBe(true);
+
     const text = await runHm(project, ["import", "--yes"], clockOptions(CLI_NOW, { seams: { provider: null } }));
-    expect(text.stdout).toContain("waiting: 2 episodes (no_provider)");
+    expect(text.code).toBe(0);
+    expect(text.stdout).toContain("verbatim");
+    expect(text.stdout).not.toContain("waiting:");
+    // Idempotent: the parked bullets are not imported twice.
+    expect(await readProject(project, (db) => new MemoryRepository(db).list().length)).toBe(2);
+
+    // After `claude auth login`: the same command requeues the parked bullets, the extractor types them and the typed
+    // rows supersede the verbatim ones (actor import).
+    const provider = importProvider();
+    const retyped = await runHm(project, ["import", "--yes", "--json"], clockOptions(CLI_NOW, { seams: { provider } }));
+    expect(retyped.code).toBe(0);
+    const retypedReport = retyped.json<ImportReport>();
+    expect(retypedReport.worker).toMatchObject({ busy: false, processed: 2, waiting: null });
+    expect([...retypedReport.retyped].sort()).toEqual([...report.verbatim].sort());
+    expect(retypedReport.verbatim).toEqual([]);
+    expect(retypedReport.created).toHaveLength(2);
+    expect(retypedReport.rows.every((row) => !row.verbatim && row.run_status === "ok")).toBe(true);
+    await readProject(project, (db) => {
+      const repository = new MemoryRepository(db);
+      const active = repository.list({ status: "active" });
+      expect(active.map((memory) => memory.type).sort()).toEqual(["pitfall", "policy"]);
+      expect(active.find((memory) => memory.type === "pitfall")!.triggerSignature).toMatchObject({ tool: "bash", pattern: "npm test" });
+      for (const id of report.verbatim) {
+        const old = repository.getById(id)!;
+        expect(old).toMatchObject({ status: "superseded", statusReason: "import" });
+        expect(active.some((memory) => memory.id === old.supersededByMemoryId && memory.sourceRef === old.sourceRef)).toBe(true);
+      }
+    });
+    const textAfter = await runHm(project, ["import", "--yes"], clockOptions(CLI_NOW, { seams: { provider } }));
+    expect(textAfter.code).toBe(0);
+    expect(textAfter.stdout).toContain("imported");
+    expect(textAfter.stdout).not.toContain("retyped:");
+    expect(await readProject(project, (db) => new MemoryRepository(db).list({ status: "active" }).length)).toBe(2);
+  });
+
+  test("verbatim rows go through the TTY confirmation like extracted ones; a bullet whose text already lives in a row reinforces that row; a too-short bullet stays queued", async () => {
+    writeClaudeMd(["# Rules", `- ${BULLET_TEST}`, "- tiny one", ""].join("\n"));
+    await seedProject(project, () => {});
+    const questions: string[] = [];
+    const confirmed = await runHm(project, ["import", "--json"], clockOptions(CLI_NOW, { seams: { provider: null }, isTTY: true, confirm: async (question) => (questions.push(question), true) }));
+    expect(confirmed.code).toBe(0);
+    const report = confirmed.json<ImportReport>();
+    expect(questions).toEqual(["Confirm 1 imported memory (clears import_unconfirmed, recomputes enforcement)?"]);
+    expect(report.verbatim).toHaveLength(1);
+    expect(report.confirmation).toBe("confirmed");
+    expect(report.confirmed).toEqual(report.verbatim);
+    // "tiny one" (8 chars) is a bullet but too short for a memory summary: it waits for the extractor instead.
+    expect(report.rows.map((row) => [row.line, row.verbatim, row.episode_status])).toEqual([
+      [2, true, "skipped"],
+      [3, false, "queued"],
+    ]);
+    const verbatimId = report.verbatim[0]!;
+    await readProject(project, (db) => {
+      expect(new MemoryRepository(db).getById(verbatimId)).toMatchObject({ status: "active", importUnconfirmed: 0, enforcement: "advise", authority: "human", summary: BULLET_TEST });
+    });
+
+    // The same bullet in another file: no second row — the existing one gains import provenance from the new episode.
+    mkdirSync(join(project.root, "docs"), { recursive: true });
+    writeFileSync(join(project.root, "docs", "RULES.md"), `- ${BULLET_TEST}\n`, "utf8");
+    const twin = await runHm(project, ["import", "--from", "docs/RULES.md", "--yes", "--json"], clockOptions(CLI_NOW, { seams: { provider: null } }));
+    expect(twin.code).toBe(0);
+    const twinReport = twin.json<ImportReport>();
+    expect(twinReport.verbatim).toEqual([]);
+    expect(twinReport.created).toEqual([]);
+    expect(twinReport.reinforced).toEqual([verbatimId]);
+    expect(twinReport.rows[0]).toMatchObject({ verbatim: true, episode_status: "skipped" });
+    await readProject(project, (db) => {
+      expect(new MemoryRepository(db).list().length).toBe(1);
+      const provenance = new ProvenanceRepository(db).listForMemory(verbatimId);
+      const episodes = provenance.map((row) => new EpisodeRepository(db).getById(row.episodeId)!);
+      expect(episodes.map((episode) => episode.ledgerRef).sort()).toEqual(["import:CLAUDE.md#L2", "import:docs/RULES.md#L1"]);
+      expect(episodes.find((episode) => episode.ledgerRef === "import:docs/RULES.md#L1")).toMatchObject({ status: "skipped", skipReason: IMPORT_VERBATIM_SKIP_REASON });
+    });
+    const text = await runHm(project, ["import", "--yes"], clockOptions(CLI_NOW, { seams: { provider: null } }));
+    expect(text.stdout).toContain("waiting: 1 episode (no_provider)");
   });
 });

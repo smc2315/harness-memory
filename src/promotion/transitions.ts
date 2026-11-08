@@ -14,6 +14,7 @@
  * AuthorityViolationError before anything is written, whatever the edge. Every applied transition
  * writes a `memory_transitions` row. This file and the migrations are the only places allowed to
  * run `UPDATE memories SET status = …` (grep invariant in §4.7); MemoryRepository.update() rejects status.
+ * `adoptActiveMemory` (A′ remember-as-human) annotates an active row's status_reason without a status change.
  */
 
 import type { Database as SqlJsDatabase } from "sql.js";
@@ -222,6 +223,67 @@ export function transitionMemory(db: SqlJsDatabase, input: TransitionInput): Mem
     toStatus: to,
     actor,
     proposalId: input.proposalId ?? null,
+    extractionRunId: input.runId ?? null,
+    reason: input.reason,
+    createdAt: input.now,
+  });
+
+  const updated = repository.getById(memory.id);
+
+  if (updated === null) {
+    throw new MemoryNotFoundError(memory.id);
+  }
+
+  return updated;
+}
+
+export interface AdoptActiveInput {
+  memoryId: string;
+  /** memory_transitions.reason, e.g. `remember:episode <id>` (src/promotion/remember.ts rememberTransitionReason). */
+  reason: string;
+  now: string;
+  runId?: string | null;
+  /** memories.status_reason after the adoption (`remember`). */
+  statusReason: StatusReason;
+}
+
+/**
+ * A′ remember-as-human on an ALREADY-ACTIVE row: the user's words claim the row without a status change — it becomes
+ * authority 'human' (promotion_source 'manual', TTL cleared; MemoryRepository.setAuthority), its status_reason is set
+ * to `input.statusReason`, and the adoption is recorded as an active → active transition by `human` so
+ * `hm memory:history` shows when and why the row changed hands (the same from = to shape the ladder uses for an
+ * enforcement escalation). Throws when the row is missing or not active — a candidate / stale twin is promoted with
+ * `transitionMemory` instead. `status` itself is untouched, so the §4.7 grep invariant holds; besides transitionMemory,
+ * create() and the migrations this is the only writer of memories.status_reason.
+ */
+export function adoptActiveMemory(db: SqlJsDatabase, input: AdoptActiveInput): MemoryRecord {
+  const repository = new MemoryRepository(db, { clock: () => input.now });
+  const memory = repository.getById(input.memoryId);
+
+  if (memory === null) {
+    throw new MemoryNotFoundError(input.memoryId);
+  }
+
+  if (memory.status !== "active") {
+    throw new InvalidMemoryTransitionError(`Memory ${memory.id} is ${memory.status}, not active; promote it with transitionMemory`);
+  }
+
+  if (memory.authority !== "human") {
+    repository.setAuthority(memory.id, "human", input.now);
+  }
+
+  db.run("UPDATE memories SET status_reason = $statusReason, updated_at = $now WHERE id = $id", {
+    $id: memory.id,
+    $statusReason: input.statusReason,
+    $now: input.now,
+  });
+
+  new TransitionRepository(db).insert({
+    memoryId: memory.id,
+    fromStatus: "active",
+    toStatus: "active",
+    actor: "human",
+    proposalId: null,
     extractionRunId: input.runId ?? null,
     reason: input.reason,
     createdAt: input.now,

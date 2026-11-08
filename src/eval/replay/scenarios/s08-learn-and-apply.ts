@@ -24,7 +24,7 @@ export const s08 = defineScenario({
     run.check("(i) each episode created exactly one row", ids.every((id) => id !== undefined), ids.join(","));
     const rows = await Promise.all(ids.map((id) => (id === undefined ? Promise.resolve(null) : run.memory(id))));
     run.check("(i) every row is type=pitfall", rows.every((row) => row?.type === "pitfall"), rows.map((row) => row?.type ?? "null").join(","));
-    run.check("(i) every row is active soft_deny with a before_tool trigger", rows.every((row) => row?.status === "active" && row.enforcement === "soft_deny" && row.lifecycleTriggers.includes("before_tool")));
+    run.check("(i) every row is active at advise (A′ ladder start) with a before_tool trigger", rows.every((row) => row?.status === "active" && row.enforcement === "advise" && row.lifecycleTriggers.includes("before_tool")));
     run.equal("(i) six distinct semantic keys", new Set(rows.map((row) => row?.semanticKey)).size, 6);
     run.equal(
       "(i) canonical cmd signatures",

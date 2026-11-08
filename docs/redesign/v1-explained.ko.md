@@ -318,3 +318,16 @@ Windows 지연 게이트는 이 라운드 동안 p95 120–138 ms로 읽혔지�
 남은 것: `redesign/v0.6` 푸시(첫 CI 실행), 실제 프로젝트 도그푸드, codex 호스트(0.6.1), `npm publish`, 그리고 §11의 이월 항목들입니다.
 
 **후속(같은 날 밤).** 워크플로의 critic이 "아직 증거 없는 주장" 18개를 적어 냈고, 그중 바로 닫을 수 있는 것을 처리했습니다. 실데이터에서 제안 승인 → 다음 세션 발화 루프 확인(`hm proposals:accept` 뒤 `git commit` 직전에 린트 정책이 맥락으로 붙음), stop-failure 훅과 "provider 없음" 안내 분기 실측, 리눅스에서 dist 의존 스위트와 실모델 helper 테스트(유닉스 소켓 `/run/user/1000/...sock`) 통과, Node 20.20.2 전체 게이트 통과, 문서 모순 세 곳 수정, 런타임 의존성 보안 권고 중 brace-expansion 수정(minimatch는 11.x가 glob 컴파일러를 깨서 보류, Known limitations에 기록). 그리고 helper가 뜨자마자 모델을 미리 올리도록 바꿔, 스폰 직후 두 번째 프롬프트도 dense 검색을 받게 했습니다. 남은 것은 조용한 기계에서의 Windows 지연 재측정, 임베딩 CI job의 다운로드 경로, 설치 패키지에서의 `--with-embeddings` 경로, 소스맵 포함 여부, 그리고 도그푸드입니다.
+
+## 15. Phase F — A′ 구현: 사다리, "기억해", 회상, 로그인 선택화 (2026-11-08 밤)
+
+리서치 뒤 고른 방향 A′를 세 갈래 병렬 에이전트(각각 구현 → 리뷰어 둘 → 수정자)로 만들고 제가 통합했습니다. 바뀐 것은 네 가지입니다.
+
+1. **자동 규칙은 advise로 태어나고 사다리를 오릅니다.** 교정·실패→해결에서 배운 pitfall의 기본 enforcement가 soft_deny에서 advise로 바뀌었습니다(`before_tool.auto_enforcement`). 다른 세션이 같은 교정을 다시 확인하면(`before_tool.auto_escalation`, 기본 2세션) 결정론적으로 soft_deny로 올라가고, `hm memory:history`에 `active (enforcement) by auto_rule`로 남습니다. `autonomy_level: shadow`면 올라가지 않고, override로 내려간 행은 새 세션이 다시 확인해야 올라갑니다. 사람 행은 건드리지 않습니다.
+2. **"기억해"는 바로 규칙이 됩니다.** 프롬프트에 명시적 요청(`기억해`, `remember this`, `앞으로` + 규칙)이 있고 추출된 사실이 그 줄을 인용하면, 그 사실은 사람 권한으로 즉시 활성화됩니다(`status_reason remember`, 턴당 최대 2개). 시그니처 있는 정책은 confirm, 시그니처 있는 pitfall은 soft_deny, 그 외는 advise. 다음 세션 시작 때 24시간 동안 "당신 요청에서 만든 규칙 1건: … (되돌리기: hm memory:demote …)"가 뜹니다. 리뷰어가 "I don't remember whether …" 같은 회상 문장도 플래그를 받는다는 구멍을 잡아, 명시적 요청 감지기와 턴당 상한이 들어갔습니다. 전역 규칙("항상 한국어로 답해")은 이 경로에서만 시그니처 없이 허용됩니다.
+3. **회상 레이어는 만들었지만 꺼 두었습니다.** 모든 에피소드가 요약을 갖고(추출기 요약 또는 결정론적 요약, 메모리와 같은 보안 스캐너를 통과), `recall.enabled`를 켜면 `snapshot/recall.v1.json`이 만들어지고 `hm recall "질의"`로 검색하며 프롬프트 제출 때 다른 세션의 관련 에피소드 최대 2건이 `[harness-memory] RECALL …`로 붙습니다. PreToolUse는 이 파일을 절대 열지 않습니다(테스트가 fs 호출을 감시). 기본값은 꺼짐 — 도그푸드에서 필요가 보이면 켭니다.
+4. **로그인은 집행에 선택 사항이고, 내장 auto-memory를 들여올 수 있습니다.** import한 규칙과 `hm memory:add` 규칙은 로그인 없이 발화하며, 추출 CLI가 없어 타입을 못 붙인 불릿은 그대로 advise 행으로 저장됩니다. `hm import --from auto-memory`는 Claude Code가 `~/.claude/projects/<slug>/memory/`에 자동으로 쓴 feedback 노트를 같은 확인 표를 거쳐 사람 규칙으로 만듭니다(`MEMORY.md` 자체는 호스트가 이미 로드하므로 들여오지 않음).
+
+**실모델 라이브 시나리오로 전부 확인했습니다.** 세션 A에서 `npm test` 실패 → "pnpm test 써" 교정 → pitfall이 advise로 활성화, 같은 세션의 "앞으로 커밋 전에 꼭 pnpm lint 돌려. 기억해"는 즉시 confirm 정책. 세션 B 시작 때 알림이 떴고, `npm test`는 안내만, `pnpm test`는 통과, `git commit`은 ask. 세션 B에서 같은 교정이 반복되자 `escalated=1`로 soft_deny로 올라갔고, 세션 C의 `npm test`는 deny, `pnpm test`는 통과. recall은 꺼짐 메시지 → 켜고 재빌드하면 "npm test" 검색에 에피소드 3건과 새 세션 프롬프트에 RECALL 2줄. 당신 PC의 실제 auto-memory 노트는 dry run으로 1개 노트 → 19 불릿으로 파싱됐습니다. 추출 호출 5회, 건당 $0.03–0.05.
+
+게이트: tsc 0, 전체 스위트 81 파일 / 1152 테스트 통과, 리플레이 13/13(350 checks, 새 s13), 문서 테스트 통과(명령 34개). 스키마는 `user_version` 22(마이그레이션 022). 남은 것은 도그푸드와, 그 결과에 따른 사다리 임계(2세션)·감지기 조정, 그리고 `hm recall`·`memory:why`를 스킬로 노출하는 일입니다.

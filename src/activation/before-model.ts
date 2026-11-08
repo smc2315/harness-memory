@@ -5,6 +5,11 @@
  * `before_model.min_score` — or a dense hit ≥ 0.80 when the embedding helper answered in time. Lexical
  * and dense lists are fused with RRF (`fusion.ts`). Rows imported from a host-loaded file (CLAUDE.md,
  * AGENTS.md) are skipped. Budget 5 items / 3 KB from config.
+ *
+ * Recall (A′): after the memory items, at most `before_model.recall.max_items` past-episode summaries from
+ * `recall.v1.json` that score ≥ `before_model.recall.min_score`, excluding the current session, within
+ * `before_model.recall.max_bytes` and only inside what the memory items left of `before_model.max_bytes`.
+ * Plain context — no enforcement, no fired line.
  */
 
 import type { HarnessConfig } from "../core/config";
@@ -13,6 +18,7 @@ import type { Host } from "../core/vocabulary";
 import { RRF_K, rrfFusion, type FusionCandidate } from "./fusion";
 import { applyBudget, isHostLoadedFile, isTtlExpired, itemFromSnapshotMemory, type InjectedItem, type InjectionSource } from "./injection";
 import { normalizeLexicalScore } from "./lexical-snapshot";
+import { selectRecallItems, type RecallIndex, type RecallItem } from "./recall";
 import { compareSnapshotMemories, snapshotMemoryScore } from "./scoring";
 import { scopeMatches, type LexicalSearcher, type LoadedSnapshot } from "./snapshot-reader";
 import { extractScopeRefs } from "./tool-vocabulary";
@@ -51,14 +57,21 @@ export interface BeforeModelParams {
   host: Host;
   config: Pick<HarnessConfig, "before_model">;
   now: string;
+  /** Recall index over `recall.v1.json`; null / absent = no recall items (file missing, `recall.enabled` false). */
+  recall?: RecallIndex | null;
+  /** Current session key: its own episodes are never recalled into it. */
+  sessionKey?: string | null;
 }
 
 export interface BeforeModelResult {
   items: InjectedItem[];
   suppressed: BeforeModelSuppression[];
+  /** Memory items followed by the recall items, newline-joined; null when nothing is injected. */
   text: string | null;
   lexicalUsed: boolean;
   denseUsed: boolean;
+  /** Past-episode summaries appended after the memory items (plain context, never enforced). */
+  recall: RecallItem[];
 }
 
 export const DENSE_HIT_THRESHOLD = 0.8;
@@ -186,5 +199,27 @@ export async function activateBeforeModel(params: BeforeModelParams): Promise<Be
     suppressed.push({ id: item.id, kind: "budget_limit", reason: `budget ${config.before_model.max_items} items / ${config.before_model.max_bytes} bytes` });
   }
 
-  return { items: budget.included, suppressed, text: budget.text, lexicalUsed, denseUsed };
+  // Recall items come last and only inside what the memory items left of the before_model byte budget.
+  let text = budget.text;
+  let recall: RecallItem[] = [];
+  const recallIndex = params.recall ?? null;
+  if (recallIndex !== null && recallIndex.episodeCount > 0 && prompt.trim().length > 0) {
+    const recallConfig = config.before_model.recall;
+    const separator = budget.included.length > 0 ? 1 : 0;
+    const remainingBytes = config.before_model.max_bytes - budget.bytes - separator;
+    const selection = selectRecallItems({
+      index: recallIndex,
+      prompt,
+      sessionKey: params.sessionKey ?? null,
+      maxItems: recallConfig.max_items,
+      maxBytes: Math.min(recallConfig.max_bytes, remainingBytes),
+      minScore: recallConfig.min_score,
+    });
+    if (selection.text !== null) {
+      recall = selection.items;
+      text = text === null ? selection.text : `${text}\n${selection.text}`;
+    }
+  }
+
+  return { items: budget.included, suppressed, text, lexicalUsed, denseUsed, recall };
 }

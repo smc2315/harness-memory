@@ -44,13 +44,13 @@ export const s09 = defineScenario({
     run.equal("(k) the correction row activated with a 30 d TTL", [(await run.memory(correctionId))?.status, (await run.memory(correctionId))?.ttlExpiresAt], ["active", isoPlus(extractAt, { days: 30 })]);
     run.equal("(k) the bare failure stays a candidate", (await run.memory(candidateId))?.status, "candidate");
 
-    // +1 h: both rows fire in a third session (the convention row as advise, the correction row as soft_deny).
+    // +1 h: both rows fire in a third session (both as advise: the learned correction row is born at advise under A′).
     run.at(isoPlus(t0, { hours: 1 }));
     await run.prompt("C", "push the branch", { promptId: "c1" });
     const push = await run.preTool("C", { tool: "Bash", command: "git push --force origin main" });
     run.equal("advise convention row fires (context only)", [push.result?.decision, push.result?.activated], ["none", [convention!.id]]);
     const tests = await run.preTool("C", { tool: "Bash", command: "npm test" });
-    run.equal("the learned correction row fires with deny", [tests.result?.decision, tests.result?.activated], ["deny", [correctionId]]);
+    run.equal("the learned correction row fires as advise after one session (A′)", [tests.result?.decision, tests.result?.enforcement, tests.result?.activated], ["none", "advise", [correctionId]]);
     await run.stop("C", "Pushed after a rebase.");
 
     // +8 d: the convention row reached its TTL but fired a week ago → extended to last_fired + 14 d instead of staled (§5.8).

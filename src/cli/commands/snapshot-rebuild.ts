@@ -1,7 +1,7 @@
 /**
  * `hm snapshot:rebuild` (spec §11): `Store.rebuildSnapshot()` — the lock session migrates a pending
- * database first and always writes snapshot/active.v1.json, lexical.v1.json (and dense.v1.bin when any
- * row has an embedding). Reports the counts the hooks will see.
+ * database first and always writes snapshot/active.v1.json, lexical.v1.json, recall.v1.json when recall is
+ * enabled (and dense.v1.bin when any row has an embedding). Reports the counts the hooks will see.
  */
 
 import { statSync } from "node:fs";
@@ -49,7 +49,7 @@ export async function runSnapshotRebuild(ctx: CommandContext): Promise<number> {
   const result = await store.rebuildSnapshot(CLI_LOCK_WAIT_MS);
   const facts = readSnapshotFacts(ctx.paths, ctx.nowMs());
   const files: SnapshotRebuildReport["files"] = [];
-  for (const path of [ctx.paths.snapshotActive, ctx.paths.snapshotLexical, ctx.paths.snapshotDense]) {
+  for (const path of [ctx.paths.snapshotActive, ctx.paths.snapshotLexical, ctx.paths.snapshotRecall, ctx.paths.snapshotDense]) {
     const bytes = sizeOf(path);
     if (bytes !== null) files.push({ path, bytes });
   }

@@ -34,14 +34,15 @@ claude:  (고치고 pnpm test 실행) … Stop
             분리된 worker를 스폰
 worker:  당신의 `claude -p`(헤드리스, 툴 없음)가 fact 하나를 추출:
          pitfall · 시그니처 bash/cmd "npm test" · scope packages/api → 검증 통과 →
-         active(authority auto, enforcement soft_deny, TTL 30 d) → 스냅샷 재빌드
-다음 턴, 또는 다음 세션:
+         active(authority auto, enforcement advise, TTL 30 d) → 스냅샷 재빌드
+다음 세션:
 claude:  Bash: npm test
          └─ PreToolUse 훅(≈ 50 ms, SQLite 없음): 시그니처 일치 — `npm test`, `npm run test`,
-            `& npm.cmd test`는 같은 형태로 정규화되고 `pnpm test`는 절대 걸리지 않는다 → permissionDecision "deny":
-            "[harness-memory] PITFALL (auto, provisional): Run pnpm test from packages/api …
-             If this does not apply, call the tool again to proceed."
-claude:  Bash: pnpm test   ← 같은 턴 안에서 같은 (memory | tool) 쌍의 재시도는 통과한다
+            `& npm.cmd test`는 같은 형태로 정규화되고 `pnpm test`는 절대 걸리지 않는다 → additionalContext:
+            "[harness-memory] PITFALL (auto, provisional): Run pnpm test from packages/api …"
+            자동 규칙은 advise로 태어난다. 두 번째 세션이 교정을 다시 확인하면 soft_deny로 올라가고,
+            같은 호출이 거부된다: "… If this does not apply, call the tool again to proceed."
+claude:  Bash: pnpm test
 ```
 
 설계를 떠받치는 세 가지 생각:
@@ -54,7 +55,7 @@ claude:  Bash: pnpm test   ← 같은 턴 안에서 같은 (memory | tool) 쌍�
 
 - **Node.js ≥ 20** (24에서 개발). 훅은 평범한 `node` 프로세스이고 worker는 sql.js(WASM)로 SQLite를 다룬다 — 네이티브 의존성 없음.
 - **Claude Code ≥ 2.1.139**: exec-form 훅(`{"command": "<node>", "args": [...]}`)용. 더 오래된 버전은 자동으로 shell-form 훅을 받는다(`--hook-form`으로 덮어쓸 수 있다).
-- **터미널에서 로그인된 추출 CLI**: `claude`(권장) 또는 `codex`. 추출은 당신의 헤드리스 CLI와 구독을 통해 돈다 — API 키 없음. 데스크톱 앱의 로그인은 `claude -p`에 적용되지 않는다; 터미널에서 `claude`를 한 번 실행하고 `/login` 할 것. 로그인이 없어도 나머지는 모두 동작하며 에피소드는 큐에서 기다릴 뿐이다.
+- **학습용 추출 CLI(터미널에서 로그인)**: `claude`(권장) 또는 `codex`. 추출은 당신의 헤드리스 CLI와 구독으로 돈다 — API 키 없음. 로그인은 집행에는 선택 사항이다: 훅은 스냅샷에 이미 있는 모든 규칙(`hm memory:add`, import된 행)을 로그인 없이 발화시킨다; 새 `hm import` 불릿을 타입 있는 행으로 바꾸는 일과 세션에서 배우는 일 — "기억해"라고 한 것 포함 — 은 `claude auth login` 뒤에 시작된다(구버전 CLI: `claude` 실행 후 `/login`; 데스크톱 앱 로그인은 `claude -p`에 적용되지 않는다). 그때까지 불릿과 에피소드는 큐에서 기다리며 잃는 것은 없다.
 - Windows, macOS, Linux. Windows에서 Git Bash는 선택 사항이다([아래](#node-경로-npx-windows-셸) 참고).
 
 ## 설치
@@ -78,13 +79,15 @@ harness-memory 0.6.0-rc.1 installed for Claude Code
   snapshot    built (active 0, candidates 0)
   config      C:\src\my-app\.harness-memory\config.json (created); embeddings off
   git         .claude/settings.local.json added to C:\src\my-app\.git\info\exclude
-  provider    claude — probe not_logged_in; run `claude` once in a terminal and `/login`; …
+  provider    claude — probe not_logged_in; imported and hand-added rules fire without the login; learning starts after `claude auth login`; …
   self-test   session-start ok (…, hook status ok)
   manifest    C:\src\my-app\.harness-memory\install-manifest.json
 Open Claude Code in this project; `hm status` shows what the hooks learn.
 ```
 
 재시작은 필요 없다; Claude Code가 설정 파일 변경을 감지한다. 프로젝트를 Claude Code에서 열고 평소처럼 작업하면서 `hm status`를 보면 된다. 프로젝트에 `CLAUDE.md`나 `AGENTS.md`가 있으면 설치 출력이 `hm import --from CLAUDE.md`를 제안한다; 확인 표를 거쳐 그 bullet들을 사람 메모리로 만든다.
+
+Claude Code 자체의 **auto memory**(`~/.claude/projects/<slug>/memory/`, `type: feedback` 노트)도 두 번째 import 소스다: `hm import --from auto-memory`가 그 노트들을 같은 확인 표를 거쳐 사람 규칙으로 만들어, Claude가 이미 적어 둔 교정이 도구 경계에서 집행되기 시작한다. 그런 노트가 있으면 설치 출력이 알려 준다.
 
 ### `hm install`이 쓰는 것
 
@@ -172,7 +175,7 @@ hm uninstall --purge   # memory.sqlite.bak-v<N> 백업을 제외한 .harness-mem
 정규식은 **오직** 플래그를 세우는 데만 쓰인다 — 메모리 텍스트를 만들지 않는다(v0.5의 "템플릿 후보" 결함). 신호:
 
 - **correction(교정)** — 직전 턴의 마지막 툴 호출이 실패했거나, 프롬프트가 교정 어휘(`don't`, `instead`, `wrong`, `revert`, `아니`, `하지 마`, `말고`, `대신`, `틀렸`, …)에 맞는다.
-- **remember** — `remember`, `from now on`, `기억`, `앞으로`, `절대`; `always` / `항상`은 문장 첫머리이거나 다른 단서와 함께일 때만.
+- **remember** — `remember`, `from now on`, `기억`, `앞으로`, `절대`; `always` / `항상`은 문장 첫머리이거나 다른 단서와 함께일 때만. 이 플래그는 에피소드에 가중치(3)를 준다. §7.3의 사람 경로는 추가로 프롬프트 자체에 명시적 요청(`remember this`, `기억해`, `앞으로` + 규칙)이 있어야 한다; `이 저장소가 npm인지 기억이 안 나` 같은 말은 해당하지 않는다.
 - **failure → resolution(실패 → 해결)** — 앞선 미해결 `tool_fail`과 같은 툴·같은 경로(또는 같은 정규 프로그램 토큰, 예: `pm test`)의 `tool_ok`. 실패한 `npm test` 뒤의 성공한 `ls`는 해결이 *아니다*; 성공한 `pnpm test`는 해결이다.
 - **decision marker(결정 마커)** — 마지막 assistant 메시지의 `decided`, `we'll use`, `switch to`, `결정`, `이제부터`, `전환`, ….
 
@@ -222,7 +225,7 @@ evidence_weight = correction 2 + remember 3 + (실패마다 resolution 2 | 미�
 | `memory.sqlite.prev`, `memory.sqlite.bak-v<N>`, `memory.sqlite.corrupt-<ts>`, `memory.sqlite.rollback-<ts>` | 마지막 정상 복사본; 스키마 버전별 마이그레이션 전 백업; 따로 보관된 손상 파일; `db:rollback`이 교체한 파일 | 업그레이드를 신뢰할 때까지 `.bak-v<N>`은 보관 |
 | `config.json` | 당신의 설정([설정](#설정) 참고) | 예 |
 | `install-manifest.json` | `hm install`이 건드린 것 | 아니오(`hm install` 재실행) |
-| `snapshot/active.v1.json`, `lexical.v1.json`, `dense.v1.bin`, `.reindex-requested` | 훅의 읽기 모델: 사전 컴파일된 scope regex와 시그니처를 가진 active 메모리, 파생 규칙, failure index, 카운트; 직렬화된 MiniSearch 인덱스; 선택적 임베딩 행렬 | 아니오(파생; `hm snapshot:rebuild`) |
+| `snapshot/active.v1.json`, `lexical.v1.json`, `recall.v1.json`, `dense.v1.bin`, `.reindex-requested` | 훅의 읽기 모델: 사전 컴파일된 scope regex와 시그니처를 가진 active 메모리, 파생 규칙, failure index, 카운트; 직렬화된 MiniSearch 인덱스; 에피소드별 회상 요약과 그 인덱스(`recall.enabled`일 때); 선택적 임베딩 행렬 | 아니오(파생; `hm snapshot:rebuild`) |
 | `ledger/*.jsonl`, `state/*.json`, `state/*.notify.json` | 세션별 원시 이벤트(14 d), 열린 턴 커서, worker → 다음 prompt 알림 | 아니오 |
 | `queue/*.json`, `raw/*.json` | 추출을 기다리는 에피소드; provider 원본 출력 캐시(24 h; 무효·suspect 응답은 같은 기간 동안 `<run>.<attempt>.json`으로 보관) | 아니오 |
 | `locks/db.lock/`, `locks/worker.lock/`, `*.pid`, `embed-helper.spawn` | `owner.json` heartbeat를 가진 `mkdir` 기반 lock; pid 파일; 스폰 스로틀 | 아니오 |
@@ -254,7 +257,8 @@ evidence_weight = correction 2 + remember 3 + (실패마다 resolution 2 | 미�
 |---|---|---|
 | 시그니처가 있는 hard `policy`; `never` / `must not` / `always` / `do not` / `절대` / `반드시` / `항상`과 시그니처를 가진 **확인된** import 규칙 | human | `confirm`(`before_tool.hard_policy`) |
 | soft policy, 시그니처 없는 policy, `hm import --yes` 행(`import_unconfirmed = 1`), 그 외 import | human | `advise` |
-| 구체적 시그니처와 `knowledge_kind ∈ {correction, failure_resolution}`을 가진 auto `pitfall` | auto | `soft_deny`(`before_tool.auto_enforcement`) |
+| 구체적 시그니처와 `knowledge_kind ∈ {correction, failure_resolution}`을 가진 auto `pitfall` | auto | `advise`(`before_tool.auto_enforcement`); 두 번째 세션이 다시 확인하면 `soft_deny`로 올라간다(`before_tool.auto_escalation`, 기본 `{ enabled: true, sessions: 2 }`; `autonomy_level: shadow`는 올라가지 않음; override로 내려간 행은 새 세션이 다시 확인해야 다시 올라감). `hm memory:history`에 `active (enforcement) by auto_rule`로 기록 |
+| 명시적 기억 요청(`remember this`, `기억해`, `앞으로` + 규칙)이 있는 턴에서 그 프롬프트 줄을 인용한 규칙 | human(`status_reason remember`, 즉시 active, 턴당 최대 2개) | 시그니처 있는 policy → `confirm`(`before_tool.hard_policy`); 시그니처 있는 pitfall → `soft_deny`; 그 외 → `advise`. `SessionStart`가 24시간 동안 되돌리기(`hm memory:demote <id>`)와 함께 알려 준다; 이후 자동 경로는 손대지 않는다 |
 | 그 외 모든 auto 행(시그니처 없는 `pitfall`, `workflow`, `decision`, `architecture_constraint`) | auto | `advise` |
 
 ### 자동 티어 — 메모리가 스스로 활성화되는 조건
@@ -281,7 +285,7 @@ evidence_weight = correction 2 + remember 3 + (실패마다 resolution 2 | 미�
 | 트리거 | Claude Code 훅 | 무엇 | 예산 |
 |---|---|---|---|
 | `session_start` | `SessionStart` | 트리거에 `session_start`가 있고 타입이 baseline / `decision` / `architecture_constraint` / `workflow`인 active 행; 더해서 일일 다이제스트 `systemMessage` | 5개 / 3 KB |
-| `before_model` | `UserPromptSubmit`(사용자 턴당 한 번) | baseline 행은 항상; 그 외 행은 scope가 프롬프트의 경로 토큰(또는 마지막으로 건드린 파일)과 교차하고 **그리고** summary / details / aliases에 대한 BM25 ≥ `before_model.min_score`일 때 — 또는 임베딩 helper가 있으면 코사인 ≥ 0.80 | 5개 / 3 KB |
+| `before_model` | `UserPromptSubmit`(사용자 턴당 한 번) | baseline 행은 항상; 그 외 행은 scope가 프롬프트의 경로 토큰(또는 마지막으로 건드린 파일)과 교차하고 **그리고** summary / details / aliases에 대한 BM25 ≥ `before_model.min_score`일 때 — 또는 임베딩 helper가 있으면 코사인 ≥ 0.80; 그 다음 `recall.enabled`이면 다른 세션의 과거 에피소드 요약을 최대 `before_model.recall.max_items`개(`[harness-memory] RECALL <날짜>: …`, `snapshot/recall.v1.json`에 대한 BM25 ≥ `before_model.recall.min_score`, 맥락일 뿐 강제 아님) | 5개 / 3 KB(+ 회상 2개 / 1 KB) |
 | `before_tool` | `PreToolUse` | 위의 사다리 | 3개 / 2 KB |
 | `after_tool` | `PostToolUseFailure` | `failure_index[failure_class]` 힌트(예: 이 툴의 `enoent`에 관한 메모리)를 `additionalContext`로 | 2개 / 1 KB |
 
@@ -308,12 +312,15 @@ hm install --host claude --with-embeddings   # 패키지 루트에서 npm instal
 |---|---|---|
 | `autonomy_level` | `standard` | `off` / `shadow` / `standard`(위 참고) |
 | `before_tool.max_items` / `max_bytes` | 3 / 2048 | `PreToolUse` 주입 예산 |
-| `before_tool.auto_enforcement` | `soft_deny` | 시그니처가 있는 교정/실패 유래 auto 피트폴의 기본값(`soft_deny` 또는 `advise`) |
+| `before_tool.auto_enforcement` | `advise` | 시그니처가 있는 교정/실패 유래 auto 피트폴이 태어나는 수준(`advise` 또는 `soft_deny`) |
+| `before_tool.auto_escalation.enabled` / `sessions` | true / 2 | 자율성 사다리: auto `advise` 피트폴의 증거가 이만큼의 세션에 걸치면 `soft_deny`가 된다 |
 | `before_tool.hard_policy` | `confirm` | 시그니처가 있는 hard human policy의 기본값(`confirm`, `advise`, `deny`) |
 | `before_model.max_items` / `max_bytes` | 5 / 3072 | `UserPromptSubmit` 주입 예산 |
 | `before_model.min_score` | 0.35 | non-baseline 행의 정규화 BM25 임계(`s / (s + 1)`) |
 | `before_model.dense` | `helper` | `helper`(`embeddings.enabled`일 때 임베딩 helper 사용) 또는 `off` |
 | `before_model.dense_timeout_ms` | 80 | prompt 훅이 helper를 기다리는 시간 |
+| `before_model.recall.max_items` / `max_bytes` / `min_score` | 2 / 1024 / 0.5 | `UserPromptSubmit`에서 메모리 항목 뒤에 붙는 회상 항목 |
+| `recall.enabled` / `keep_episodes` | false / 300 | 회상 레이어(에피소드 요약, `snapshot/recall.v1.json`, `hm recall`); 쓸모가 증명될 때까지 기본 꺼짐 |
 | `session_start.max_items` / `max_bytes` | 5 / 3072 | 시작 예산 |
 | `after_tool.max_items` / `max_bytes` | 2 / 1024 | 실패 힌트 예산 |
 | `extraction.provider` | `auto` | `auto`, `claude`, `codex`, `replay`(`HARNESS_MEMORY_PROVIDER`가 덮어쓴다) |
@@ -345,7 +352,7 @@ hm install --host claude --with-embeddings   # 패키지 루트에서 npm instal
 | `hm doctor [--fix] [--host-debug <path>] [--self-test] [--hook-script <path>]` | 매니페스트 대 등록된 훅, node 경로, `hooks.log`의 이벤트별 마지막 호출과 p95, 데이터베이스(`quick_check`, `user_version`), 스냅샷 신선도, 도달 불가 메모리, 큐 깊이, 마지막 추출, probe, lock, 임베딩, Git Bash를 교차 확인한다. `--fix`는 옮겨진 node / 훅 경로를 다시 쓰고 스냅샷을 재빌드한다; `--self-test`는 `session-start` 훅을 한 번 실행한다; `--host-debug`는 Claude Code 디버그 로그의 `finished with status N` 줄을 센다. |
 | `hm db:migrate` | lock 아래에서 대기 중인 스키마 마이그레이션을 적용하고(`memory.sqlite`를 `.bak-v<N>`으로 먼저 복사) 스냅샷을 재빌드한다. |
 | `hm db:rollback [--to <version>] [--yes]` | y/N 확인 뒤(`--yes` / `-y`는 TTY가 없을 때) `memory.sqlite.bak-v<N>`(기본: 최신)을 복원한다; 교체된 파일은 `memory.sqlite.rollback-<ts>`로 남기고 `.prev`와 스냅샷을 제거한다. 다음 writer가 다시 앞으로 마이그레이션하므로 먼저 다운그레이드하거나 `hm uninstall` 할 것. |
-| `hm snapshot:rebuild` | 데이터베이스에서 `snapshot/active.v1.json`, `lexical.v1.json`(그리고 `dense.v1.bin`)을 재빌드한다; 필요하면 먼저 마이그레이션한다. |
+| `hm snapshot:rebuild` | 데이터베이스에서 `snapshot/active.v1.json`, `lexical.v1.json`, `recall.enabled`이면 `recall.v1.json`(그리고 `dense.v1.bin`)을 재빌드한다; 필요하면 먼저 마이그레이션한다. |
 | **상태** | |
 | `hm status` | 한 줄: `active N (auto M) \| candidates C \| proposals P (E expiring) \| queue Q (waiting: reason) \| last extraction <ago> <status> \| probe <result> \| snapshot fresh\|stale\|missing \| p95 <ms>`, provider가 주의를 요하면 `probe:` 힌트 한 줄 추가. 설치되지 않았으면 종료 1. |
 | **리뷰** | |
@@ -373,8 +380,9 @@ hm install --host claude --with-embeddings   # 패키지 루트에서 npm instal
 | `hm extract [--now] [--provider <name>] [--dry-run]` | 추출 worker를 전경에서 실행한다; `--dry-run`은 provider를 호출하지 않고 프롬프트만 렌더한다. |
 | `hm dream` | consolidation을 지금 실행한다(TTL, 만료, override 강등, merge 제안, 임베딩 백필, GC). |
 | `hm trace <session_key>` | 세션의 ledger 타임라인: 프롬프트, 발화한 메모리, 툴 호출, 실패와 해결. |
+| `hm recall <query> [--limit <n>] [--since <iso>]` | 과거 에피소드를 요약으로 검색한다 — `recall.enabled`일 때 `before_model`이 회상하는 바로 그것: 날짜, 세션(`<host>-<key>`, 그대로 `hm trace`에 쓸 수 있음), 종류(`extracted` = 추출기의 요약, `derived` = worker의 결정론적 요약), 요약을 관련도 높은 최신순으로 출력한다. 스냅샷이 신선하면 `snapshot/recall.v1.json`을, 아니면 데이터베이스를 읽는다(어느 쪽인지 말해 준다). `--since`는 `closed_at` 기준; 점수 임계는 적용하지 않는다. recall이 꺼져 있으면 그렇다고 알리고 exit 0. |
 | **Import** | |
-| `hm import [--from <file>] [--yes] [--sync]` | `CLAUDE.md` / `AGENTS.md` / `.cursorrules`의 불릿을 import 에피소드로 쪼개고, 추출기를 `action = create`로 돌리고, 확인 표를 보여 준 뒤 확인된 행을 `source_ref = import:<file>#L<n>`의 `human` / `import` 메모리로 삽입한다. `--yes`는 확인을 건너뛴다(`import_unconfirmed = 1`, enforcement 상한 `advise`, `hm review`에 표시); `--sync`는 불릿이 사라진 행을 stale로 보낸다. 재실행은 줄 해시로 멱등이다. |
+| `hm import [--from <file>] [--from auto-memory] [--auto-memory] [--include-project] [--memory-dir <dir>] [--yes] [--sync] [--dry-run] [--provider <name>]` | `CLAUDE.md` / `AGENTS.md` / `.cursorrules`의 불릿을 — 또는 `--from auto-memory`(`--auto-memory`)로 Claude Code 내장 auto memory(`~/.claude/projects/<slug>/memory/`)의 `type: feedback` 노트를(`--include-project`는 `type: project`도, `--memory-dir <dir>`는 유도되지 않는 디렉터리를 지정) — import 에피소드로 쪼개고, 추출기를 `action = create`로 돌리고, 확인 표를 보여 준 뒤 확인된 행을 `source_ref = import:<file>#L<n>`(`import:auto-memory:<file>#L<n>`)의 `human` / `import` 메모리로 삽입한다. 아직 타입을 붙일 수 없는 불릿(추출 CLI 없음)은 그대로 `advise` 행으로 저장했다가 나중에 타입을 붙인다. `--yes`는 확인을 건너뛴다(`import_unconfirmed = 1`, enforcement 상한 `advise`, `hm review`에 표시); `--sync`는 불릿이 사라진 행을 stale로 보낸다(auto-memory는 디렉터리 전체 기준); `--dry-run`은 미리 보기. 재실행은 라인 해시로 멱등이다. |
 | **평가** | |
 | `hm eval:latency [--local] [--runs <n>] [--threshold <ms>] [--memories <n>] [--large] [--hook-script <path>]` | 생성한 300 메모리 픽스처에 대해 `dist/hook.js pre-tool`을 50회 스폰해 min / p50 / p95 / max를 보고한다; p95가 예산(기본 90 ms, `--threshold`)을 넘으면 1로 종료. `--local`은 픽스처 대신 설치된 프로젝트를 측정, `--large`는 2,000 메모리 참고 측정을 추가, `--hook-script`는 다른 `dist/hook.js`를 지정. |
 | `hm eval:replay [--scenario <ids>] [--fixtures <dir>] [--keep] [--verbose]` | 기록된 ledger 픽스처 s01–s12를 실제 훅과 worker(replay provider)로 재생하고 시나리오 단언을 확인한다(저장소 체크아웃의 `test/fixtures/replay` 또는 `--fixtures` 필요); 실패한 검사가 있으면 1로 종료. `--keep`은 시나리오별 임시 프로젝트를 남긴다. |

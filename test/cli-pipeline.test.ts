@@ -159,7 +159,7 @@ describe("hm extract / hm dream", () => {
     expect(existsSync(queueFile(project.paths, descriptor.id))).toBe(false);
     const memories = (await runHm(project, ["memory:list", "--json"])).json<MemoryListReport>();
     expect(memories.memories).toHaveLength(1);
-    expect(memories.memories[0]).toMatchObject({ status: "active", authority: "auto", type: "pitfall", enforcement: "soft_deny" });
+    expect(memories.memories[0]).toMatchObject({ status: "active", authority: "auto", type: "pitfall", enforcement: "advise" });
     const text = await runHm(project, ["extract"], clockOptions(CLI_NOW, { seams: { provider } }));
     expect(text.code).toBe(0);
     expect(text.stdout).toContain("extract: provider replay");

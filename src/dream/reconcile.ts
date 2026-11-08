@@ -30,6 +30,7 @@ import { createDeterministicId, normalizeScopeGlob, normalizeSummary, semanticKe
 import type { LedgerLine, NotifyFile } from "../core/ledger-types";
 import { notifyFile as notifyFilePath, type HarnessPaths } from "../core/paths";
 import {
+  ENFORCEMENT_RANK,
   GLOBAL_SCOPE,
   LIVE_STATUSES,
   isGlobalScope,
@@ -46,6 +47,7 @@ import { ExtractionRunRepository } from "../db/repositories/runs";
 import { selectOne } from "../db/sql";
 import type { WriteOp } from "../db/store";
 import { PROBE_FAILURE_CACHE_MS } from "./extract/providers/types";
+import { normalizeRecallSummary } from "./recall-summary";
 import { createMemoryIdentityKey } from "../memory/utils";
 import {
   DuplicateMemoryContentError,
@@ -55,9 +57,11 @@ import {
   type MemoryRecord,
 } from "../memory/repository";
 import { decideTier, enforcementDefault } from "../promotion/authority";
+import { escalateOnReinforce } from "../promotion/escalation";
 import { evaluateAutoDemotion, openOrSupportProposal } from "../promotion/proposals";
+import { citesRememberPrompt, REMEMBER_MAX_PER_EPISODE, REMEMBER_STATUS_REASON, rememberEnforcement, rememberTransitionReason } from "../promotion/remember";
 import { revalidateMemory } from "../promotion/revalidate";
-import { transitionMemory } from "../promotion/transitions";
+import { adoptActiveMemory, transitionMemory } from "../promotion/transitions";
 import { scanMemoryContent } from "../security/scanner";
 import { renderEventLine } from "./extract/prompt";
 import type { ValidatedFact, ValidationResult } from "./extract/validate";
@@ -127,6 +131,10 @@ export interface ReconcileReport {
   reinforced: string[];
   activated: string[];
   proposals: string[];
+  /** A′ ladder: auto rows this run raised from advise to soft_deny (src/promotion/escalation.ts). */
+  escalated: string[];
+  /** A′ remember-as-human: rows made active human by the user's own request (src/promotion/remember.ts). */
+  remembered: string[];
   factsTotal: number;
   factsAccepted: number;
 }
@@ -475,6 +483,8 @@ interface RunState {
   reinforced: string[];
   activated: string[];
   proposalIds: string[];
+  escalated: string[];
+  remembered: string[];
   activatedToday: number;
   activatedThisRun: number;
   isImport: boolean;
@@ -562,22 +572,40 @@ function deterministicFor(state: RunState, target: MemoryRecord): 0 | 1 {
   return ok ? 1 : 0;
 }
 
+/**
+ * A′ remember-as-human: a `create` of a remember turn (`flags.remember = 1`) that cites the remember prompt line
+ * whose text is an explicit request (citesRememberPrompt → detectRememberRequest; the hook's broad weight flag alone
+ * is not approval). The user's words are the approval, so the row skips the candidate / proposal path — including
+ * decideTier's autonomy_level gate and the auto-activation caps, exactly like `hm memory:add` / `hm import` rows,
+ * which is why at most REMEMBER_MAX_PER_EPISODE such rows are taken per turn (later ones follow the automatic path).
+ * Import episodes have their own human path; facts citing only tool lines, reinforce and propose_* facts stay on
+ * the automatic path.
+ */
+function isRememberCreate(state: RunState, normalized: NormalizedFact): boolean {
+  if (state.isImport || state.remembered.length >= REMEMBER_MAX_PER_EPISODE) return false;
+  return citesRememberPrompt(state.descriptor.flags, normalized.fact, state.ctx.seqMap);
+}
+
 function createInputFor(state: RunState, normalized: NormalizedFact, supersedes: MemoryRecord | null): CreateMemoryInput {
   const { fact } = normalized;
   const hasSignature = fact.compiledSignature !== null && fact.trigger_signature !== null;
-  const authority = state.isImport ? "human" : "auto";
+  // A replacement row (propose_supersede) is never a remember row: its fact action is not `create`.
+  const remember = supersedes === null && isRememberCreate(state, normalized);
+  const authority = state.isImport || remember ? "human" : "auto";
   const knowledgeKind: KnowledgeKind = state.isImport ? "import" : normalized.knowledgeKind;
-  const enforcement = enforcementDefault({
-    type: normalized.type,
-    authority,
-    policySubtype: null,
-    hasSignature,
-    specificityOk: hasSignature,
-    knowledgeKind,
-    importUnconfirmed: state.isImport ? 1 : 0,
-    config: state.ctx.config,
-    summary: fact.summary,
-  });
+  const enforcement = remember
+    ? rememberEnforcement(normalized.type, hasSignature, state.ctx.config)
+    : enforcementDefault({
+        type: normalized.type,
+        authority,
+        policySubtype: null,
+        hasSignature,
+        specificityOk: hasSignature,
+        knowledgeKind,
+        importUnconfirmed: state.isImport ? 1 : 0,
+        config: state.ctx.config,
+        summary: fact.summary,
+      });
   return {
     type: normalized.type,
     summary: fact.summary,
@@ -587,10 +615,14 @@ function createInputFor(state: RunState, normalized: NormalizedFact, supersedes:
     lifecycleTriggers: normalized.lifecycleTriggers,
     confidence: fact.confidence,
     importance: TYPE_IMPORTANCE[normalized.type],
-    status: state.isImport ? "active" : "candidate",
+    // Human rows (import, remember) are active from birth and carry no TTL; auto rows wait for decideTier.
+    status: state.isImport || remember ? "active" : "candidate",
     supersedesMemoryId: supersedes?.id ?? null,
     relevantTools: normalized.relevantTools,
-    promotionSource: state.isImport ? "manual" : "auto",
+    promotionSource: state.isImport || remember ? "manual" : "auto",
+    // A remembered policy with a signature is a hard policy (its enforcement is before_tool.hard_policy, §7.3).
+    ...(remember && normalized.type === "policy" && hasSignature ? { policySubtype: "hard" as const } : {}),
+    ...(remember ? { statusReason: REMEMBER_STATUS_REASON } : {}),
     authority,
     sourceKind: state.isImport ? "import" : "extraction",
     knowledgeKind,
@@ -613,7 +645,9 @@ type FactStep = { kind: "created"; memory: MemoryRecord } | { kind: "reinforced"
 
 function createRow(state: RunState, normalized: NormalizedFact, supersedes: MemoryRecord | null): FactStep {
   const input = createInputFor(state, normalized, supersedes);
-  const rejected = recentlyRejected(state.repository, normalized, input, state.ctx.now);
+  const remember = input.statusReason === REMEMBER_STATUS_REASON;
+  // A′: the user's explicit request outranks a reject of the same claim within 30 days (reviveTerminal makes a new live row).
+  const rejected = remember ? null : recentlyRejected(state.repository, normalized, input, state.ctx.now);
   if (rejected !== null) {
     return {
       kind: "skipped",
@@ -626,16 +660,52 @@ function createRow(state: RunState, normalized: NormalizedFact, supersedes: Memo
   } catch (error) {
     if (error instanceof DuplicateMemoryContentError && error.matchedBy !== "terminal_twin") {
       const twin = state.repository.getById(error.existingMemoryId);
-      if (twin !== null) return reinforceRow(state, normalized, twin);
+      if (twin !== null) return remember ? adoptRememberTwin(state, normalized, twin) : reinforceRow(state, normalized, twin);
     }
     throw error;
   }
   insertProvenance(state, memory.id, normalized.fact, state.isImport ? "import" : "origin");
   recomputeDerived(state.db, memory.id);
   state.created.push(memory.id);
+  if (remember) state.remembered.push(memory.id);
   if (memory.authority === "auto" && memory.status === "candidate") state.tierCandidates.add(memory.id);
   const refreshed = state.repository.getById(memory.id) ?? memory;
   return { kind: "created", memory: refreshed };
+}
+
+/**
+ * A′: a remember create whose claim already lives as a (live) row. The user's words approve the twin the way
+ * `hm memory:promote` would, and every adopted row ends up human / active / status_reason `remember` so the
+ * `[remember]` tag, `memory:show` and the SessionStart undo notice apply to it:
+ *   - auto candidate / stale twin → active by actor human (transitionMemory: authority human, promotion manual, TTL
+ *     cleared) and the remember enforcement replaces the system-chosen one;
+ *   - auto active twin → adoptActiveMemory (authority human, status_reason remember, an active → active transition by
+ *     human in its history) and the remember enforcement;
+ *   - human candidate / stale twin (e.g. a rule the user demoted with `hm memory:demote` and now asks for again) →
+ *     active again by human with status_reason remember; its enforcement only climbs to the remember default, a
+ *     human's higher setting is kept;
+ *   - human active twin → only reinforced (counters): its enforcement is the user's own setting.
+ * The reinforce then runs on the human row: counters and last_verified_at (= this episode's close, which is what the
+ * notice window keys on), no ladder.
+ */
+function adoptRememberTwin(state: RunState, normalized: NormalizedFact, twin: MemoryRecord): FactStep {
+  const reason = rememberTransitionReason(state.descriptor.id);
+  const hasSignature = twin.triggerSignature !== null && twin.signatureKey.length > 0;
+  const wanted = rememberEnforcement(twin.type, hasSignature, state.ctx.config);
+  if (twin.authority === "auto") {
+    if (twin.status === "active") {
+      adoptActiveMemory(state.db, { memoryId: twin.id, reason, now: state.ctx.now, runId: state.runId, statusReason: REMEMBER_STATUS_REASON });
+    } else {
+      transitionMemory(state.db, { memoryId: twin.id, to: "active", actor: "human", reason, now: state.ctx.now, runId: state.runId, statusReason: REMEMBER_STATUS_REASON });
+    }
+    if (wanted !== twin.enforcement) state.repository.setEnforcement(twin.id, wanted, state.ctx.now);
+    state.remembered.push(twin.id);
+  } else if (twin.status !== "active") {
+    transitionMemory(state.db, { memoryId: twin.id, to: "active", actor: "human", reason, now: state.ctx.now, runId: state.runId, statusReason: REMEMBER_STATUS_REASON });
+    if (ENFORCEMENT_RANK[wanted] > ENFORCEMENT_RANK[twin.enforcement]) state.repository.setEnforcement(twin.id, wanted, state.ctx.now);
+    state.remembered.push(twin.id);
+  }
+  return reinforceRow(state, normalized, state.repository.getById(twin.id) ?? twin);
 }
 
 function reinforceRow(state: RunState, normalized: NormalizedFact, target: MemoryRecord): FactStep {
@@ -655,6 +725,12 @@ function reinforceRow(state: RunState, normalized: NormalizedFact, target: Memor
     }
     const aliases = [...new Set([...target.aliases, ...normalized.fact.aliases])];
     if (aliases.length !== target.aliases.length) state.repository.setAliases(target.id, aliases, state.ctx.now);
+    // A′ ladder: a reinforce (or a create that collapsed into this row) from another session may raise an active
+    // advise pitfall to soft_deny; decided deterministically after recomputeDerived. Import bullets are not sessions.
+    if (!state.isImport) {
+      const escalation = escalateOnReinforce(state.db, { memoryId: target.id, sessionId: state.descriptor.session_id, runId: state.runId, config: state.ctx.config, now: state.ctx.now });
+      if (escalation.applied) state.escalated.push(target.id);
+    }
   } else {
     // Human rows: counters (recomputeDerived) and last_verified_at only; confidence / importance stay frozen.
     state.repository.setTtl(target.id, { ttlExpiresAt: target.ttlExpiresAt, revalidateAfter: target.revalidateAfter, lastVerifiedAt: closedAt, updatedAt: target.updatedAt });
@@ -759,9 +835,21 @@ function applyFact(state: RunState, fact: ValidatedFact): FactOutcome {
         const neighbour = findNeighbour(state.repository, normalized);
         if (neighbour !== null && !(neighbour.signatureKey.length === 0 && hasSignature)) twin = neighbour;
       }
-      const step = twin !== null ? reinforceRow(state, normalized, twin) : createRow(state, normalized, null);
+      const escalatedBefore = state.escalated.length;
+      const rememberedBefore = state.remembered.length;
+      const step =
+        twin !== null
+          ? isRememberCreate(state, normalized)
+            ? adoptRememberTwin(state, normalized, twin)
+            : reinforceRow(state, normalized, twin)
+          : createRow(state, normalized, null);
       if (step.kind === "skipped") return step.outcome;
       const outcome = outcomeFor(fact, step.kind, { memory_id: step.memory.id, detail: step.kind === "reinforced" && twin !== null ? `target=${twin.id}` : undefined }, normalized.relabels);
+      const addDetail = (extra: string): void => {
+        outcome.detail = outcome.detail === undefined ? extra : `${outcome.detail}; ${extra}`;
+      };
+      if (state.remembered.length > rememberedBefore) addDetail("remember:active");
+      if (state.escalated.length > escalatedBefore) addDetail("escalated=soft_deny");
       if (step.kind === "reinforced") {
         // Reinforcing a proposed replacement row supports its open supersede proposal (same claim, §7.5).
         const supported = supportReplacementProposals(state, normalized, step.memory);
@@ -799,7 +887,8 @@ function applyFact(state: RunState, fact: ValidatedFact): FactOutcome {
 }
 
 function countAutoActivationsSince(db: SqlJsDatabase, startIso: string): number {
-  const row = selectOne(db, "SELECT COUNT(*) AS n FROM memory_transitions WHERE actor = 'auto_rule' AND to_status = 'active' AND created_at >= ?", [startIso]);
+  // from_status <> to_status: an A′ escalation is recorded as active → active by auto_rule and is not an activation.
+  const row = selectOne(db, "SELECT COUNT(*) AS n FROM memory_transitions WHERE actor = 'auto_rule' AND to_status = 'active' AND from_status <> to_status AND created_at >= ?", [startIso]);
   return row === null ? 0 : Number(row.n ?? 0);
 }
 
@@ -928,7 +1017,7 @@ export function reconcileRun(db: SqlJsDatabase, input: ReconcileInput): Reconcil
   if (ctx.alreadyApplied(runId)) {
     const wrote = episode !== null && episode.status !== "extracted";
     if (wrote) episodes.markExtracted(descriptor.id, runId);
-    const report: ReconcileReport = { runId, status: "ok", outcomes: [], created: [], reinforced: [], activated: [], proposals: [], factsTotal: 0, factsAccepted: 0 };
+    const report: ReconcileReport = { runId, status: "ok", outcomes: [], created: [], reinforced: [], activated: [], proposals: [], escalated: [], remembered: [], factsTotal: 0, factsAccepted: 0 };
     return { id: runId, kind: "extract", noop: true, wrote, report };
   }
 
@@ -945,7 +1034,7 @@ export function reconcileRun(db: SqlJsDatabase, input: ReconcileInput): Reconcil
       outcomes: validated.outcomes,
       factsTotal: validated.outcomes.length,
     });
-    const report: ReconcileReport = { runId, status, outcomes: [...validated.outcomes], created: [], reinforced: [], activated: [], proposals: [], factsTotal: validated.outcomes.length, factsAccepted: 0 };
+    const report: ReconcileReport = { runId, status, outcomes: [...validated.outcomes], created: [], reinforced: [], activated: [], proposals: [], escalated: [], remembered: [], factsTotal: validated.outcomes.length, factsAccepted: 0 };
     return { ...failure.op, report };
   }
 
@@ -975,6 +1064,8 @@ export function reconcileRun(db: SqlJsDatabase, input: ReconcileInput): Reconcil
     reinforced: [],
     activated: [],
     proposalIds: [],
+    escalated: [],
+    remembered: [],
     activatedToday: countAutoActivationsSince(db, startOfUtcDay(ctx.now)),
     activatedThisRun: 0,
     isImport: descriptor.host === "import",
@@ -1028,6 +1119,19 @@ export function reconcileRun(db: SqlJsDatabase, input: ReconcileInput): Reconcil
 
   const summary = validated.output?.episode_summary ?? "";
   if (summary.length > 0) {
+    // A′ recall layer: the extractor's summary becomes the episode's recall text (replaces the worker's derived one)
+    // — only when the V12 content scanner clears it: this free LLM text is injected into OTHER sessions' model
+    // context at UserPromptSubmit, so an instruction-shaped or credential-bearing summary leaves the derived one in
+    // place. Normalized first (one line, control characters stripped) so what is scanned is what gets stored; import
+    // episodes are refused by the repository (their bullet is already the memory).
+    const recallText = normalizeRecallSummary(summary);
+    const scan = scanMemoryContent(recallText, "");
+    if (scan.safe) {
+      episodes.setSummary(descriptor.id, recallText, "extracted");
+    } else {
+      const blocked = scan.threats.filter((threat) => threat.severity === "block").map((threat) => threat.pattern);
+      ctx.logger?.warn(`episode ${descriptor.id}: episode_summary rejected by the content scanner (${blocked.join(", ")}); the derived summary stays`);
+    }
     const typeDistribution: Record<string, number> = {};
     for (const fact of validated.accepted) typeDistribution[fact.type] = (typeDistribution[fact.type] ?? 0) + 1;
     upsertSessionSummary(db, {
@@ -1049,6 +1153,8 @@ export function reconcileRun(db: SqlJsDatabase, input: ReconcileInput): Reconcil
     reinforced: [...new Set(state.reinforced)],
     activated: state.activated,
     proposals: [...new Set(state.proposalIds)],
+    escalated: [...new Set(state.escalated)],
+    remembered: [...new Set(state.remembered)],
     factsTotal,
     factsAccepted,
   };

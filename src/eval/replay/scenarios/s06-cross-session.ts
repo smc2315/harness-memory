@@ -2,9 +2,10 @@
  * s06 — (§13.2 (c), §13.1 s06) session A learns a bash-only pitfall whose signature names the manager that
  * failed (`npm test`); in session B it fires on the path-less `npm test`, `npm run test` and the PowerShell
  * `& npm.cmd test`, and NOT on `pnpm test` / `yarn test`: the fix the user asked for is never blocked
- * (verification round — a literal manager in a cmd pattern pins it). A seeded advise row written with the
- * family form `pm test` still fires on every manager, and `npm run build` is a signature_mismatch for both
- * (scope alone never rescues a signatured row).
+ * (verification round — a literal manager in a cmd pattern pins it). Since A′ the learned row is born at
+ * `advise`, so a fire is context (decision none) with a `fired` line — s11 covers the climb to soft_deny. A seeded
+ * advise row written with the family form `pm test` still fires on every manager, and `npm run build` is a
+ * signature_mismatch for both (scope alone never rescues a signatured row).
  */
 
 import { defineScenario } from "../scenario";
@@ -40,6 +41,7 @@ export const s06 = defineScenario({
     }
     const learned = await run.memory(id);
     run.equal("(c) the learned signature names the manager that failed", learned?.signatureKey, "bash|command|cmd|npm test");
+    run.equal("(A′) the learned row is active at advise after one session", [learned?.status, learned?.enforcement], ["active", "advise"]);
 
     await run.seed([
       autoRow({ id: FAMILY, summary: "Run the test suite from packages/api whichever package manager drives it.", signature: cmdSignature("pm test"), enforcement: "advise" }),
@@ -52,10 +54,13 @@ export const s06 = defineScenario({
       const pre = turn.calls.find((call) => call.event === "pre-tool");
       const expectedActivated = variant.learnedFires ? [FAMILY, id].sort() : [FAMILY];
       run.equal(
-        `(c) \`${variant.command}\` in session B → ${variant.learnedFires ? "deny by the learned pitfall (plus the family advise)" : "the family advise only; the learned npm pitfall stays quiet"}`,
+        `(c) \`${variant.command}\` in session B → ${variant.learnedFires ? "the learned pitfall fires as advise (context, decision none) beside the family advise" : "the family advise only; the learned npm pitfall stays quiet"}`,
         [pre?.result?.decision, sorted(pre?.result?.activated)],
-        [variant.learnedFires ? "deny" : "none", expectedActivated]
+        ["none", expectedActivated]
       );
+      if (variant.learnedFires) {
+        run.check(`(A′) \`${variant.command}\`: advise is delivered as additionalContext with no permission decision`, pre?.stdout?.hookSpecificOutput?.permissionDecision === undefined && (pre?.result?.additionalContext ?? "").includes("pnpm test"));
+      }
       if (!variant.learnedFires) {
         run.equal(`(c) \`${variant.command}\`: the learned pitfall is a signature_mismatch`, pre === undefined ? null : suppressionKindOf(pre, id), "signature_mismatch");
       }
@@ -74,7 +79,7 @@ export const s06 = defineScenario({
     const powershell = await run.turn("B", "s06-cross-session.jsonl", { turnKey: "p66" });
     run.checkTurn(powershell);
     const psPre = powershell.calls.find((call) => call.event === "pre-tool");
-    run.equal("PowerShell `& npm.cmd test` → deny (canonical npm test)", [psPre?.result?.decision, psPre?.result?.tool, sorted(psPre?.result?.activated)], ["deny", "bash", [FAMILY, id].sort()]);
+    run.equal("PowerShell `& npm.cmd test` → both advise rows fire (canonical npm test), decision none", [psPre?.result?.decision, psPre?.result?.tool, sorted(psPre?.result?.activated)], ["none", "bash", [FAMILY, id].sort()]);
 
     const after = await run.memory(id);
     run.equal("the learned row is still active auto after firing", [after?.status, after?.authority], ["active", "auto"]);

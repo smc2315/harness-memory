@@ -1,6 +1,6 @@
 /**
  * `hm eval:replay [--scenario s01,s03] [--fixtures <dir>] [--keep] [--verbose]` (spec §11, §13.1–13.2):
- * drives the twelve recorded scenarios through the real hook entry (`main()`) and the real worker with the
+ * drives the thirteen recorded scenarios through the real hook entry (`main()`) and the real worker with the
  * replay provider, each in its own temp project, and asserts (a)–(k) plus the read-path checks. Fixtures
  * live in `test/fixtures/replay` of the package checkout (not shipped in the npm tarball). Exit 1 when any
  * scenario or preflight contract fails.
@@ -18,7 +18,7 @@ import { flagBoolean, flagString, type OptionSpecs } from "../lib/args";
 import { EXIT_USAGE } from "../lib/store";
 
 export const evalReplayOptions: OptionSpecs = {
-  scenario: { type: "string", description: "Comma-separated scenario ids or id prefixes to run (default: all twelve)", placeholder: "<ids>" },
+  scenario: { type: "string", description: "Comma-separated scenario ids or id prefixes to run (default: all thirteen)", placeholder: "<ids>" },
   fixtures: { type: "string", description: "Directory holding the replay fixtures (default: <package>/test/fixtures/replay)", placeholder: "<dir>" },
   keep: { type: "boolean", description: "Keep each scenario's temp project and print its path" },
   verbose: { type: "boolean", description: "Print every check, not only failures" },

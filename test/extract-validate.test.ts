@@ -328,6 +328,35 @@ describe("validator table (§5.6)", () => {
     expect(reinforce.accepted).toHaveLength(1);
   });
 
+  test("V3 for remember turns: a create that cites an explicit remember request may be a repository-wide policy without a signature; the same fact in an ordinary turn is scope_mismatch", () => {
+    const rememberLines: LedgerLine[] = [
+      promptLine("From now on in this repo, any new feature needs its own vitest file before the PR goes up. Remember this.", { seq: 4001, turn_key: "p40", remember: 1 }),
+      toolOkLine("cat package.json", { seq: 4002, turn_key: "p40", scope_refs: ["package.json"], program_token: "cat" }),
+    ];
+    const globalPolicy = fact({
+      type: "policy",
+      summary: "Add a vitest file for each new feature before opening a pull request.",
+      details: "Every feature lands with its own test file.",
+      scope_glob: "**/*",
+      trigger_signature: null,
+      lifecycle_triggers: ["before_model"],
+      evidence_refs: ["e4001"],
+      knowledge_kind: "decision",
+      aliases: ["tests", "테스트"],
+    });
+    const remembered = run([globalPolicy], descriptorFor(rememberLines), seqMapOf(rememberLines));
+    expect(remembered.accepted).toHaveLength(1);
+    expect(remembered.accepted[0]?.normalizedScope).toBe("**/*");
+    // Without the remember request the rule is the agent's own generalisation and V3 holds.
+    const plainLines: LedgerLine[] = [
+      promptLine("Can you add a vitest file for the new feature?", { seq: 4101, turn_key: "p41" }),
+      toolOkLine("cat package.json", { seq: 4102, turn_key: "p41", scope_refs: ["package.json"], program_token: "cat" }),
+    ];
+    const plain = run([{ ...globalPolicy, evidence_refs: ["e4101"] }], descriptorFor(plainLines), seqMapOf(plainLines));
+    expect(plain.accepted).toHaveLength(0);
+    expect(plain.outcomes[0]).toMatchObject({ outcome: "rejected", rejection: "scope_mismatch" });
+  });
+
   test("V11: unhooked signature tools and signature-less before_tool on other types move to before_model", () => {
     const readLines: LedgerLine[] = [...scopedLines, toolOkLine("README.md", { seq: 2007, turn_key: "p2", tool: "read", shell_dialect: null, scope_refs: ["README.md"] })];
     const readDescriptor = descriptorFor(readLines);

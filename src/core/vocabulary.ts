@@ -265,5 +265,7 @@ export const STATUS_REASONS = [
   "import",
   "import_sync",
   "revalidate_expired",
+  /** Active from birth because the user asked to remember it (A′ remember-as-human; src/promotion/remember.ts). */
+  "remember",
 ] as const;
 export type StatusReason = (typeof STATUS_REASONS)[number];

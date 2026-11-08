@@ -7,19 +7,24 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import MiniSearch from "minisearch";
+import MiniSearch, { type AsPlainObject } from "minisearch";
 import type { Database as SqlJsDatabase } from "sql.js";
 
 import { LEXICAL_TOKENIZER_ID, lexicalOptionsFor, type LexicalSnapshotDocument } from "../src/activation/lexical-snapshot";
-import { DEFAULT_CONFIG } from "../src/core/config";
-import { resolvePaths, stateDirectories, type HarnessPaths } from "../src/core/paths";
-import type { ActiveSnapshot, LexicalSnapshot } from "../src/core/snapshot-types";
+import { recallIndexOptions, type RecallDocument } from "../src/activation/recall";
+import { DEFAULT_CONFIG, mergeConfig } from "../src/core/config";
+import { resolvePaths, sessionKey, stateDirectories, type HarnessPaths } from "../src/core/paths";
+import type { ActiveSnapshot, LexicalSnapshot, RecallSnapshot } from "../src/core/snapshot-types";
+import { EpisodeRepository } from "../src/db/repositories/episodes";
 import { ProposalRepository } from "../src/db/repositories/proposals";
-import { buildSnapshot, buildSnapshotData, decodeDenseSnapshot, encodeDenseSnapshot, sourceFileOf, toSnapshotMemory } from "../src/db/snapshot";
+import { buildSnapshot, buildSnapshotData, decodeDenseSnapshot, encodeDenseSnapshot, sourceFileOf, toRecallEpisode, toSnapshotMemory } from "../src/db/snapshot";
 import { MemoryRepository } from "../src/memory/repository";
 import { derivePolicyRules } from "../src/policy/derive";
 import { createTestDb } from "./helpers/create-test-db";
-import { T0, autoMemory, humanMemory } from "./helpers/memory-fixtures";
+import { T0, autoMemory, humanMemory, insertEpisode, isoPlus } from "./helpers/memory-fixtures";
+
+/** Recall ships dark (`DEFAULT_CONFIG.recall.enabled = false`); the builds that must write `recall.v1.json` switch it on. */
+const RECALL_ON = mergeConfig(DEFAULT_CONFIG, { recall: { enabled: true } });
 
 let db: SqlJsDatabase;
 let memories: MemoryRepository;
@@ -95,19 +100,23 @@ describe("buildSnapshot", () => {
     writeFileSync(join(paths.queueDir, "b.json"), "{}");
     writeFileSync(paths.reindexRequested, "");
 
-    const result = buildSnapshot(db, paths, { now: T0, config: DEFAULT_CONFIG, generation: 7, pid: 4242 });
+    const result = buildSnapshot(db, paths, { now: T0, config: RECALL_ON, generation: 7, pid: 4242 });
 
     expect(existsSync(paths.snapshotActive)).toBe(true);
     expect(existsSync(paths.snapshotLexical)).toBe(true);
     expect(existsSync(paths.snapshotDense)).toBe(true);
+    expect(existsSync(paths.snapshotRecall)).toBe(true);
     expect(existsSync(paths.reindexRequested)).toBe(false);
     expect(existsSync(`${paths.snapshotActive}.tmp-4242`)).toBe(false);
+    expect(existsSync(`${paths.snapshotRecall}.tmp-4242`)).toBe(false);
+    expect(result.files.recall).toBe(paths.snapshotRecall);
+    expect(result.bytes.recall).toBeGreaterThan(0);
 
     const active = JSON.parse(readFileSync(paths.snapshotActive, "utf8")) as ActiveSnapshot;
     expect(active.schema).toBe("active.v1");
     expect(active.built_at).toBe(T0);
     expect(active.db_generation).toBe(7);
-    expect(active.user_version).toBe(21);
+    expect(active.user_version).toBe(22);
     expect(active.last_dream_at).toBeNull();
     expect(active.last_probe).toBeNull();
     expect(typeof active.source.mtime_ms).toBe("number");
@@ -127,7 +136,7 @@ describe("buildSnapshot", () => {
     expect(Object.keys(pitfall).sort()).toEqual(
       [
         "id", "type", "summary", "details", "scope_glob", "scope_regex", "activation_class", "lifecycle_triggers", "relevant_tools", "signature",
-        "authority", "enforcement", "status", "knowledge_kind", "policy_subtype", "confidence", "importance", "evidence_score", "evidence_count",
+        "authority", "enforcement", "status", "status_reason", "knowledge_kind", "policy_subtype", "confidence", "importance", "evidence_score", "evidence_count",
         "validation_count", "fire_count", "override_count", "ttl_expires_at", "source_file", "aliases", "contested", "import_unconfirmed",
         "failure_classes", "created_at", "updated_at", "last_verified_at",
       ].sort()
@@ -160,6 +169,81 @@ describe("buildSnapshot", () => {
     expect(dense.header).toMatchObject({ schema: "dense.v1", db_generation: 7, model: DEFAULT_CONFIG.embeddings.model, dims: 4, dtype: "float32", ids: [rows.pitfall.id] });
     expect(Array.from(dense.matrix).map((value) => Number(value.toFixed(3)))).toEqual([0.1, 0.2, 0.3, 0.4]);
     expect(result.bytes.active).toBeGreaterThan(1000);
+
+    // No episode carries a summary yet: the recall file exists with the documented envelope, an empty index and no episodes.
+    const recall = JSON.parse(readFileSync(paths.snapshotRecall, "utf8")) as RecallSnapshot;
+    expect(recall).toEqual({ schema: "recall.v1", built_at: T0, db_generation: 7, tokenizer: LEXICAL_TOKENIZER_ID, index: expect.any(Object), episodes: [] });
+    expect(MiniSearch.loadJS(recall.index as AsPlainObject, recallIndexOptions()).documentCount).toBe(0);
+  });
+
+  test("recall.v1.json lists the newest keep_episodes summarized episodes with the documented shape", () => {
+    const episodes = new EpisodeRepository(db);
+    insertEpisode(db, { id: "ep-old", session_id: "s-old", closed_at: isoPlus(T0, { days: -3 }), tools: ["bash", "bash", "edit"], scope_refs: ["a.ts", "b.ts", "c.ts", "d.ts", "e.ts", "f.ts", "a.ts"] }, T0);
+    insertEpisode(db, { id: "ep-mid", session_id: "s-mid", closed_at: isoPlus(T0, { days: -2 }), failure_signatures: [
+      { sig: "bash|exit_1|pm test", class: "exit_1", tool: "bash", scope_ref: null, program_token: "pm test", failed_seq: 2, resolved_seq: 4 },
+      { sig: "bash|enoent|git", class: "enoent", tool: "bash", scope_ref: null, program_token: "git", failed_seq: 6, resolved_seq: null },
+      { sig: "bash|exit_1|pm build", class: "exit_1", tool: "bash", scope_ref: null, program_token: "pm build", failed_seq: 8, resolved_seq: null },
+    ] }, T0);
+    insertEpisode(db, { id: "ep-new", session_id: "s-new", closed_at: isoPlus(T0, { days: -1 }), scope_refs: ["scripts/seed-data.ts"] }, T0);
+    insertEpisode(db, { id: "ep-none", session_id: "s-none", closed_at: T0 }, T0);
+    episodes.setSummary("ep-old", '"old turn" | tools bash×2 edit×1', "derived");
+    episodes.setSummary("ep-mid", '"mid turn" | failed exit_1 pm test → resolved', "extracted");
+    episodes.setSummary("ep-new", '"new turn"', "derived");
+    // An import episode never enters recall, even when another build wrote it a summary (the newest row here).
+    insertEpisode(db, { id: "ep-import", host: "import", session_id: "import:CLAUDE.md", close_reason: "import", ledger_ref: "import:CLAUDE.md#L3", closed_at: T0 }, T0);
+    db.run(`UPDATE episodes SET summary = 'import: "Use pnpm test"', summary_kind = 'derived' WHERE id = 'ep-import'`);
+    expect(toRecallEpisode(episodes.getById("ep-import")!)).toBeNull();
+
+    const full = buildSnapshot(db, paths, { now: T0, config: RECALL_ON, generation: 3 });
+    expect(full.recallEpisodes.map((episode) => episode.id)).toEqual(["ep-new", "ep-mid", "ep-old"]);
+    const onDisk = JSON.parse(readFileSync(paths.snapshotRecall, "utf8")) as RecallSnapshot;
+    expect(onDisk.schema).toBe("recall.v1");
+    expect(onDisk.db_generation).toBe(3);
+    expect(onDisk.tokenizer).toBe(LEXICAL_TOKENIZER_ID);
+    expect(onDisk.episodes.map((episode) => episode.id)).toEqual(["ep-new", "ep-mid", "ep-old"]);
+    const mid = onDisk.episodes[1]!;
+    expect(Object.keys(mid).sort()).toEqual(["id", "session_key", "host", "closed_at", "summary", "summary_kind", "tools", "scope_refs", "failure_classes"].sort());
+    expect(mid).toEqual({
+      id: "ep-mid",
+      session_key: sessionKey("claude-code", "s-mid"),
+      host: "claude-code",
+      closed_at: isoPlus(T0, { days: -2 }),
+      summary: '"mid turn" | failed exit_1 pm test → resolved',
+      summary_kind: "extracted",
+      tools: ["bash"],
+      scope_refs: ["src/a.ts"],
+      failure_classes: ["enoent", "exit_1"],
+    });
+    const old = onDisk.episodes[2]!;
+    expect(old.tools).toEqual(["bash", "edit"]);
+    expect(old.scope_refs).toEqual(["a.ts", "b.ts", "c.ts", "d.ts", "e.ts"]);
+    expect(toRecallEpisode(episodes.getById("ep-none")!)).toBeNull();
+    // The serialized index loads with the reader's options and answers over summary and scope refs.
+    const index = MiniSearch.loadJS<RecallDocument>(onDisk.index as AsPlainObject, recallIndexOptions());
+    expect(index.documentCount).toBe(3);
+    expect(index.search("mid").map((hit) => String(hit.id))).toEqual(["ep-mid"]);
+    expect(index.search("turn").map((hit) => String(hit.id)).sort()).toEqual(["ep-mid", "ep-new", "ep-old"]);
+    // Scope refs are indexed too (`seed-data` splits into `seed`, `data`; the shared `ts` extension alone ranks nothing above the rest).
+    expect(index.search("seed-data").map((hit) => String(hit.id))).toEqual(["ep-new"]);
+    expect(JSON.stringify(onDisk).length).toBeLessThan(3 * 600 + 4_000);
+
+    // keep_episodes counts session episodes only: the import row above does not take one of the two slots.
+    const kept = buildSnapshot(db, paths, { now: T0, config: mergeConfig(RECALL_ON, { recall: { keep_episodes: 2 } }), generation: 4 });
+    expect(kept.recallEpisodes.map((episode) => episode.id)).toEqual(["ep-new", "ep-mid"]);
+    expect((JSON.parse(readFileSync(paths.snapshotRecall, "utf8")) as RecallSnapshot).episodes).toHaveLength(2);
+    expect(buildSnapshotData(db, paths, { now: T0 }).recallEpisodes).toHaveLength(3);
+    expect(JSON.stringify(buildSnapshotData(db, paths, { now: T0 }).recallEpisodes)).not.toContain("ep-import");
+  });
+
+  test("recall.enabled = false writes no recall file and removes a stale one", () => {
+    insertEpisode(db, { id: "ep-x" }, T0);
+    new EpisodeRepository(db).setSummary("ep-x", "x", "derived");
+    writeFileSync(paths.snapshotRecall, "stale", "utf8");
+    const result = buildSnapshot(db, paths, { now: T0, config: mergeConfig(DEFAULT_CONFIG, { recall: { enabled: false } }) });
+    expect(existsSync(paths.snapshotRecall)).toBe(false);
+    expect(result.files.recall).toBeNull();
+    expect(result.bytes.recall).toBe(0);
+    expect(result.recallEpisodes).toHaveLength(1);
   });
 
   test("a stale dense file is removed when no row has an embedding; recent summaries are listed", () => {

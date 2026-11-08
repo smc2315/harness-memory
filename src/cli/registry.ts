@@ -36,6 +36,7 @@ import {
 import { memoryWhyOptions, runMemoryWhy } from "./commands/memory-why";
 import { proposalsAcceptOptions, proposalsListOptions, proposalsRejectOptions, runProposalsAccept, runProposalsList, runProposalsReject } from "./commands/proposals";
 import { queueOptions, runQueue } from "./commands/queue";
+import { recallOptions, runRecall } from "./commands/recall";
 import { reviewOptions, runReview } from "./commands/review";
 import { runSnapshotRebuild, snapshotRebuildOptions } from "./commands/snapshot-rebuild";
 import { runStatus, statusOptions } from "./commands/status";
@@ -128,8 +129,16 @@ export const COMMANDS: readonly CommandDefinition[] = [
   { name: "extract", group: "pipeline", summary: "Run the extraction worker now", usage: "[--now] [--provider <name>] [--dry-run]", options: extractOptions, run: runExtract },
   { name: "dream", group: "pipeline", summary: "Run consolidation now", usage: "[--provider <name>]", options: dreamOptions, run: runDream },
   { name: "trace", group: "pipeline", summary: "Ledger timeline of a session", usage: "<session_key> [--limit <n>] [--host <h>]", options: traceOptions, run: runTrace },
+  { name: "recall", group: "pipeline", summary: "Search past episodes by their summaries (what before_model recalls)", usage: "<query> [--limit <n>] [--since <iso>]", options: recallOptions, run: runRecall },
   // import
-  { name: "import", group: "import", summary: "Import bullets from a file as human memories", usage: "[--from <file>] [--yes] [--sync] [--provider <name>] [--dry-run]", options: importOptions, run: runImport },
+  {
+    name: "import",
+    group: "import",
+    summary: "Import bullets from a file, or Claude Code's auto-memory notes, as human memories",
+    usage: "[--from <file>|auto-memory] [--auto-memory] [--include-project] [--memory-dir <dir>] [--yes] [--sync] [--provider <name>] [--dry-run]",
+    options: importOptions,
+    run: runImport,
+  },
   // eval
   {
     name: "eval:latency",

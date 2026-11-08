@@ -38,8 +38,15 @@ export function clip(text: string | null | undefined, max: number): string {
 
 export const MEMORY_TABLE_HEADER: readonly string[] = ["ID", "STATUS", "AUTH", "TYPE", "ENF", "SCOPE", "SUMMARY"];
 
+/** `episode:<id>` → `<id>` for a row born from an episode (remember rows, extraction rows), else null. */
+export function sourceEpisodeOf(memory: Pick<MemoryRecord, "sourceRef">): string | null {
+  return memory.sourceRef !== null && memory.sourceRef.startsWith("episode:") ? memory.sourceRef.slice("episode:".length) : null;
+}
+
 export function memoryTableRow(memory: MemoryRecord, summaryChars = 64): string[] {
   const flags: string[] = [];
+  // A′ remember-as-human: active from the user's own request (undo: hm memory:demote <id>).
+  if (memory.statusReason === "remember") flags.push("remember");
   if (memory.importUnconfirmed === 1) flags.push("unconfirmed");
   if (memory.contested === 1) flags.push("contested");
   else if (memory.openProposalId !== null) flags.push("proposal");
@@ -74,11 +81,22 @@ function field(label: string, value: string | number | null | undefined): string
   return `  ${label.padEnd(18)} ${text}`;
 }
 
-export function renderMemoryDetail(memory: MemoryRecord, extras: { proposals?: readonly ProposalRecord[] } = {}): string[] {
+export interface MemoryDetailExtras {
+  proposals?: readonly ProposalRecord[];
+  /** A′: the remember turn that adopted this row (memory-show reads it from the transitions); null/undefined → the row's source episode. */
+  rememberEpisodeId?: string | null;
+}
+
+export function renderMemoryDetail(memory: MemoryRecord, extras: MemoryDetailExtras = {}): string[] {
   const lines: string[] = [
     `memory ${memory.id}`,
     field("status", `${memory.status}${memory.statusReason === null ? "" : ` (${memory.statusReason})`}`),
-    field("authority", `${memory.authority} / ${memory.sourceKind}${memory.sourceRef === null ? "" : ` (${memory.sourceRef})`}`),
+    field(
+      "authority",
+      memory.statusReason === "remember"
+        ? `${memory.authority} (remember, episode ${shortId(extras.rememberEpisodeId ?? sourceEpisodeOf(memory))}) / ${memory.sourceKind}`
+        : `${memory.authority} / ${memory.sourceKind}${memory.sourceRef === null ? "" : ` (${memory.sourceRef})`}`
+    ),
     field("type", `${memory.type}${memory.knowledgeKind === null ? "" : ` / ${memory.knowledgeKind}`}${memory.policySubtype === null ? "" : ` / ${memory.policySubtype}`}`),
     field("enforcement", memory.enforcement),
     field("scope", `${memory.scopeGlob} (${memory.activationClass})`),

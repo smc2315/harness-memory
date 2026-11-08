@@ -1,7 +1,8 @@
 /**
  * s01 — a correction-only turn (§13.2 (a), (j), (k) activation; (d) worker-level idempotency).
  * Hooks: SessionStart → UserPromptSubmit (Korean + English correction) → Stop. Worker: the recorded
- * pitfall activates as auto / soft_deny without any AuthorityViolationError.
+ * pitfall activates as auto / advise (A′: auto rules are born at `before_tool.auto_enforcement` = advise and
+ * climb to soft_deny only on a second session's reinforce, see s11) without any AuthorityViolationError.
  */
 
 import { EpisodeRepository } from "../../../db/repositories/episodes";
@@ -13,7 +14,7 @@ import { isoPlus } from "./util";
 
 export const s01 = defineScenario({
   id: "s01",
-  title: "correction-only turn → active auto soft_deny pitfall",
+  title: "correction-only turn → active auto advise pitfall (the ladder starts at advise)",
   asserts: ["a", "j", "k", "d"],
   async run(run) {
     const turn = await run.turn("A", "s01-correction-only.jsonl");
@@ -39,7 +40,7 @@ export const s01 = defineScenario({
     if (memory === null) return;
     run.equal("(a) status active", memory.status, "active");
     run.equal("(a) authority auto", memory.authority, "auto");
-    run.equal("(a) enforcement soft_deny", memory.enforcement, "soft_deny");
+    run.equal("(a) enforcement advise (A′: born at before_tool.auto_enforcement, not soft_deny)", memory.enforcement, "advise");
     run.equal("(a) type pitfall with the canonical cmd key", [memory.type, memory.signatureKey], ["pitfall", "bash|command|cmd|npm test"]);
     run.equal("(a) evidence_score 2 / evidence_count 1 / validation_count 0", [memory.evidenceScore, memory.evidenceCount, memory.validationCount], [2, 1, 0]);
     run.equal("(a) TTL 30 d for a correction row", memory.ttlExpiresAt, isoPlus(extractAt, { days: 30 }));

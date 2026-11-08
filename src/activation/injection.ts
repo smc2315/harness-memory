@@ -163,6 +163,8 @@ export function renderSystemMessage(item: Pick<InjectedItem, "id" | "type">, enf
 
 const CLAUDE_FILES = /^(claude(\.local)?\.md)$/i;
 const AGENTS_FILES = /^agents(\.local)?\.md$/i;
+/** Claude Code loads `<config>/projects/<slug>/memory/MEMORY.md` (its auto-memory index) every session; the topic files beside it are not loaded by default. */
+const AUTO_MEMORY_INDEX = /(^|\/)memory\/memory\.md$/i;
 
 /**
  * Native de-duplication (§6.1): rows imported from a file the host loads by itself are not injected on
@@ -170,10 +172,11 @@ const AGENTS_FILES = /^agents(\.local)?\.md$/i;
  */
 export function isHostLoadedFile(host: Host, sourceFile: string | null): boolean {
   if (sourceFile === null || sourceFile.length === 0) return false;
-  const base = sourceFile.replace(/\\/g, "/").split("/").pop() ?? sourceFile;
+  const normalized = sourceFile.replace(/\\/g, "/");
+  const base = normalized.split("/").pop() ?? sourceFile;
   switch (host) {
     case "claude-code":
-      return CLAUDE_FILES.test(base);
+      return CLAUDE_FILES.test(base) || AUTO_MEMORY_INDEX.test(normalized);
     case "codex":
     case "opencode":
       return AGENTS_FILES.test(base);

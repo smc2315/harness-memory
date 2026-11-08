@@ -10,6 +10,7 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import { selectAfterToolHints } from "../src/activation/after-tool";
 import { activateBeforeModel } from "../src/activation/before-model";
+import { buildRecallIndex } from "../src/activation/recall";
 import { decideBeforeTool, type BeforeToolInput } from "../src/activation/before-tool";
 import { applyBudget, isHostLoadedFile, itemFromSnapshotMemory, renderItemText, renderReason, stripControlCharacters } from "../src/activation/injection";
 import { LEXICAL_TOKENIZER_ID, normalizeLexicalScore, snapshotTokenize, stripHangulParticles } from "../src/activation/lexical-snapshot";
@@ -268,6 +269,58 @@ describe("activateBeforeModel", () => {
     expect(result.items).toHaveLength(3);
     expect(result.items.map((item) => item.id)).toEqual(["b-7", "b-6", "b-5"]);
     expect(result.suppressed.filter((entry) => entry.kind === "budget_limit")).toHaveLength(5);
+    expect(result.recall).toEqual([]);
+  });
+
+  test("recall: at most two past-episode summaries after the memory items, within budget, never from the current session", async () => {
+    const episodeOf = (id: string, session_key: string, closed_at: string, summary: string) => ({ id, session_key, host: "claude-code", closed_at, summary, summary_kind: "derived" as const, tools: ["bash"], scope_refs: [], failure_classes: [] });
+    const index = await buildRecallIndex(
+      [
+        episodeOf("ep-a", "key-a", "2026-11-05T10:00:00.000Z", '"should we use pnpm or npm for the scripts" | tools bash×2'),
+        episodeOf("ep-b", "key-b", "2026-11-04T10:00:00.000Z", '"pnpm scripts failed with npm" | failed exit_1 pm test → resolved | tools bash×3'),
+        episodeOf("ep-c", "key-c", "2026-11-03T10:00:00.000Z", '"npm scripts, pnpm or yarn?" | tools bash×1'),
+        episodeOf("ep-me", "key-me", "2026-11-06T10:00:00.000Z", '"use pnpm for the scripts" | tools bash×1'),
+        episodeOf("ep-x", "key-x", "2026-11-02T10:00:00.000Z", '"draw the architecture diagram" | tools edit×3'),
+      ],
+      { dbGeneration: 7, builtAt: FIXTURE_NOW }
+    );
+    fixture = createHarnessFixture({ memories: [baseline, globalRow] });
+    const loaded = readActiveSnapshot(fixture.paths, { spawnWorker: null })!;
+    const lexical = await readLexicalSnapshot(fixture.paths);
+    const prompt = "should I use pnpm or npm for scripts?";
+
+    const result = await activateBeforeModel({ loaded, lexical, prompt, lastScopeRef: null, host: "claude-code", config: DEFAULT_CONFIG, now: FIXTURE_NOW, recall: index, sessionKey: "key-me" });
+    expect(result.items.map((item) => item.id)).toEqual(["baseline", "global"]);
+    expect(result.recall).toHaveLength(2);
+    expect(result.recall.map((item) => item.id)).not.toContain("ep-me");
+    expect(result.recall.map((item) => item.id)).not.toContain("ep-x");
+    for (const item of result.recall) expect(item.score).toBeGreaterThanOrEqual(DEFAULT_CONFIG.before_model.recall.min_score);
+    const lines = result.text!.split("\n");
+    expect(lines).toHaveLength(4);
+    expect(lines[0]).toContain("[harness-memory] POLICY (human)");
+    expect(lines[1]).toContain("[harness-memory] WORKFLOW");
+    expect(lines[2]).toMatch(/^\[harness-memory\] RECALL 2026-11-0[345]: /);
+    expect(lines[3]).toMatch(/^\[harness-memory\] RECALL 2026-11-0[345]: /);
+    expect(Buffer.byteLength(lines.slice(2).join("\n"), "utf8")).toBeLessThanOrEqual(DEFAULT_CONFIG.before_model.recall.max_bytes);
+    expect(Buffer.byteLength(result.text!, "utf8")).toBeLessThanOrEqual(DEFAULT_CONFIG.before_model.max_bytes);
+    // Recall adds no enforced item: the memory list and suppression reasons are untouched.
+    expect(result.suppressed.find((entry) => entry.id.startsWith("ep-"))).toBeUndefined();
+
+    // Only what the memory items leave of the before_model byte budget is available to recall.
+    const memoryBytes = Buffer.byteLength(lines.slice(0, 2).join("\n"), "utf8");
+    const tight = await activateBeforeModel({ loaded, lexical, prompt, lastScopeRef: null, host: "claude-code", config: { before_model: { ...DEFAULT_CONFIG.before_model, max_bytes: memoryBytes + 20 } }, now: FIXTURE_NOW, recall: index, sessionKey: "key-me" });
+    expect(tight.items.map((item) => item.id)).toEqual(["baseline", "global"]);
+    expect(tight.recall).toEqual([]);
+    expect(tight.text!.split("\n")).toHaveLength(2);
+
+    // recall.max_items 1 / a null index / an empty prompt.
+    const one = await activateBeforeModel({ loaded, lexical, prompt, lastScopeRef: null, host: "claude-code", config: { before_model: { ...DEFAULT_CONFIG.before_model, recall: { ...DEFAULT_CONFIG.before_model.recall, max_items: 1 } } }, now: FIXTURE_NOW, recall: index, sessionKey: "key-me" });
+    expect(one.recall).toHaveLength(1);
+    const none = await activateBeforeModel({ loaded, lexical, prompt, lastScopeRef: null, host: "claude-code", config: DEFAULT_CONFIG, now: FIXTURE_NOW, recall: null, sessionKey: "key-me" });
+    expect(none.recall).toEqual([]);
+    expect(none.text!.split("\n")).toHaveLength(2);
+    const empty = await activateBeforeModel({ loaded, lexical, prompt: "", lastScopeRef: null, host: "claude-code", config: DEFAULT_CONFIG, now: FIXTURE_NOW, recall: index, sessionKey: "key-me" });
+    expect(empty.recall).toEqual([]);
   });
 });
 

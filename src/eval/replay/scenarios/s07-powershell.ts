@@ -27,14 +27,14 @@ export const s07 = defineScenario({
       return;
     }
     const memory = await run.memory(id);
-    run.equal("(i) the learned row is an active soft_deny pitfall", [memory?.type, memory?.status, memory?.enforcement], ["pitfall", "active", "soft_deny"]);
+    run.equal("(i) the learned row is an active pitfall born at advise (A′ ladder)", [memory?.type, memory?.status, memory?.enforcement], ["pitfall", "active", "advise"]);
     run.equal("the signature key names the manager that failed (npm build)", memory?.signatureKey, "bash|command|cmd|npm build");
     run.equal("failure classes recorded for after_tool hints", memory?.failureClasses, ["exit_1"]);
 
     run.advance({ minutes: 10 });
     await run.prompt("B", "build again", { promptId: "p7b" });
     const ps = await run.preTool("B", { tool: "PowerShell", command: "npm run build" });
-    run.equal("PowerShell `npm run build` → deny", [ps.result?.decision, ps.result?.activated], ["deny", [id]]);
+    run.equal("PowerShell `npm run build` → the learned pitfall fires as advise (context, decision none)", [ps.result?.decision, ps.result?.enforcement, ps.result?.activated], ["none", "advise", [id]]);
     const bash = await run.preTool("B", { tool: "Bash", command: "pnpm build" });
     run.equal("`pnpm build` (the fix) does not fire", [bash.result?.decision, bash.result?.activated], ["none", []]);
   },

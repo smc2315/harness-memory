@@ -1,6 +1,8 @@
 /**
  * TransitionRepository — `memory_transitions` (migration 019). Every status change of a memory leaves
- * one row; the only writer is `transitionMemory` (src/promotion/transitions.ts) plus post-migrate.
+ * one row; writers are `transitionMemory` (src/promotion/transitions.ts), post-migrate, and — with from_status =
+ * to_status — the enforcement escalations of src/promotion/escalation.ts and the remember adoptions of
+ * src/promotion/transitions.ts adoptActiveMemory (Phase F).
  */
 
 import { randomUUID } from "node:crypto";

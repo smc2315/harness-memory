@@ -23,6 +23,7 @@ import {
   FIXTURE_SESSION_ID,
   fixtureMemory,
   fixtureRule,
+  isoBefore,
   recordingRuntime,
   writeStdin,
   type HarnessFixture,
@@ -424,6 +425,89 @@ describe("hook core (in-process, synthetic Claude Code stdin)", () => {
     const second = await run(claudeStdin(fixture, "SessionStart", { source: "resume" }));
     expect(second.systemMessage).toBeNull();
     expect(fixture.readState()?.last_digest_date).toBe(FIXTURE_NOW.slice(0, 10));
+  });
+
+  test("session-start names rules born from a remember turn in the last 24 h with the one-command undo (A′), under the daily throttle", async () => {
+    const rememberRule = fixtureMemory({
+      id: "33333333-remember-rule",
+      type: "policy",
+      authority: "human",
+      enforcement: "confirm",
+      policy_subtype: "hard",
+      knowledge_kind: "convention",
+      status_reason: "remember",
+      summary: "Run pnpm lint before every git commit in this repository.",
+      details: "Lint must pass before a commit is made.",
+      signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "git commit" },
+      lifecycle_triggers: ["before_tool"],
+      created_at: isoBefore(FIXTURE_NOW, 0.5),
+      updated_at: isoBefore(FIXTURE_NOW, 0.5),
+    });
+    const oldRememberRule = fixtureMemory({
+      id: "44444444-old-remember",
+      type: "pitfall",
+      authority: "human",
+      enforcement: "soft_deny",
+      status_reason: "remember",
+      summary: "Never run npm run lint here; the lint script exists for pnpm only.",
+      signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "npm run lint" },
+      created_at: isoBefore(FIXTURE_NOW, 3),
+      updated_at: isoBefore(FIXTURE_NOW, 3),
+      last_verified_at: isoBefore(FIXTURE_NOW, 3),
+    });
+    // An auto row the user's request ADOPTED an hour ago: created days earlier, but the adoption's reinforce set
+    // last_verified_at to that episode's close — the notice keys on the later of the two and names it first.
+    const adoptedTwin = fixtureMemory({
+      id: "55555555-adopted-twin",
+      type: "pitfall",
+      authority: "human",
+      enforcement: "soft_deny",
+      status_reason: "remember",
+      summary: "Run pnpm test instead of npm test in this repository.",
+      signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "npm test" },
+      created_at: isoBefore(FIXTURE_NOW, 3),
+      updated_at: isoBefore(FIXTURE_NOW, 1 / 24),
+      last_verified_at: isoBefore(FIXTURE_NOW, 1 / 24),
+    });
+    const own = createHarnessFixture({ memories: [...ALL_MEMORIES, rememberRule, oldRememberRule, adoptedTwin], counts: { open_proposals: 0, expiring_7d: 0 } });
+    const ownRecording = recordingRuntime(own);
+    try {
+      const input = normalize(claudeStdin(own, "SessionStart", { source: "startup" }));
+      const first = await runHook(input.event, input, ownRecording.runtime);
+      expect(first.status).toBe("ok");
+      expect(first.systemMessage).toBe(
+        "harness-memory: 2 rules from your request are active — Run pnpm test instead of npm test in this repository. (undo: hm memory:demote 55555555); Run pnpm lint before every git commit in this repository. (undo: hm memory:demote 33333333)"
+      );
+      expect(first.systemMessage).not.toContain("44444444");
+      expect(first.detail.remember_notice).toBe(true);
+      // The remembered policy is a before_tool row: never injected at session start, but it asks before the commit.
+      expect(first.activated).toEqual([startupDecision.id]);
+      expect(own.readState()?.last_digest_date).toBe(FIXTURE_NOW.slice(0, 10));
+      const commitInput = normalize(bashStdin(own, 'git commit -m "lint first"'));
+      const commit = await runHook(commitInput.event, commitInput, ownRecording.runtime);
+      expect([commit.decision, commit.enforcement, commit.activated]).toEqual(["ask", "confirm", [rememberRule.id]]);
+      // Same session, same day: the notice is throttled like the digest.
+      const resume = normalize(claudeStdin(own, "SessionStart", { source: "resume" }));
+      const second = await runHook(resume.event, resume, ownRecording.runtime);
+      expect(second.systemMessage).toBeNull();
+    } finally {
+      own.cleanup();
+    }
+
+    // With proposals open the digest and the notice share one systemMessage, digest first.
+    const both = createHarnessFixture({ memories: [rememberRule], counts: { open_proposals: 2, expiring_7d: 0 } });
+    const bothRecording = recordingRuntime(both);
+    try {
+      const input = normalize(claudeStdin(both, "SessionStart", { source: "startup" }));
+      const result = await runHook(input.event, input, bothRecording.runtime);
+      expect(result.systemMessage?.split("\n")).toEqual([
+        "harness-memory: 2 proposals open — run `hm review`",
+        "harness-memory: 1 rule from your request is active — Run pnpm lint before every git commit in this repository. (undo: hm memory:demote 33333333)",
+      ]);
+      expect(renderClaudeCode(result)?.systemMessage).toContain("from your request");
+    } finally {
+      both.cleanup();
+    }
   });
 
   test("session-start spawns the worker when the queue is non-empty or the snapshot predates the schema", async () => {

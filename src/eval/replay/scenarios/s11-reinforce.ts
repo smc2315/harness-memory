@@ -2,16 +2,21 @@
  * s11 — (§13.2 (g), (d)) a reinforce from a second session ten days later raises the TTL and
  * validation_count; re-applying the same run through the worker (episode forced back to queued, raw
  * cache + write_ops present) leaves the SQL export byte-identical.
+ * A′ ladder: the row is born at advise in session A; the second session's reinforce (evidence now spans two
+ * sessions) escalates it to soft_deny deterministically, with an `auto_escalation` transition, and the next
+ * session's `npm test` is denied while `pnpm test` (the fix) still passes.
  */
 
 import { EpisodeRepository } from "../../../db/repositories/episodes";
+import { TransitionRepository } from "../../../db/repositories/transitions";
+import type { ReconcileReport } from "../../../dream/reconcile";
 import { defineScenario } from "../scenario";
 import { isoPlus } from "./util";
 
 export const s11 = defineScenario({
   id: "s11",
-  title: "reinforce raises TTL and validation_count; the same run twice is a byte-identical noop",
-  asserts: ["g", "d"],
+  title: "reinforce raises TTL and validation_count and escalates advise → soft_deny; the same run twice is a byte-identical noop",
+  asserts: ["g", "d", "A′:ladder"],
   async run(run) {
     const t0 = run.now();
     const learn = await run.turn("A", "s11-reinforce.jsonl", { turnKey: "p111" });
@@ -26,6 +31,7 @@ export const s11 = defineScenario({
     }
     const before = await run.memory(id);
     run.equal("(g) initial TTL 30 d, validation_count 0", [before?.ttlExpiresAt, before?.validationCount], [isoPlus(firstAt, { days: 30 }), 0]);
+    run.equal("(A′) born active at advise after one session", [before?.status, before?.enforcement, before?.distinctSessionCount], ["active", "advise", 1]);
 
     run.at(isoPlus(t0, { days: 10 }));
     const reinforce = await run.turn("Z", "s11-reinforce.jsonl", { turnKey: "p112" });
@@ -40,6 +46,21 @@ export const s11 = defineScenario({
     run.check("(g) TTL moved forward", after?.ttlExpiresAt !== undefined && before?.ttlExpiresAt !== undefined && Date.parse(after.ttlExpiresAt!) > Date.parse(before.ttlExpiresAt!));
     run.equal("(g) TTL = reinforce time + 30 d", after?.ttlExpiresAt, isoPlus(secondAt, { days: 30 }));
     run.check("(g) revalidate_after moved too", after?.revalidateAfter !== undefined && before?.revalidateAfter !== undefined && Date.parse(after.revalidateAfter!) > Date.parse(before.revalidateAfter!));
+    run.equal("(A′) the second session's reinforce escalated advise → soft_deny (still auto)", [after?.enforcement, after?.authority], ["soft_deny", "auto"]);
+    const secondReport = (second.processed[0]?.op as { report?: ReconcileReport } | undefined)?.report;
+    run.equal("(A′) the reconcile report counts the escalation", secondReport?.escalated, [id]);
+    run.check("(A′) the outcome detail names the escalation", (secondReport?.outcomes[0]?.detail ?? "").includes("escalated=soft_deny"), secondReport?.outcomes[0]?.detail);
+    await run.read((db) => {
+      const transitions = new TransitionRepository(db).listForMemory(id);
+      run.equal(
+        "(A′) history: auto activation, then the escalation as an active → active auto_rule transition",
+        transitions.map((row) => [row.fromStatus, row.toStatus, row.actor, row.reason.split(":")[0]]),
+        [
+          ["candidate", "active", "auto_rule", "decideTier"],
+          ["active", "active", "auto_rule", "auto_escalation"],
+        ]
+      );
+    });
 
     // (d) force the second episode back to the queue: raw cache + write_ops make the re-run a noop. Only the
     // episode's lease bookkeeping (attempt_count / lease_until / next_attempt_at) may move; every memory,
@@ -67,6 +88,17 @@ export const s11 = defineScenario({
     run.equal("(d) episode extracted again, same run id", [episodeAfter?.status, episodeAfter?.extractionRunId], ["extracted", episodeBefore?.extractionRunId ?? null]);
     const unchanged = await run.memory(id);
     run.equal("(d) counters unchanged by the re-run", [unchanged?.validationCount, unchanged?.evidenceCount, unchanged?.ttlExpiresAt], [1, 2, after?.ttlExpiresAt]);
+    run.equal("(d) the re-run did not escalate twice", unchanged?.enforcement, "soft_deny");
+
+    // A′: the escalated row now blocks the failing command in a third session; the fix is untouched.
+    run.advance({ minutes: 5 });
+    await run.prompt("Y", "run the tests", { promptId: "y1" });
+    const denied = await run.preTool("Y", { tool: "Bash", command: "npm test" });
+    run.equal("(A′) `npm test` in a third session → deny by the escalated pitfall", [denied.result?.decision, denied.result?.enforcement, denied.result?.activated], ["deny", "soft_deny", [id]]);
+    run.check("(A′) stdout carries permissionDecision deny with the retry hint", denied.stdout?.hookSpecificOutput?.permissionDecision === "deny" && (denied.stdout?.hookSpecificOutput?.permissionDecisionReason ?? "").includes("call the tool again"));
+    const fix = await run.preTool("Y", { tool: "Bash", command: "pnpm test" });
+    run.equal("(A′) `pnpm test` (the fix) still passes", [fix.result?.decision, fix.result?.activated], ["none", []]);
+    await run.stop("Y", "Tests pass with pnpm.");
   },
 });
 

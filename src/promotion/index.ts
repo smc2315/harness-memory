@@ -45,3 +45,6 @@ export {
 } from "./revalidate";
 // Proposals (Phase B1): open/support, human and auto decisions, auto-demotion evaluation, expiry.
 export * from "./proposals";
+// A′: the autonomy ladder (advise → soft_deny on a second session's reinforce) and remember-as-human helpers.
+export * from "./escalation";
+export * from "./remember";

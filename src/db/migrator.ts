@@ -57,7 +57,7 @@ export function getMigrationFiles(): MigrationFile[] {
     .sort((left, right) => left.version - right.version);
 }
 
-/** Highest version among the bundled migration files (21 in this build). */
+/** Highest version among the bundled migration files (22 in this build). */
 export function latestMigrationVersion(): number {
   const files = getMigrationFiles();
   return files.length === 0 ? 0 : files[files.length - 1].version;

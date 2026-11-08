@@ -39,6 +39,7 @@ import {
   type LifecycleTrigger,
   type TriggerSignature,
 } from "../../core/vocabulary";
+import { citesRememberPrompt } from "../../promotion/remember";
 import { scanMemoryContent } from "../../security/scanner";
 import { parseExtractionOutput, type InvalidFact } from "./schema";
 
@@ -349,8 +350,11 @@ function validateFact(original: ExtractionFact, ordinal: number, ctx: FactContex
     }
   }
 
-  // V3 — scope (a signature makes any repository glob acceptable).
-  let scope = checkScope(fact.scope_glob, fact.type, signature !== null, ctx.mode);
+  // V3 — scope (a signature makes any repository glob acceptable). A create that cites an explicit remember request
+  // ("from now on …, remember this", "기억해") is the user's own rule: a repository-wide glob without a signature is
+  // what they asked for, so it passes too (Phase F, direction A′); reconcile turns it into a human row.
+  const rememberCreate = citesRememberPrompt(ctx.descriptor.flags, { action: fact.action, evidence_refs: fact.evidence_refs }, ctx.seqMap);
+  let scope = checkScope(fact.scope_glob, fact.type, signature !== null || rememberCreate, ctx.mode);
   if (!scope.ok) return reject(scope.rejection, scope.detail);
 
   // V4 — signature tool must be in the (mode-dependent) tool set; import / tool-less need a citation.
@@ -365,7 +369,7 @@ function validateFact(original: ExtractionFact, ordinal: number, ctx: FactContex
     if (isBeforeToolOnly(fact.lifecycle_triggers)) return reject("trigger_unreachable", unspecificDetail);
     signature = null;
     compiled = null;
-    scope = checkScope(fact.scope_glob, fact.type, false, ctx.mode);
+    scope = checkScope(fact.scope_glob, fact.type, rememberCreate, ctx.mode);
     if (!scope.ok) return reject(scope.rejection, scope.detail);
   }
 

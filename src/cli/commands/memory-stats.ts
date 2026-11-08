@@ -135,7 +135,7 @@ export function collectMemoryStats(db: SqlJsDatabase, now: string, since: string
     db,
     `SELECT t.memory_id, t.created_at, t.extraction_run_id, m.summary
      FROM memory_transitions t LEFT JOIN memories m ON m.id = t.memory_id
-     WHERE t.actor = 'auto_rule' AND t.to_status = 'active' AND t.created_at >= ?
+     WHERE t.actor = 'auto_rule' AND t.to_status = 'active' AND t.from_status <> t.to_status AND t.created_at >= ?
      ORDER BY t.created_at DESC LIMIT 50`,
     [since]
   ).map((row) => ({
@@ -144,7 +144,8 @@ export function collectMemoryStats(db: SqlJsDatabase, now: string, since: string
     summary: row.summary === null || row.summary === undefined ? "" : String(row.summary),
     run_id: row.extraction_run_id === null || row.extraction_run_id === undefined ? null : String(row.extraction_run_id),
   }));
-  const humanSince = selectCount(db, "SELECT COUNT(*) FROM memory_transitions WHERE actor = 'human' AND to_status = 'active' AND created_at >= ?", [since]);
+  // Same-status rows are enforcement escalations (auto_rule) or remember adoptions (human), not activations.
+  const humanSince = selectCount(db, "SELECT COUNT(*) FROM memory_transitions WHERE actor = 'human' AND to_status = 'active' AND from_status <> to_status AND created_at >= ?", [since]);
   const demotionsSince = selectCount(db, "SELECT COUNT(*) FROM memory_transitions WHERE to_status IN ('stale', 'superseded', 'rejected') AND created_at >= ?", [since]);
 
   const runsSince: Partial<Record<RunStatus, number>> = {};

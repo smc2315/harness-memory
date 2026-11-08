@@ -14,7 +14,9 @@ import { selectAfterToolHints } from "../activation/after-tool";
 import { activateBeforeModel, type DenseClient } from "../activation/before-model";
 import { decideBeforeTool } from "../activation/before-tool";
 import type { InjectedItem } from "../activation/injection";
+import { readRecallSnapshot } from "../activation/recall";
 import { buildDigestMessage, selectSessionStartItems } from "../activation/session-start";
+import { buildRememberNotice } from "../promotion/remember";
 import {
   defaultSpawnWorker,
   readActiveSnapshot,
@@ -474,10 +476,16 @@ async function handleSessionStart(input: NormalizedHookInput, runtime: HookRunti
   result.detail.suppressed = startup.suppressed;
 
   const digest = buildDigestMessage(loaded.snapshot.counts, ctx.state?.last_digest_date, ctx.now);
-  if (digest !== null) {
-    result.systemMessage = digest;
+  // A′ remember-as-human: rules born active from the user's own request in the last 24 h are named with their
+  // one-command undo, read from the snapshot (status_reason / created_at), under the same once-per-session-day throttle.
+  const today = ctx.now.slice(0, 10);
+  const rememberNotice = ctx.state?.last_digest_date === today ? null : buildRememberNotice(loaded.snapshot.memories, ctx.now);
+  const message = [digest, rememberNotice].filter((part): part is string => part !== null).join("\n");
+  if (message.length > 0) {
+    result.systemMessage = message;
+    result.detail.remember_notice = rememberNotice !== null;
     const state = ctx.state ?? createSessionState(input.host, input.session_id, ctx.sessionKey, ctx.now);
-    writeSessionState(ctx.stateFile, { ...state, last_digest_date: ctx.now.slice(0, 10), updated_at: ctx.now });
+    writeSessionState(ctx.stateFile, { ...state, last_digest_date: today, updated_at: ctx.now });
   }
   return result;
 }
@@ -564,6 +572,8 @@ async function handlePrompt(input: NormalizedHookInput, runtime: HookRuntime): P
   } else {
     result.gen = loaded.snapshot.db_generation;
     const lexical = await readLexicalSnapshot(runtime.paths);
+    // A′ recall layer: past-episode summaries (recall.v1.json) as plain context after the memory items; UserPromptSubmit only.
+    const recall = runtime.config.recall.enabled ? await readRecallSnapshot(runtime.paths) : null;
     const useDense = runtime.config.before_model.dense === "helper" && runtime.config.embeddings.enabled;
     const lastScopeRef = deriveTailState(tail.lines, { turnStartOffset: offset }).lastScopeRef;
     const activation = await activateBeforeModel({
@@ -575,14 +585,17 @@ async function handlePrompt(input: NormalizedHookInput, runtime: HookRuntime): P
       host: input.host,
       config: runtime.config,
       now: ctx.now,
+      recall,
+      sessionKey: ctx.sessionKey,
     });
     result.activated = itemIds(activation.items);
     result.suppressed = activation.suppressed.length;
     result.additionalContext = activation.text;
-    result.delivery = activation.items.length > 0 ? "with_result" : "none";
+    result.delivery = activation.text !== null ? "with_result" : "none";
     result.detail.lexical = activation.lexicalUsed;
     result.detail.dense = activation.denseUsed;
     result.detail.suppressed = activation.suppressed;
+    result.detail.recall = activation.recall.map((item) => item.id);
   }
 
   // Worker → user notifications (§7.4).

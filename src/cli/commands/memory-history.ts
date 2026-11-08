@@ -14,6 +14,8 @@ import { ExtractionRunRepository, type ExtractionRunRecord } from "../../db/repo
 import { TransitionRepository, type TransitionRecord } from "../../db/repositories/transitions";
 import { readLegacyHistory, type LegacyHistory } from "../../dream/legacy-reader";
 import { MemoryRepository, type EvidenceRecord, type MemoryHistoryRelation, type MemoryRecord } from "../../memory/repository";
+import { ESCALATION_TRANSITION_REASON } from "../../promotion/escalation";
+import { REMEMBER_TRANSITION_REASON } from "../../promotion/remember";
 import type { CommandContext } from "../context";
 import type { OptionSpecs } from "../lib/args";
 import { guard } from "../lib/cli-error";
@@ -51,12 +53,24 @@ export function collectMemoryHistory(db: SqlJsDatabase, ref: string): { memory: 
   return { memory, report };
 }
 
+/**
+ * A′ records two changes that leave the status alone as from = to transitions: the ladder's enforcement escalation
+ * (`auto_escalation…` by auto_rule) and the remember adoption of an active row (`remember:episode …` by human, the
+ * row changed authority). Name what changed instead of printing `active → active`.
+ */
+export function sameStatusLabel(transition: Pick<TransitionRecord, "reason">): string {
+  if (transition.reason.startsWith(ESCALATION_TRANSITION_REASON)) return "enforcement";
+  if (transition.reason.startsWith(REMEMBER_TRANSITION_REASON)) return "authority";
+  return "no status change";
+}
+
 export function renderMemoryHistory(memory: MemoryRecord, report: MemoryHistoryReport): string[] {
   const lines = [memoryLine(memory, 100), ""];
   lines.push(`transitions (${String(report.transitions.length)}):`);
   for (const transition of report.transitions) {
     const refs = [transition.proposalId === null ? null : `proposal ${shortId(transition.proposalId)}`, transition.extractionRunId === null ? null : `run ${shortId(transition.extractionRunId)}`].filter((part): part is string => part !== null);
-    lines.push(`  ${transition.createdAt}  ${transition.fromStatus} → ${transition.toStatus}  by ${transition.actor}  ${transition.reason}${refs.length > 0 ? `  (${refs.join(", ")})` : ""}`);
+    const edge = transition.fromStatus === transition.toStatus ? `${transition.fromStatus} (${sameStatusLabel(transition)})` : `${transition.fromStatus} → ${transition.toStatus}`;
+    lines.push(`  ${transition.createdAt}  ${edge}  by ${transition.actor}  ${transition.reason}${refs.length > 0 ? `  (${refs.join(", ")})` : ""}`);
   }
   if (report.transitions.length === 0) lines.push("  none");
   lines.push("", `provenance (${String(report.provenance.length)}):`);

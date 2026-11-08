@@ -26,7 +26,7 @@ const SCENARIO_TIMEOUT_MS = 120_000;
  * skipped with that reason instead of failing a dozen times on the same cause.
  */
 const EVENT_IDS = checkExtractionEventIds();
-const NEEDS_EXTRACTION = new Set(["s01", "s02", "s03", "s06", "s07", "s08", "s09", "s10", "s11"]);
+const NEEDS_EXTRACTION = new Set(["s01", "s02", "s03", "s06", "s07", "s08", "s09", "s10", "s11", "s13"]);
 
 describe("preflight: hooks ↔ prompt ↔ schema contracts", () => {
   test("the extraction prompt renders event ids the schema accepts for real (16-digit) ledger seqs", () => {
@@ -35,8 +35,8 @@ describe("preflight: hooks ↔ prompt ↔ schema contracts", () => {
 });
 
 describe("replay fixtures", () => {
-  test("twelve scenarios, each with a ledger fixture; recorded outputs parse and cite fixture seqs", () => {
-    expect(REPLAY_SCENARIOS.map((scenario) => scenario.id)).toEqual(["s01", "s02", "s03", "s04", "s05", "s06", "s07", "s08", "s09", "s10", "s11", "s12"]);
+  test("thirteen scenarios, each with a ledger fixture; recorded outputs parse and cite fixture seqs", () => {
+    expect(REPLAY_SCENARIOS.map((scenario) => scenario.id)).toEqual(["s01", "s02", "s03", "s04", "s05", "s06", "s07", "s08", "s09", "s10", "s11", "s12", "s13"]);
     const ledgers = readdirSync(FIXTURES).filter((name) => name.endsWith(".jsonl"));
     for (const id of REPLAY_SCENARIOS.map((scenario) => scenario.id)) {
       expect(ledgers.some((name) => name.startsWith(`${id}-`)), `ledger fixture for ${id}`).toBe(true);
@@ -135,7 +135,8 @@ describe("replay fixtures", () => {
   test("selectScenarios filters by id prefix or title", () => {
     expect(selectScenarios(["s0"]).map((scenario) => scenario.id)).toEqual(["s01", "s02", "s03", "s04", "s05", "s06", "s07", "s08", "s09"]);
     expect(selectScenarios(["budget"]).map((scenario) => scenario.id)).toEqual(["s12"]);
-    expect(selectScenarios([]).length).toBe(12);
+    expect(selectScenarios(["remember"]).map((scenario) => scenario.id)).toEqual(["s13"]);
+    expect(selectScenarios([]).length).toBe(13);
   });
 });
 

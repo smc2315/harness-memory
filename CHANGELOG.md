@@ -6,6 +6,17 @@ All notable changes to `harness-memory`. The format follows [Keep a Changelog](h
 
 Release candidate of the v0.6 redesign (branch `redesign/v0.6`). Design: [docs/redesign/spec-v0.6.md](docs/redesign/spec-v0.6.md); build plan: [docs/redesign/implementation-plan.md](docs/redesign/implementation-plan.md); upgrade notes: [docs/redesign/upgrade-from-0.5.md](docs/redesign/upgrade-from-0.5.md).
 
+### Changed (Phase F — direction A′, 2026-11-08 night)
+
+- Auto-learned pitfalls start at `advise` (`before_tool.auto_enforcement` default was `soft_deny`; the old value stays selectable) and climb to `soft_deny` only when a second session reinforces them (`before_tool.auto_escalation`, default `{ enabled: true, sessions: 2 }`; `autonomy_level: shadow` never climbs; a row downgraded by overrides needs a new session). `hm memory:history` shows the climb as `active (enforcement) by auto_rule`; `hm memory:stats` no longer counts escalations as activations.
+- The `not_logged_in` guidance says what is true: imported and hand-added rules fire without the CLI login; typing new import bullets and learning from sessions — remember turns included — start after `claude auth login`.
+
+### Added (Phase F)
+
+- **Remember-as-human.** A fact extracted from a turn with an explicit remember request (`remember this`, `기억해`, `from now on` + a rule) that cites that prompt line becomes a human rule at once (`status_reason remember`, at most two per turn): policy with a signature → `confirm`, pitfall with a signature → `soft_deny`, else `advise`. `SessionStart` names such rules for 24 hours with the undo (`hm memory:demote <id>`); `hm memory:list` tags them `[remember]`; V6 / V8 / V12 still apply, and for these facts alone a global rule without a signature passes V3.
+- **Recall layer, shipped dark.** Migration 022 (`user_version = 22`) adds `summary` / `summary_kind` to `episodes`; the worker gives every episode a deterministic summary the moment it is queued and the extractor's `episode_summary` (scanned like memory text) replaces it. With `recall.enabled` (default **false**) the snapshot builder writes `snapshot/recall.v1.json` (newest `recall.keep_episodes` = 300 summaries with a serialized MiniSearch index), `UserPromptSubmit` appends up to `before_model.recall.max_items` (2) `[harness-memory] RECALL <date>: …` lines after the memory items (never on `PreToolUse`, never enforced), `hm recall <query>` searches them and `hm status` shows `recall N episodes`.
+- **`hm import --from auto-memory`** (`--auto-memory`, `--include-project`, `--memory-dir <dir>`): Claude Code's native auto memory notes (`~/.claude/projects/<slug>/memory/*.md`, `type: feedback`) become human import rows through the ordinary pipeline with `source_ref = import:auto-memory:<file>#L<n>`; directory-wide `--sync`; `MEMORY.md` itself is never imported and counts as host-loaded. Bullets that cannot be typed yet (no extraction CLI) are stored verbatim as `advise` rows. `hm install` reports the project's auto-memory notes and suggests the import.
+
 ### Highlights
 
 - **Claude Code is the first host.** harness-memory now runs as nine Claude Code hooks (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `StopFailure`, `PreCompact`, `SessionEnd`) — short-lived `node dist/hook.js <event>` processes that read one precomputed snapshot and never open SQLite. Codex follows in 0.6.1, OpenCode (V2 plugin) in 0.6.2.

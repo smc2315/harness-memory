@@ -3,21 +3,30 @@
  * extractor outputs: no provider process, no network, injected clocks.
  */
 
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { beforeEach, describe, expect, test } from "vitest";
 import type { Database as SqlJsDatabase } from "sql.js";
 
+import { memoryTableRow } from "../src/cli/lib/memory-render";
 import { DEFAULT_CONFIG } from "../src/core/config";
 import type { EpisodeDescriptor } from "../src/core/episode-types";
 import type { LedgerLine } from "../src/core/ledger-types";
+import { resolvePaths } from "../src/core/paths";
 import { hasWriteOp } from "../src/db/meta";
 import { EpisodeRepository } from "../src/db/repositories/episodes";
 import { ProposalRepository } from "../src/db/repositories/proposals";
 import { ProvenanceRepository } from "../src/db/repositories/provenance";
 import { ExtractionRunRepository } from "../src/db/repositories/runs";
 import { TransitionRepository } from "../src/db/repositories/transitions";
+import { runDream } from "../src/dream/consolidate";
 import { jaccard, normalizeFact, recordExtractionFailure, scopesIntersect, summaryTokens } from "../src/dream/reconcile";
 import { MemoryRepository } from "../src/memory/repository";
+import { OVERRIDE_DOWNGRADE_EVENT } from "../src/promotion/escalation";
 import { expireProposals } from "../src/promotion/proposals";
+import { REMEMBER_MAX_PER_EPISODE, isRecentRememberRow } from "../src/promotion/remember";
+import { transitionMemory } from "../src/promotion/transitions";
 import { derivedRulesConsistent } from "../src/policy/derive";
 import { createTestDb } from "./helpers/create-test-db";
 import { assistantLine, loadLedgerFixture, promptLine, toolFailLine, toolOkLine } from "./helpers/ledger-fixture";
@@ -50,7 +59,7 @@ function bareFailureLines(turnKey: string, seqBase: number): LedgerLine[] {
   ];
 }
 
-describe("(a) correction episode → active / auto / soft_deny; (j) evidence_weight 2", () => {
+describe("(a) correction episode → active / auto / advise (A′ ladder start); (j) evidence_weight 2", () => {
   test("s01 p1 with a recorded pitfall activates in one run", () => {
     const descriptor = descriptorFromLines(s01);
     expect(descriptor.flags).toEqual({ correction: 1 });
@@ -69,7 +78,9 @@ describe("(a) correction episode → active / auto / soft_deny; (j) evidence_wei
     const memory = memories.getById(result.op.report.created[0]!)!;
     expect(memory.status).toBe("active");
     expect(memory.authority).toBe("auto");
-    expect(memory.enforcement).toBe("soft_deny");
+    expect(memory.enforcement).toBe("advise");
+    expect(result.op.report.escalated).toEqual([]);
+    expect(result.op.report.remembered).toEqual([]);
     expect(memory.type).toBe("pitfall");
     expect(memory.sourceKind).toBe("extraction");
     expect(memory.sourceRef).toBe(`episode:${descriptor.id}`);
@@ -441,7 +452,7 @@ describe("(i) learn-and-apply episodes are pitfalls", () => {
     });
     const rows = ids.map((id) => memories.getById(id)!);
     expect(rows.every((row) => row.type === "pitfall")).toBe(true);
-    expect(rows.every((row) => row.status === "active" && row.enforcement === "soft_deny")).toBe(true);
+    expect(rows.every((row) => row.status === "active" && row.enforcement === "advise")).toBe(true);
     expect(rows.every((row) => row.lifecycleTriggers.includes("before_tool"))).toBe(true);
     expect(new Set(rows.map((row) => row.semanticKey)).size).toBe(6);
   });
@@ -722,5 +733,610 @@ describe("decideTier reads the scanner verdict on the stored text (Phase D)", ()
     const safeRun = reinforce(safe.id, "session-safe", isoPlus(REPLAY_NOW, { hours: 1 }));
     expect(safeRun.op.report.activated).toEqual([safe.id]);
     expect(memories.getById(safe.id)?.status).toBe("active");
+  });
+});
+
+describe("A′ autonomy ladder: advise → soft_deny on a second session's reinforce", () => {
+  const SIGNATURE = { tool: "bash" as const, target: "command" as const, pattern_kind: "cmd" as const, pattern: "npm test" };
+
+  /** s01 correction in session-1 → one active auto row at advise. */
+  function learn(config = DEFAULT_CONFIG) {
+    const descriptor = descriptorFromLines(s01);
+    const fact = factFixture({ evidence_refs: ["e1"] });
+    const result = applyRun(db, { descriptor, lines: s01, output: outputFixture([fact]), config });
+    const id = result.op.report.created[0]!;
+    expect(memories.getById(id)).toMatchObject({ status: "active", enforcement: "advise", authority: "auto", distinctSessionCount: 1 });
+    expect(result.op.report.escalated).toEqual([]);
+    return { id, fact };
+  }
+
+  /** A bare-failure episode of `sessionId` whose recorded fact reinforces `id`. */
+  function reinforceFrom(id: string, sessionId: string, turnKey: string, seqBase: number, now: string, config = DEFAULT_CONFIG, knowledgeKind: "failure_resolution" | "correction" = "failure_resolution") {
+    const lines = bareFailureLines(turnKey, seqBase);
+    const fact = factFixture({ action: "reinforce", target_memory_id: id, evidence_refs: ["e1"], knowledge_kind: knowledgeKind });
+    return applyRun(db, { descriptor: descriptorFromLines(lines, { sessionId, turnKey }), lines, output: outputFixture([fact]), now, config });
+  }
+
+  test("a reinforce from a second session escalates the row: enforcement, history transition, audit row, report", () => {
+    const { id } = learn();
+    const two = reinforceFrom(id, "session-z", "p50", 5100, isoPlus(REPLAY_NOW, { days: 1 }));
+    expect(two.op.report.reinforced).toEqual([id]);
+    expect(two.op.report.escalated).toEqual([id]);
+    expect(two.op.report.activated).toEqual([]);
+    expect(two.op.report.outcomes[0]).toMatchObject({ outcome: "reinforced", memory_id: id });
+    expect(two.op.report.outcomes[0]?.detail).toContain("escalated=soft_deny");
+    const after = memories.getById(id)!;
+    expect(after).toMatchObject({ enforcement: "soft_deny", authority: "auto", status: "active", distinctSessionCount: 2, evidenceCount: 2 });
+    const transitions = new TransitionRepository(db).listForMemory(id);
+    expect(transitions.map((row) => [row.fromStatus, row.toStatus, row.actor, row.extractionRunId])).toEqual([
+      ["candidate", "active", "auto_rule", expect.any(String)],
+      ["active", "active", "auto_rule", two.runId],
+    ]);
+    expect(transitions[1]!.reason.startsWith("auto_escalation")).toBe(true);
+    const audit = db.exec("SELECT details_json FROM audit_log WHERE event_type = 'enforcement_escalation'");
+    expect(audit[0]?.values).toHaveLength(1);
+    expect(JSON.parse(String(audit[0]!.values[0]![0]))).toMatchObject({ memoryId: id, from: "advise", to: "soft_deny", sessions: 2 });
+    expect(derivedRulesConsistent(db)).toBe(true);
+
+    // The same run again is a noop: no second transition, no second audit row.
+    const again = applyRun(db, { descriptor: descriptorFromLines(bareFailureLines("p50", 5100), { sessionId: "session-z", turnKey: "p50" }), lines: bareFailureLines("p50", 5100), output: outputFixture([factFixture({ action: "reinforce", target_memory_id: id, evidence_refs: ["e1"], knowledge_kind: "failure_resolution" })]), now: isoPlus(REPLAY_NOW, { days: 2 }) });
+    expect(again.op.noop).toBe(true);
+    expect(new TransitionRepository(db).listForMemory(id)).toHaveLength(2);
+  });
+
+  test("a create that collapses into the row from another session counts as a reinforce and escalates too", () => {
+    const { id, fact } = learn();
+    const lines = bareFailureLines("p51", 5200);
+    const two = applyRun(db, { descriptor: descriptorFromLines(lines, { sessionId: "session-y", turnKey: "p51" }), lines, output: outputFixture([{ ...fact, evidence_refs: ["e1"], knowledge_kind: "failure_resolution" }]), now: isoPlus(REPLAY_NOW, { hours: 3 }) });
+    expect(two.op.report.created).toEqual([]);
+    expect(two.op.report.reinforced).toEqual([id]);
+    expect(two.op.report.escalated).toEqual([id]);
+    expect(memories.getById(id)?.enforcement).toBe("soft_deny");
+  });
+
+  test("the same session reinforcing twice stays at advise (one distinct session)", () => {
+    const { id } = learn();
+    const two = reinforceFrom(id, "session-1", "p52", 5300, isoPlus(REPLAY_NOW, { hours: 1 }));
+    expect(two.op.report.reinforced).toEqual([id]);
+    expect(two.op.report.escalated).toEqual([]);
+    expect(two.op.report.outcomes[0]?.detail ?? "").not.toContain("escalated");
+    expect(memories.getById(id)).toMatchObject({ enforcement: "advise", distinctSessionCount: 1, evidenceCount: 2 });
+    expect(new TransitionRepository(db).listForMemory(id)).toHaveLength(1);
+  });
+
+  test("shadow autonomy never raises an auto row above advise; standard escalates the same row afterwards", () => {
+    const shadow = { ...DEFAULT_CONFIG, autonomy_level: "shadow" as const };
+    // Under shadow nothing auto-activates, so the active row is seeded the way decideTier would have left it.
+    const seeded = memories.create(autoMemory({ status: "active", enforcement: "advise", knowledgeKind: "correction", triggerSignature: SIGNATURE, signatureKey: "bash|command|cmd|npm test", summary: "Run the suite with pnpm test; npm test lacks a script in this repository." }));
+    reinforceFrom(seeded.id, "session-a", "p53", 5400, isoPlus(REPLAY_NOW, { hours: 1 }), shadow);
+    const second = reinforceFrom(seeded.id, "session-b", "p54", 5500, isoPlus(REPLAY_NOW, { hours: 2 }), shadow);
+    expect(second.op.report.escalated).toEqual([]);
+    expect(memories.getById(seeded.id)).toMatchObject({ enforcement: "advise", distinctSessionCount: 2 });
+    const third = reinforceFrom(seeded.id, "session-c", "p55", 5600, isoPlus(REPLAY_NOW, { hours: 3 }));
+    expect(third.op.report.escalated).toEqual([seeded.id]);
+    expect(memories.getById(seeded.id)?.enforcement).toBe("soft_deny");
+  });
+
+  test("before_tool.auto_escalation.enabled = false never climbs, however many sessions reinforce", () => {
+    const disabled = { ...DEFAULT_CONFIG, before_tool: { ...DEFAULT_CONFIG.before_tool, auto_escalation: { enabled: false, sessions: 2 } } };
+    const { id } = learn(disabled);
+    const second = reinforceFrom(id, "session-z", "p56", 5700, isoPlus(REPLAY_NOW, { hours: 1 }), disabled);
+    expect(second.op.report.escalated).toEqual([]);
+    const third = reinforceFrom(id, "session-y", "p57", 5800, isoPlus(REPLAY_NOW, { hours: 2 }), disabled);
+    expect(third.op.report.escalated).toEqual([]);
+    expect(memories.getById(id)).toMatchObject({ enforcement: "advise", distinctSessionCount: 3 });
+    expect(new TransitionRepository(db).listForMemory(id)).toHaveLength(1);
+  });
+
+  test("before_tool.auto_escalation.sessions = 3 waits for the third session", () => {
+    const three = { ...DEFAULT_CONFIG, before_tool: { ...DEFAULT_CONFIG.before_tool, auto_escalation: { enabled: true, sessions: 3 } } };
+    const { id } = learn(three);
+    const second = reinforceFrom(id, "session-z", "p58", 5900, isoPlus(REPLAY_NOW, { hours: 1 }), three);
+    expect(second.op.report.escalated).toEqual([]);
+    expect(memories.getById(id)).toMatchObject({ enforcement: "advise", distinctSessionCount: 2 });
+    const third = reinforceFrom(id, "session-y", "p59", 6000, isoPlus(REPLAY_NOW, { hours: 2 }), three);
+    expect(third.op.report.escalated).toEqual([id]);
+    expect(memories.getById(id)).toMatchObject({ enforcement: "soft_deny", distinctSessionCount: 3 });
+  });
+
+  test("auto_enforcement = soft_deny (the pre-A′ default) is still selectable: born at soft_deny, nothing to escalate", () => {
+    const legacy = { ...DEFAULT_CONFIG, before_tool: { ...DEFAULT_CONFIG.before_tool, auto_enforcement: "soft_deny" as const } };
+    const descriptor = descriptorFromLines(s01);
+    const one = applyRun(db, { descriptor, lines: s01, output: outputFixture([factFixture({ evidence_refs: ["e1"] })]), config: legacy });
+    const id = one.op.report.created[0]!;
+    expect(memories.getById(id)?.enforcement).toBe("soft_deny");
+    const two = reinforceFrom(id, "session-z", "p59", 6000, isoPlus(REPLAY_NOW, { hours: 1 }), legacy);
+    expect(two.op.report.escalated).toEqual([]);
+    expect(new TransitionRepository(db).listForMemory(id)).toHaveLength(1);
+  });
+
+  test("after an override downgrade the row is not re-escalated by the same session; a new session climbs it again", () => {
+    const { id } = learn();
+    const up = reinforceFrom(id, "session-z", "p60", 6100, isoPlus(REPLAY_NOW, { days: 1 }));
+    expect(up.op.report.escalated).toEqual([id]);
+
+    // The consolidator's override downgrade (src/dream/consolidate.ts): enforcement back to advise + its audit row.
+    const downgradedAt = isoPlus(REPLAY_NOW, { days: 2 });
+    db.run("UPDATE memories SET enforcement = 'advise', updated_at = ? WHERE id = ?", [downgradedAt, id]);
+    db.run("INSERT INTO audit_log (id, event_type, session_id, scope_ref, summary, details_json, created_at) VALUES (?, ?, NULL, NULL, ?, ?, ?)", [
+      "audit-downgrade",
+      OVERRIDE_DOWNGRADE_EVENT,
+      `override downgrade: ${id} soft_deny → advise (overrides 3, evidence 2)`,
+      JSON.stringify({ memoryId: id, from: "soft_deny", overrideCount: 3, evidenceScore: 2 }),
+      downgradedAt,
+    ]);
+
+    // session-z recorded an episode before the downgrade: its reinforce must not ping-pong the row back up.
+    const same = reinforceFrom(id, "session-z", "p61", 6200, isoPlus(REPLAY_NOW, { days: 3 }));
+    expect(same.op.report.reinforced).toEqual([id]);
+    expect(same.op.report.escalated).toEqual([]);
+    expect(memories.getById(id)).toMatchObject({ enforcement: "advise", distinctSessionCount: 2 });
+    expect(new TransitionRepository(db).listForMemory(id)).toHaveLength(2);
+
+    // A session that began after the downgrade (its ledger lines are stamped after it) reinforces it again → the
+    // ladder applies once more. The synthetic fixture timestamps all predate the downgrade, so stamp these explicitly.
+    const freshAt = isoPlus(REPLAY_NOW, { days: 4 });
+    const freshLines = bareFailureLines("p62", 6300).map((line) => ({ ...line, ts: freshAt }) as LedgerLine);
+    const fresh = applyRun(db, {
+      descriptor: descriptorFromLines(freshLines, { sessionId: "session-new", turnKey: "p62" }),
+      lines: freshLines,
+      output: outputFixture([factFixture({ action: "reinforce", target_memory_id: id, evidence_refs: ["e1"], knowledge_kind: "failure_resolution" })]),
+      now: freshAt,
+    });
+    expect(fresh.op.report.escalated).toEqual([id]);
+    expect(memories.getById(id)).toMatchObject({ enforcement: "soft_deny", distinctSessionCount: 3 });
+    expect(new TransitionRepository(db).listForMemory(id)).toHaveLength(3);
+  });
+
+  test("human rows are untouched by the ladder", () => {
+    const human = memories.create(humanMemory({ type: "pitfall", status: "active", enforcement: "advise", knowledgeKind: "correction", triggerSignature: SIGNATURE, signatureKey: "bash|command|cmd|npm test", scopeGlob: "**/*", lifecycleTriggers: ["before_tool"], summary: "Run the suite with pnpm test; npm test lacks a script in this repository." }));
+    reinforceFrom(human.id, "session-a", "p63", 6400, isoPlus(REPLAY_NOW, { hours: 1 }));
+    const second = reinforceFrom(human.id, "session-b", "p64", 6500, isoPlus(REPLAY_NOW, { hours: 2 }));
+    expect(second.op.report.escalated).toEqual([]);
+    expect(memories.getById(human.id)).toMatchObject({ enforcement: "advise", authority: "human", distinctSessionCount: 2 });
+    expect(new TransitionRepository(db).listForMemory(human.id)).toEqual([]);
+  });
+
+  test("an escalation is not an activation: it does not consume the daily auto-activation cap", () => {
+    const capped = { ...DEFAULT_CONFIG, extraction: { ...DEFAULT_CONFIG.extraction, max_auto_activations_per_day: 2 } };
+    const { id } = learn(capped);
+    const up = reinforceFrom(id, "session-z", "p65", 6600, isoPlus(REPLAY_NOW, { hours: 1 }), capped);
+    expect(up.op.report.escalated).toEqual([id]);
+    // One activation + one escalation so far today; a second distinct claim must still activate (1 of 2 used).
+    const lines = bareFailureLines("p66", 6700);
+    const other = applyRun(db, {
+      descriptor: descriptorFromLines(lines, { sessionId: "session-q", turnKey: "p66" }),
+      lines,
+      output: outputFixture([factFixture({ summary: "Build with pnpm build; npm run build breaks without the workspace flags.", trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "npm run build" }, knowledge_kind: "failure_resolution", evidence_refs: ["e1"] })]),
+      now: isoPlus(REPLAY_NOW, { hours: 2 }),
+      config: capped,
+    });
+    expect(other.op.report.created).toHaveLength(1);
+    // evidence 1 → candidate(evidence) on its own; reinforce it from a second session so it reaches the cap check.
+    const again = applyRun(db, {
+      descriptor: descriptorFromLines(bareFailureLines("p67", 6800), { sessionId: "session-w", turnKey: "p67" }),
+      lines: bareFailureLines("p67", 6800),
+      output: outputFixture([factFixture({ action: "reinforce", target_memory_id: other.op.report.created[0]!, summary: "Build with pnpm build; npm run build breaks without the workspace flags.", trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "npm run build" }, knowledge_kind: "failure_resolution", evidence_refs: ["e1"] })]),
+      now: isoPlus(REPLAY_NOW, { hours: 3 }),
+      config: capped,
+    });
+    expect(again.op.report.activated).toEqual([other.op.report.created[0]]);
+    expect(again.op.report.outcomes[0]?.detail).toContain("tier=active");
+    expect(again.op.report.outcomes[0]?.detail ?? "").not.toContain("tier=candidate:cap");
+  });
+
+  test("an activation never escalates: the second session's reinforce activates a bare-failure candidate at advise even though the evidence now spans two sessions; the third session climbs it", () => {
+    const first = bareFailureLines("p90", 9000);
+    const seed = applyRun(db, { descriptor: descriptorFromLines(first, { sessionId: "session-a", turnKey: "p90" }), lines: first, output: outputFixture([factFixture({ knowledge_kind: "failure_resolution", evidence_refs: ["e1"] })]) });
+    const id = seed.op.report.created[0]!;
+    expect(memories.getById(id)).toMatchObject({ status: "candidate", authority: "auto", enforcement: "advise", distinctSessionCount: 1 });
+
+    const second = reinforceFrom(id, "session-b", "p91", 9100, isoPlus(REPLAY_NOW, { hours: 1 }));
+    expect(second.op.report.activated).toEqual([id]);
+    expect(second.op.report.escalated).toEqual([]);
+    expect(second.op.report.outcomes[0]?.detail).toContain("tier=active");
+    expect(second.op.report.outcomes[0]?.detail ?? "").not.toContain("escalated");
+    expect(memories.getById(id)).toMatchObject({ status: "active", enforcement: "advise", authority: "auto", distinctSessionCount: 2 });
+
+    const third = reinforceFrom(id, "session-c", "p92", 9200, isoPlus(REPLAY_NOW, { hours: 2 }));
+    expect(third.op.report.activated).toEqual([]);
+    expect(third.op.report.escalated).toEqual([id]);
+    expect(memories.getById(id)).toMatchObject({ status: "active", enforcement: "soft_deny", distinctSessionCount: 3 });
+    expect(new TransitionRepository(db).listForMemory(id).map((row) => [row.fromStatus, row.toStatus, row.reason.split(":")[0]])).toEqual([
+      ["candidate", "active", "decideTier"],
+      ["active", "active", "auto_escalation"],
+    ]);
+  });
+
+  /**
+   * A decision-marker episode of `sessionId` (evidence weight 0: no correction, no failure — a successful `pnpm test`
+   * and an assistant line that "decided") whose recorded fact reinforces `id` citing the tool line.
+   */
+  function decisionReinforceFrom(id: string, sessionId: string, turnKey: string, seqBase: number, now: string) {
+    const lines: LedgerLine[] = [
+      promptLine("ok, what next", { seq: seqBase, turn_key: turnKey }),
+      toolOkLine("pnpm test", { seq: seqBase + 1, turn_key: turnKey, program_token: "pm test", output_head: "ok" }),
+      assistantLine("We decided to use pnpm test for the suite in this repository.", { seq: seqBase + 2, turn_key: turnKey }),
+    ];
+    const descriptor = descriptorFromLines(lines, { sessionId, turnKey });
+    expect(descriptor.flags).toEqual({ decision: 1 });
+    expect(descriptor.evidence_weight).toBe(0);
+    return applyRun(db, { descriptor, lines, output: outputFixture([factFixture({ action: "reinforce", target_memory_id: id, evidence_refs: ["e2"], knowledge_kind: "correction" })]), now });
+  }
+
+  test("the consolidator's own override downgrade (runDream → fireAndOverride) gates re-escalation: the overriding session cannot climb the row back, a session begun afterwards can", async () => {
+    const { id } = learn();
+    // Evidence 2 over two sessions (the second episode weighs 0): the ladder applies while evidence stays < 3.
+    const up = decisionReinforceFrom(id, "session-z", "p80", 8000, isoPlus(REPLAY_NOW, { hours: 1 }));
+    expect(up.op.report.escalated).toEqual([id]);
+    expect(memories.getById(id)).toMatchObject({ enforcement: "soft_deny", evidenceScore: 2, distinctSessionCount: 2 });
+
+    // Three overrides of the soft_deny (what the stop hook's fire roll-up writes), then the real consolidation step.
+    memories.recordFire(id, { at: isoPlus(REPLAY_NOW, { hours: 2 }), count: 3, overrideDelta: 3 });
+    const downgradedAt = isoPlus(REPLAY_NOW, { days: 1 });
+    db.run("BEGIN");
+    const dream = await runDream(db, { paths: resolvePaths(join(tmpdir(), "hm-reconcile-replay-unused")), config: DEFAULT_CONFIG, now: downgradedAt, skipFiles: true });
+    db.run("COMMIT");
+    expect(dream.report.errors).toEqual([]);
+    expect(dream.report.downgraded).toEqual([id]);
+    expect(memories.getById(id)?.enforcement).toBe("advise");
+    const audit = db.exec(`SELECT event_type, created_at FROM audit_log WHERE event_type = '${OVERRIDE_DOWNGRADE_EVENT}'`);
+    expect(audit[0]?.values).toEqual([[OVERRIDE_DOWNGRADE_EVENT, downgradedAt]]);
+
+    // session-z recorded an episode before the downgrade: its reinforce must not ping-pong the row back up.
+    const same = reinforceFrom(id, "session-z", "p81", 8100, isoPlus(REPLAY_NOW, { days: 1, hours: 1 }));
+    expect(same.op.report.reinforced).toEqual([id]);
+    expect(same.op.report.escalated).toEqual([]);
+    expect(memories.getById(id)?.enforcement).toBe("advise");
+
+    // A session that began after the downgrade reinforces it: the ladder applies again.
+    const freshAt = isoPlus(REPLAY_NOW, { days: 2 });
+    const freshLines = bareFailureLines("p82", 8200).map((line) => ({ ...line, ts: freshAt }) as LedgerLine);
+    const fresh = applyRun(db, {
+      descriptor: descriptorFromLines(freshLines, { sessionId: "session-after", turnKey: "p82" }),
+      lines: freshLines,
+      output: outputFixture([factFixture({ action: "reinforce", target_memory_id: id, evidence_refs: ["e1"], knowledge_kind: "failure_resolution" })]),
+      now: freshAt,
+    });
+    expect(fresh.op.report.escalated).toEqual([id]);
+    expect(memories.getById(id)?.enforcement).toBe("soft_deny");
+  });
+});
+
+describe("A′ remember-as-human: a create of a remember turn citing the remember prompt is a human rule at once", () => {
+  const REMEMBER_PROMPT = "앞으로 커밋하기 전에 꼭 pnpm lint를 돌려. 기억해.";
+
+  /** Remember prompt (e1) → `pnpm lint` ok (e2) → Read package.json (e3, scope ref for signature-less facts) → Stop. */
+  function rememberLines(turnKey: string, seqBase: number): LedgerLine[] {
+    return [
+      promptLine(REMEMBER_PROMPT, { seq: seqBase, turn_key: turnKey, remember: 1 }),
+      toolOkLine("pnpm lint", { seq: seqBase + 1, turn_key: turnKey, program_token: "pm lint", output_head: "ok" }),
+      toolOkLine("package.json", { seq: seqBase + 2, turn_key: turnKey, tool: "read", host_tool: "Read", shell_dialect: null, scope_refs: ["package.json"] }),
+      assistantLine("pnpm lint passes; it runs before every commit in this repository.", { seq: seqBase + 3, turn_key: turnKey }),
+    ];
+  }
+
+  const policyFact = () =>
+    factFixture({
+      type: "policy",
+      summary: "Run pnpm lint before every git commit in this repository.",
+      details: "Lint must pass before a commit is made; pnpm is the package manager of this repository.",
+      trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "git commit" },
+      knowledge_kind: "convention",
+      evidence_refs: ["e1"],
+      confidence: 0.9,
+      aliases: ["커밋 전 린트"],
+    });
+
+  test("policy + signature → human / active / remember / confirm (hard policy), no TTL, no candidate path, no invented transition", () => {
+    const lines = rememberLines("p70", 7100);
+    const descriptor = descriptorFromLines(lines, { sessionId: "session-r", turnKey: "p70" });
+    expect(descriptor.flags).toEqual({ remember: 1 });
+    expect(descriptor.evidence_weight).toBe(3);
+    const result = applyRun(db, { descriptor, lines, output: outputFixture([policyFact()], "The user asked to keep the lint-before-commit rule.") });
+    expect(result.op.report.created).toHaveLength(1);
+    const id = result.op.report.created[0]!;
+    expect(result.op.report.remembered).toEqual([id]);
+    expect(result.op.report.activated).toEqual([]);
+    expect(result.op.report.proposals).toEqual([]);
+    expect(result.op.report.outcomes[0]).toMatchObject({ outcome: "created", memory_id: id, detail: "remember:active" });
+    const memory = memories.getById(id)!;
+    expect(memory).toMatchObject({
+      type: "policy",
+      status: "active",
+      statusReason: "remember",
+      authority: "human",
+      enforcement: "confirm",
+      policySubtype: "hard",
+      promotionSource: "manual",
+      sourceKind: "extraction",
+      knowledgeKind: "convention",
+      ttlExpiresAt: null,
+      revalidateAfter: null,
+      importUnconfirmed: 0,
+      signatureKey: "bash|command|cmd|git commit",
+      sourceRef: `episode:${descriptor.id}`,
+      lastVerifiedAt: descriptor.closed_at,
+    });
+    expect(memory.lifecycleTriggers).toEqual(["before_tool"]);
+    expect(memory.confidence).toBe(0.9);
+    expect(new TransitionRepository(db).listForMemory(id)).toEqual([]);
+    expect(new ProvenanceRepository(db).listForMemory(id)).toEqual([expect.objectContaining({ relation: "origin", episodeId: descriptor.id })]);
+    expect(new ProposalRepository(db).countOpen()).toBe(0);
+    expect(derivedRulesConsistent(db)).toBe(true);
+  });
+
+  test("pitfall + signature → soft_deny; policy without signature → advise; workflow → advise (human, active, remember) — one remember turn each", () => {
+    const cases = [
+      { turnKey: "p71", seqBase: 7200, session: "session-r2a", fact: factFixture({ type: "pitfall", summary: "Never run npm run lint here; the lint script exists for pnpm only.", trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "npm run lint" }, knowledge_kind: "convention", evidence_refs: ["e1"], aliases: [] }), expected: ["pitfall", "soft_deny", null] },
+      { turnKey: "p71b", seqBase: 7210, session: "session-r2b", fact: factFixture({ type: "policy", summary: "Linting is part of the definition of done for every change.", trigger_signature: null, scope_glob: "package.json", lifecycle_triggers: ["before_model"], knowledge_kind: "convention", evidence_refs: ["e1"], aliases: [] }), expected: ["policy", "advise", null] },
+      { turnKey: "p71c", seqBase: 7220, session: "session-r2c", fact: factFixture({ type: "workflow", summary: "Lint with pnpm lint, then commit the staged changes.", trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "pnpm lint" }, knowledge_kind: "convention", evidence_refs: ["e1"], aliases: [] }), expected: ["workflow", "advise", null] },
+    ] as const;
+    for (const { turnKey, seqBase, session, fact, expected } of cases) {
+      const lines = rememberLines(turnKey, seqBase);
+      const result = applyRun(db, { descriptor: descriptorFromLines(lines, { sessionId: session, turnKey }), lines, output: outputFixture([fact]) });
+      expect(result.op.report.created, turnKey).toHaveLength(1);
+      expect(result.op.report.remembered, turnKey).toEqual(result.op.report.created);
+      const row = memories.getById(result.op.report.created[0]!)!;
+      expect([row.type, row.enforcement, row.policySubtype], turnKey).toEqual(expected);
+      expect(row, turnKey).toMatchObject({ authority: "human", status: "active", statusReason: "remember", ttlExpiresAt: null });
+    }
+  });
+
+  test("facts of the same remember episode that cite only tool lines, and reinforce facts, follow the automatic path", () => {
+    const auto = memories.create(autoMemory({ status: "active", enforcement: "advise", knowledgeKind: "convention", summary: "Use pnpm for every script in this repository." }));
+    const lines = rememberLines("p72", 7300);
+    const descriptor = descriptorFromLines(lines, { sessionId: "session-r3", turnKey: "p72" });
+    const facts = [
+      policyFact(),
+      factFixture({ type: "architecture_constraint", summary: "This repository is linted through pnpm; npm has no lint script.", trigger_signature: null, lifecycle_triggers: ["before_model"], knowledge_kind: "convention", evidence_refs: ["e2"], aliases: ["lint"] }),
+      factFixture({ action: "reinforce", target_memory_id: auto.id, type: "pitfall", summary: "Use pnpm for every script in this repository.", lifecycle_triggers: ["before_model"], knowledge_kind: "convention", evidence_refs: ["e1"], aliases: [] }),
+    ];
+    const result = applyRun(db, { descriptor, lines, output: outputFixture(facts) });
+    expect(result.op.report.outcomes.map((outcome) => outcome.outcome)).toEqual(["created", "created", "reinforced"]);
+    expect(result.op.report.created).toHaveLength(2);
+    const [ruleId, constraintId] = result.op.report.created as [string, string];
+    expect(result.op.report.remembered).toEqual([ruleId]);
+    expect(memories.getById(ruleId)).toMatchObject({ authority: "human", status: "active", statusReason: "remember" });
+    // Tool-line-only create: auto candidate behind an activate_global proposal (no signature, global scope).
+    expect(memories.getById(constraintId)).toMatchObject({ authority: "auto", status: "candidate", enforcement: "advise", statusReason: null });
+    expect(result.op.report.outcomes[1]?.detail).toContain("tier=candidate:scope");
+    expect(new ProposalRepository(db).listOpen({ targetId: constraintId }).map((proposal) => proposal.kind)).toEqual(["activate_global"]);
+    // Reinforce of an existing auto row: counters only, still auto (the remember flag is not a blanket approval).
+    expect(result.op.report.reinforced).toEqual([auto.id]);
+    expect(memories.getById(auto.id)).toMatchObject({ authority: "auto", status: "active", evidenceCount: 1 });
+  });
+
+  test("a remember create whose claim already lives as an auto candidate promotes that twin to a human remember row", () => {
+    const first = bareFailureLines("p73", 7400);
+    const seed = applyRun(db, { descriptor: descriptorFromLines(first, { sessionId: "session-a", turnKey: "p73" }), lines: first, output: outputFixture([factFixture({ knowledge_kind: "failure_resolution", evidence_refs: ["e1"] })]) });
+    const twinId = seed.op.report.created[0]!;
+    expect(memories.getById(twinId)).toMatchObject({ status: "candidate", authority: "auto", enforcement: "advise" });
+
+    const lines = [
+      promptLine("아니, npm test 말고 pnpm test. 앞으로 기억해.", { seq: 7500, turn_key: "p74", correction: 1, remember: 1 }),
+      assistantLine("pnpm test it is.", { seq: 7501, turn_key: "p74" }),
+    ];
+    const descriptor = descriptorFromLines(lines, { sessionId: "session-r4", turnKey: "p74" });
+    expect(descriptor.flags).toEqual({ correction: 1, remember: 1 });
+    const result = applyRun(db, { descriptor, lines, output: outputFixture([factFixture({ evidence_refs: ["e1"] })]), now: isoPlus(REPLAY_NOW, { hours: 1 }) });
+    expect(result.op.report.created).toEqual([]);
+    expect(result.op.report.reinforced).toEqual([twinId]);
+    expect(result.op.report.remembered).toEqual([twinId]);
+    expect(result.op.report.activated).toEqual([]);
+    expect(result.op.report.outcomes[0]).toMatchObject({ outcome: "reinforced", memory_id: twinId });
+    expect(result.op.report.outcomes[0]?.detail).toContain("remember:active");
+    const twin = memories.getById(twinId)!;
+    expect(twin).toMatchObject({ status: "active", statusReason: "remember", authority: "human", promotionSource: "manual", enforcement: "soft_deny", ttlExpiresAt: null, revalidateAfter: null, evidenceCount: 2 });
+    const transitions = new TransitionRepository(db).listForMemory(twinId);
+    expect(transitions).toEqual([expect.objectContaining({ fromStatus: "candidate", toStatus: "active", actor: "human", extractionRunId: result.runId })]);
+    expect(transitions[0]!.reason).toBe(`remember:episode ${descriptor.id}`);
+  });
+
+  test("a human twin is only reinforced; a recent reject of the same claim does not block the user's request", () => {
+    const human = memories.create(humanMemory({ type: "policy", status: "active", enforcement: "advise", summary: "Run pnpm lint before every git commit in this repository.", details: "Lint must pass before a commit is made; pnpm is the package manager of this repository.", scopeGlob: "**/*", lifecycleTriggers: ["before_tool"], triggerSignature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "git commit" }, signatureKey: "bash|command|cmd|git commit", knowledgeKind: "manual", confidence: 0.7 }));
+    const lines = rememberLines("p75", 7600);
+    const result = applyRun(db, { descriptor: descriptorFromLines(lines, { sessionId: "session-r5", turnKey: "p75" }), lines, output: outputFixture([policyFact()]) });
+    expect(result.op.report.created).toEqual([]);
+    expect(result.op.report.reinforced).toEqual([human.id]);
+    expect(result.op.report.remembered).toEqual([]);
+    expect(memories.getById(human.id)).toMatchObject({ authority: "human", status: "active", enforcement: "advise", statusReason: null, confidence: 0.7, evidenceCount: 1 });
+
+    // A claim rejected yesterday is re-created as a new live row when the user asks to remember it.
+    db.run("UPDATE memories SET status = 'rejected', status_reason = 'human', updated_at = ? WHERE id = ?", [isoPlus(REPLAY_NOW, { hours: 1 }), human.id]);
+    const again = applyRun(db, { descriptor: descriptorFromLines(rememberLines("p76", 7700), { sessionId: "session-r6", turnKey: "p76" }), lines: rememberLines("p76", 7700), output: outputFixture([policyFact()]), now: isoPlus(REPLAY_NOW, { hours: 2 }) });
+    expect(again.op.report.outcomes[0]).toMatchObject({ outcome: "created", detail: "remember:active" });
+    expect(again.op.report.created).toHaveLength(1);
+    expect(again.op.report.created[0]).not.toBe(human.id);
+    expect(memories.getById(again.op.report.created[0]!)).toMatchObject({ status: "active", authority: "human", statusReason: "remember" });
+  });
+
+  test("an import episode flagged remember keeps the import path (human import row, unconfirmed, advise)", () => {
+    const lines: LedgerLine[] = [promptLine("Always run pnpm lint before committing; remember it.", { seq: 1, turn_key: "import", remember: 1 })];
+    const descriptor: EpisodeDescriptor = { ...descriptorFromLines(lines, { sessionId: "import-3", turnKey: "import" }), host: "import", close_reason: "import", ledger_ref: "import:CLAUDE.md#L7" };
+    expect(descriptor.flags.remember).toBe(1);
+    const result = applyRun(db, { descriptor, lines, output: outputFixture([factFixture({ summary: "Run pnpm lint before every commit in this repository.", trigger_signature: null, lifecycle_triggers: ["before_model"], evidence_refs: ["e1"], knowledge_kind: "convention" })]) });
+    expect(result.op.report.remembered).toEqual([]);
+    expect(memories.getById(result.op.report.created[0]!)).toMatchObject({ authority: "human", sourceKind: "import", knowledgeKind: "import", importUnconfirmed: 1, enforcement: "advise", statusReason: null });
+  });
+
+  test("a prompt the hook flagged `remember` for recall talk ('I don't remember whether …') is not a request: the fact stays on the automatic path", () => {
+    const lines: LedgerLine[] = [
+      promptLine("I don't remember whether this repo uses npm or pnpm — check and run the tests", { seq: 8800, turn_key: "p88", correction: 1, remember: 1 }),
+      toolFailLine("npm test", "Exit code 1\nnpm ERR! Missing script: \"test\"", { seq: 8801, turn_key: "p88", program_token: "pm test", exit_code: 1, failure_class: "exit_1" }),
+      toolOkLine("pnpm test", { seq: 8802, turn_key: "p88", program_token: "pm test", output_head: "ok" }),
+      assistantLine("pnpm test passes; npm has no test script here.", { seq: 8803, turn_key: "p88" }),
+    ];
+    const descriptor = descriptorFromLines(lines, { sessionId: "session-r13", turnKey: "p88" });
+    expect(descriptor.flags.remember).toBe(1);
+    const result = applyRun(db, { descriptor, lines, output: outputFixture([factFixture({ evidence_refs: ["e1"] })]) });
+    expect(result.op.report.created).toHaveLength(1);
+    expect(result.op.report.remembered).toEqual([]);
+    const id = result.op.report.created[0]!;
+    // The automatic path as usual: an auto row, activated by decideTier on the evidence, at the auto default (advise).
+    expect(result.op.report.activated).toEqual([id]);
+    expect(memories.getById(id)).toMatchObject({ authority: "auto", status: "active", enforcement: "advise", promotionSource: "auto" });
+    expect(memories.getById(id)?.statusReason).not.toBe("remember");
+    expect(result.op.report.outcomes[0]?.detail ?? "").not.toContain("remember:active");
+  });
+
+  test("at most REMEMBER_MAX_PER_EPISODE (2) creates of one remember turn become human rules; the third follows the automatic path", () => {
+    const lines = rememberLines("p89", 8900);
+    const descriptor = descriptorFromLines(lines, { sessionId: "session-r14", turnKey: "p89" });
+    // Three distinct claims (no Jaccard neighbours, so none collapses into another), all citing the remember prompt.
+    const facts = [
+      factFixture({ type: "pitfall", summary: "Never run npm run lint here; the lint script exists for pnpm only.", trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "npm run lint" }, knowledge_kind: "convention", evidence_refs: ["e1"], aliases: [] }),
+      factFixture({ type: "workflow", summary: "Lint with pnpm lint, then commit the staged changes.", trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "pnpm lint" }, knowledge_kind: "convention", evidence_refs: ["e1"], aliases: [] }),
+      factFixture({ type: "pitfall", summary: "Deploy only through the release workflow; manual pushes to production are forbidden.", details: "Production deploys go through CI.", trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "git push" }, knowledge_kind: "convention", evidence_refs: ["e1"], aliases: [] }),
+    ];
+    const result = applyRun(db, { descriptor, lines, output: outputFixture(facts) });
+    expect(REMEMBER_MAX_PER_EPISODE).toBe(2);
+    expect(result.op.report.created).toHaveLength(3);
+    expect(result.op.report.remembered).toEqual(result.op.report.created.slice(0, 2));
+    const rows = result.op.report.created.map((id) => memories.getById(id)!);
+    expect(rows.map((row) => [row.authority, row.statusReason, row.enforcement])).toEqual([
+      ["human", "remember", "soft_deny"],
+      ["human", "remember", "advise"],
+      ["auto", expect.not.stringMatching(/^remember$/), "advise"],
+    ]);
+    expect(result.op.report.outcomes.map((outcome) => (outcome.detail ?? "").includes("remember:active"))).toEqual([true, true, false]);
+  });
+
+  test("an already-active auto twin is adopted: human, status_reason remember, an active → active transition by human, the remember enforcement, and the notice anchor at this episode's close", () => {
+    const learned = applyRun(db, { descriptor: descriptorFromLines(s01), lines: s01, output: outputFixture([factFixture({ evidence_refs: ["e1"] })]) });
+    const twinId = learned.op.report.created[0]!;
+    expect(memories.getById(twinId)).toMatchObject({ status: "active", authority: "auto", enforcement: "advise" });
+
+    const at = isoPlus(REPLAY_NOW, { hours: 1 });
+    const lines = [
+      promptLine("아니, npm test 말고 pnpm test. 앞으로 기억해.", { seq: 7800, turn_key: "p78", correction: 1, remember: 1 }),
+      assistantLine("pnpm test it is.", { seq: 7801, turn_key: "p78" }),
+    ];
+    const descriptor = descriptorFromLines(lines, { sessionId: "session-r7", turnKey: "p78", now: at });
+    const result = applyRun(db, { descriptor, lines, output: outputFixture([factFixture({ evidence_refs: ["e1"] })]), now: at });
+    expect(result.op.report.created).toEqual([]);
+    expect(result.op.report.reinforced).toEqual([twinId]);
+    expect(result.op.report.remembered).toEqual([twinId]);
+    expect(result.op.report.escalated).toEqual([]);
+    expect(result.op.report.activated).toEqual([]);
+    expect(result.op.report.outcomes[0]).toMatchObject({ outcome: "reinforced", memory_id: twinId });
+    expect(result.op.report.outcomes[0]?.detail).toContain("remember:active");
+    const twin = memories.getById(twinId)!;
+    expect(twin).toMatchObject({
+      status: "active",
+      statusReason: "remember",
+      authority: "human",
+      promotionSource: "manual",
+      enforcement: "soft_deny",
+      ttlExpiresAt: null,
+      revalidateAfter: null,
+      lastVerifiedAt: descriptor.closed_at,
+      updatedAt: at,
+      evidenceCount: 2,
+      distinctSessionCount: 2,
+    });
+    expect(Date.parse(twin.createdAt)).toBeLessThan(Date.parse(twin.lastVerifiedAt!));
+    const transitions = new TransitionRepository(db).listForMemory(twinId);
+    expect(transitions.map((row) => [row.fromStatus, row.toStatus, row.actor, row.reason])).toEqual([
+      ["candidate", "active", "auto_rule", "decideTier"],
+      ["active", "active", "human", `remember:episode ${descriptor.id}`],
+    ]);
+    expect(transitions[1]).toMatchObject({ extractionRunId: result.runId, createdAt: at });
+    // What the snapshot carries is enough for the SessionStart notice (anchor = last_verified_at, not the old created_at)
+    // and for the `[remember]` tag of memory:list.
+    const snapshotView = { id: twinId, summary: twin.summary, status: twin.status, authority: twin.authority, status_reason: twin.statusReason, created_at: twin.createdAt, last_verified_at: twin.lastVerifiedAt };
+    expect(isRecentRememberRow(snapshotView, Date.parse(isoPlus(at, { hours: 2 })))).toBe(true);
+    expect(isRecentRememberRow({ ...snapshotView, last_verified_at: null }, Date.parse(isoPlus(at, { hours: 2 })))).toBe(true);
+    expect(isRecentRememberRow({ ...snapshotView, last_verified_at: null }, Date.parse(isoPlus(at, { days: 2 })))).toBe(false);
+    expect(memoryTableRow(twin)[6]).toContain("[remember]");
+    expect(derivedRulesConsistent(db)).toBe(true);
+  });
+
+  test("a stale (ttl_expired) auto twin is adopted: stale → active by human with status_reason remember, no TTL, the remember enforcement", () => {
+    const learned = applyRun(db, { descriptor: descriptorFromLines(s01), lines: s01, output: outputFixture([factFixture({ evidence_refs: ["e1"] })]) });
+    const twinId = learned.op.report.created[0]!;
+    transitionMemory(db, { memoryId: twinId, to: "stale", actor: "expiry", reason: "ttl_expired", now: isoPlus(REPLAY_NOW, { minutes: 30 }), statusReason: "ttl_expired" });
+    expect(memories.getById(twinId)).toMatchObject({ status: "stale", statusReason: "ttl_expired", authority: "auto" });
+
+    const lines = [
+      promptLine("아니, npm test 말고 pnpm test. 앞으로 기억해.", { seq: 7850, turn_key: "p79", correction: 1, remember: 1 }),
+      assistantLine("pnpm test it is.", { seq: 7851, turn_key: "p79" }),
+    ];
+    const result = applyRun(db, { descriptor: descriptorFromLines(lines, { sessionId: "session-r15", turnKey: "p79" }), lines, output: outputFixture([factFixture({ evidence_refs: ["e1"] })]), now: isoPlus(REPLAY_NOW, { hours: 1 }) });
+    expect(result.op.report.remembered).toEqual([twinId]);
+    expect(result.op.report.reinforced).toEqual([twinId]);
+    expect(result.op.report.activated).toEqual([]);
+    expect(memories.getById(twinId)).toMatchObject({ status: "active", statusReason: "remember", authority: "human", promotionSource: "manual", enforcement: "soft_deny", ttlExpiresAt: null, revalidateAfter: null });
+    expect(new TransitionRepository(db).listForMemory(twinId).map((row) => [row.fromStatus, row.toStatus, row.actor, row.reason.split(":")[0]])).toEqual([
+      ["candidate", "active", "auto_rule", "decideTier"],
+      ["active", "stale", "expiry", "ttl_expired"],
+      ["stale", "active", "human", "remember"],
+    ]);
+  });
+
+  test("a remembered rule the user demoted comes back when asked again: stale human twin → active by human, status_reason remember; enforcement climbs to the remember default but a higher human setting is kept", () => {
+    const first = applyRun(db, { descriptor: descriptorFromLines(rememberLines("p83", 8300), { sessionId: "session-r8", turnKey: "p83" }), lines: rememberLines("p83", 8300), output: outputFixture([policyFact()]) });
+    const id = first.op.report.created[0]!;
+    expect(memories.getById(id)).toMatchObject({ status: "active", statusReason: "remember", enforcement: "confirm" });
+    // hm memory:demote (active → stale by human) after the user had lowered the enforcement by hand.
+    memories.setEnforcement(id, "advise", isoPlus(REPLAY_NOW, { minutes: 9 }));
+    transitionMemory(db, { memoryId: id, to: "stale", actor: "human", reason: "cli:memory:demote", now: isoPlus(REPLAY_NOW, { minutes: 10 }) });
+    expect(memories.getById(id)).toMatchObject({ status: "stale", statusReason: "human", authority: "human", enforcement: "advise" });
+
+    const again = applyRun(db, { descriptor: descriptorFromLines(rememberLines("p84", 8400), { sessionId: "session-r9", turnKey: "p84" }), lines: rememberLines("p84", 8400), output: outputFixture([policyFact()]), now: isoPlus(REPLAY_NOW, { hours: 1 }) });
+    expect(again.op.report.created).toEqual([]);
+    expect(again.op.report.reinforced).toEqual([id]);
+    expect(again.op.report.remembered).toEqual([id]);
+    expect(again.op.report.outcomes[0]).toMatchObject({ outcome: "reinforced", memory_id: id });
+    expect(again.op.report.outcomes[0]?.detail).toContain("remember:active");
+    expect(memories.getById(id)).toMatchObject({ status: "active", statusReason: "remember", authority: "human", promotionSource: "manual", enforcement: "confirm", ttlExpiresAt: null, evidenceCount: 2 });
+    expect(new TransitionRepository(db).listForMemory(id).map((row) => [row.fromStatus, row.toStatus, row.actor, row.reason.split(":")[0]])).toEqual([
+      ["active", "stale", "human", "cli"],
+      ["stale", "active", "human", "remember"],
+    ]);
+
+    // Demoted again after the user raised it to deny: the request brings it back at deny (never lowered).
+    memories.setEnforcement(id, "deny", isoPlus(REPLAY_NOW, { hours: 2 }));
+    transitionMemory(db, { memoryId: id, to: "stale", actor: "human", reason: "cli:memory:demote", now: isoPlus(REPLAY_NOW, { hours: 2 }) });
+    const third = applyRun(db, { descriptor: descriptorFromLines(rememberLines("p85", 8500), { sessionId: "session-r10", turnKey: "p85" }), lines: rememberLines("p85", 8500), output: outputFixture([policyFact()]), now: isoPlus(REPLAY_NOW, { hours: 3 }) });
+    expect(third.op.report.remembered).toEqual([id]);
+    expect(memories.getById(id)).toMatchObject({ status: "active", statusReason: "remember", enforcement: "deny", evidenceCount: 3 });
+  });
+
+  test.each([
+    { level: "off" as const, turnKey: "p86", seqBase: 8600, session: "session-r11" },
+    { level: "shadow" as const, turnKey: "p87", seqBase: 8700, session: "session-r12" },
+  ])("autonomy_level $level: decideTier activates nothing, but the user's own request still yields an active human rule (like hm memory:add); the tool-only fact waits", ({ level, turnKey, seqBase, session }) => {
+    const config = { ...DEFAULT_CONFIG, autonomy_level: level };
+    const lines = rememberLines(turnKey, seqBase);
+    const facts = [
+      factFixture({ type: "pitfall", summary: "Never run npm run lint here; the lint script exists for pnpm only.", trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "npm run lint" }, knowledge_kind: "convention", evidence_refs: ["e1"], aliases: [] }),
+      // Cites only the tool line and shares no vocabulary with the first claim (no neighbour collapse).
+      factFixture({ type: "pitfall", summary: "Deploy only through the release workflow; manual pushes to production are forbidden.", details: "Production deploys go through CI.", trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "git push" }, knowledge_kind: "convention", evidence_refs: ["e2"], aliases: [] }),
+    ];
+    const result = applyRun(db, { descriptor: descriptorFromLines(lines, { sessionId: session, turnKey }), lines, output: outputFixture(facts), config });
+    expect(result.op.report.created).toHaveLength(2);
+    const [ruleId, toolOnlyId] = result.op.report.created as [string, string];
+    expect(result.op.report.remembered).toEqual([ruleId]);
+    expect(result.op.report.activated).toEqual([]);
+    expect(memories.getById(ruleId)).toMatchObject({ authority: "human", status: "active", statusReason: "remember", enforcement: "soft_deny" });
+    expect(memories.getById(toolOnlyId)).toMatchObject({ authority: "auto", status: "candidate", enforcement: "advise" });
+    expect(result.op.report.outcomes[1]?.detail).toContain("tier=candidate:autonomy");
+  });
+
+  test("V3 for remember turns (Phase F): a signature-less repository-wide policy in a remember turn is accepted and becomes a human remember row at advise", () => {
+    const lines = rememberLines("p77", 7900);
+    const descriptor = descriptorFromLines(lines, { sessionId: "session-r16", turnKey: "p77" });
+    const result = applyRun(db, {
+      descriptor,
+      lines,
+      output: outputFixture([factFixture({ type: "policy", summary: "Always answer in Korean in this repository.", details: "The user asked for Korean answers.", trigger_signature: null, scope_glob: "**/*", lifecycle_triggers: ["before_model"], knowledge_kind: "convention", evidence_refs: ["e1"], aliases: [] })]),
+    });
+    expect(result.op.report.factsAccepted).toBe(1);
+    expect(result.op.report.created).toHaveLength(1);
+    const [ruleId] = result.op.report.created as [string];
+    expect(result.op.report.remembered).toEqual([ruleId]);
+    // No signature → advise, however strong the wording; the user can raise it with hm memory:enforce.
+    expect(memories.getById(ruleId)).toMatchObject({ authority: "human", status: "active", statusReason: "remember", enforcement: "advise", scopeGlob: "**/*" });
   });
 });

@@ -91,7 +91,7 @@ describe("hm status", () => {
     expect(report.snapshot.state).toBe("fresh");
     expect(report.hooks).toEqual({ calls: 11, p95_ms: 100, p95_all_ms: 100 });
     expect(report.waiting).toBe("not_logged_in");
-    expect(report.user_version).toBe(21);
+    expect(report.user_version).toBe(22);
     expect(report.problem).toBeNull();
   });
 
@@ -133,7 +133,7 @@ describe("hm doctor", () => {
     expect(checkOf(report, "install.node").status).toBe("ok");
     expect(checkOf(report, "install.hook_script").status).toBe("ok");
     expect(checkOf(report, "db.file").status).toBe("ok");
-    expect(checkOf(report, "db.file").summary).toContain("v21");
+    expect(checkOf(report, "db.file").summary).toContain("v22");
     expect(checkOf(report, "snapshot.active").status).toBe("ok");
     expect(checkOf(report, "locks.db").status).toBe("ok");
     expect(checkOf(report, "locks.worker").status).toBe("ok");
@@ -210,7 +210,7 @@ describe("hm doctor", () => {
     writeFileSync(debugLog, ["hook PreToolUse finished with status 0", "hook Stop finished with status 0", "hook PreToolUse finished with status 1", "unrelated"].join("\n"));
     const fixed = await runHm(project, ["doctor", "--fix", "--host-debug", debugLog, "--json"]);
     const fixedReport = fixed.json<DoctorReport>();
-    expect(fixedReport.fixes.some((fix) => fix.includes("migrated v9 → v21"))).toBe(true);
+    expect(fixedReport.fixes.some((fix) => fix.includes("migrated v9 → v22"))).toBe(true);
     expect(checkOf(fixedReport, "db.file").status).toBe("ok");
     expect(checkOf(fixedReport, "host.debug").status).toBe("warn");
     expect(checkOf(fixedReport, "host.debug").summary).toContain("status 0 ×2");

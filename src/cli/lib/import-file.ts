@@ -134,6 +134,8 @@ export interface BuildImportDescriptorInput {
   now: string;
   /** Project root used to make path-like tokens in the bullet repository-relative. */
   root: string;
+  /** Uncitable context for the extractor; defaults to `(import) section: <heading>` when the bullet sits under a heading. */
+  contextRef?: string | null;
 }
 
 export function buildImportDescriptor(input: BuildImportDescriptorInput): EpisodeDescriptor {
@@ -151,7 +153,7 @@ export function buildImportDescriptor(input: BuildImportDescriptorInput): Episod
     close_reason: "import",
     ledger_ref: importSourceRef(input.sourcePath, input.bullet.line),
     correction_for: null,
-    context_ref: input.bullet.heading === null ? null : `(import) section: ${input.bullet.heading}`,
+    context_ref: input.contextRef !== undefined ? input.contextRef : input.bullet.heading === null ? null : `(import) section: ${input.bullet.heading}`,
     scope_refs: extractScopeRefs(input.bullet.text, input.root),
     tools: [],
     failure_signatures: [],

@@ -34,14 +34,15 @@ claude:  (fixes it, runs pnpm test) … Stop
             spawns the detached worker
 worker:  your own `claude -p` (headless, no tools) extracts one fact:
          pitfall · signature bash/cmd "npm test" · scope packages/api → validated →
-         active (authority auto, enforcement soft_deny, TTL 30 d) → snapshot rebuilt
-next turn, or next session:
+         active (authority auto, enforcement advise, TTL 30 d) → snapshot rebuilt
+next session:
 claude:  Bash: npm test
          └─ PreToolUse hook (≈ 50 ms, no SQLite): signature matches — `npm test`, `npm run test` and
-            `& npm.cmd test` canonicalize the same way; `pnpm test` never matches it → permissionDecision "deny":
-            "[harness-memory] PITFALL (auto, provisional): Run pnpm test from packages/api …
-             If this does not apply, call the tool again to proceed."
-claude:  Bash: pnpm test   ← the same (memory | tool) pair passes on retry within the turn
+            `& npm.cmd test` canonicalize the same way; `pnpm test` never matches it → additionalContext:
+            "[harness-memory] PITFALL (auto, provisional): Run pnpm test from packages/api …"
+            An auto rule is born at advise. When a second session confirms the correction it climbs to
+            soft_deny, and the same call is denied: "… If this does not apply, call the tool again to proceed."
+claude:  Bash: pnpm test
 ```
 
 Three ideas carry the design:
@@ -54,7 +55,7 @@ Three ideas carry the design:
 
 - **Node.js ≥ 20** (developed on 24). Hooks are plain `node` processes; the worker runs SQLite through sql.js (WASM) — no native dependencies.
 - **Claude Code ≥ 2.1.139** for exec-form hooks (`{"command": "<node>", "args": [...]}`). Older versions get shell-form hooks automatically (`--hook-form` overrides).
-- **An extraction CLI that is logged in from a terminal**: `claude` (preferred) or `codex`. Extraction runs through your own headless CLI and subscription — no API key. The desktop app's login does not count for `claude -p`; run `claude` once in a terminal and `/login`. Without it everything else still works and episodes simply wait in the queue.
+- **An extraction CLI, logged in from a terminal, for learning**: `claude` (preferred) or `codex`. Extraction runs through your own headless CLI and subscription — no API key. The login is optional for enforcement: the hooks fire every rule already in the snapshot (`hm memory:add`, imported rows) without it; turning new `hm import` bullets into typed rows and learning from your sessions — including what you ask it to remember — start after `claude auth login` (older CLIs: `claude`, then `/login`; the desktop app's login does not apply to `claude -p`). Until then bullets and episodes wait in the queue and nothing is lost.
 - Windows, macOS, Linux. On Windows, Git Bash is optional (see [below](#node-path-npx-and-windows-shells)).
 
 ## Install
@@ -78,13 +79,15 @@ harness-memory 0.6.0-rc.1 installed for Claude Code
   snapshot    built (active 0, candidates 0)
   config      C:\src\my-app\.harness-memory\config.json (created); embeddings off
   git         .claude/settings.local.json added to C:\src\my-app\.git\info\exclude
-  provider    claude — probe not_logged_in; run `claude` once in a terminal and `/login`; …
+  provider    claude — probe not_logged_in; imported and hand-added rules fire without the login; learning starts after `claude auth login`; …
   self-test   session-start ok (…, hook status ok)
   manifest    C:\src\my-app\.harness-memory\install-manifest.json
 Open Claude Code in this project; `hm status` shows what the hooks learn.
 ```
 
 No restart is needed; Claude Code picks up the settings file change. Open the project in Claude Code, work normally, and watch `hm status`. If the project has a `CLAUDE.md` or `AGENTS.md`, the install output also suggests `hm import --from CLAUDE.md`, which turns its bullets into human memories after a confirmation table.
+
+Claude Code's own **auto memory** (`~/.claude/projects/<slug>/memory/`, notes with `type: feedback`) is a second import source: `hm import --from auto-memory` turns those notes into human rules through the same confirmation table, so a correction Claude already wrote down starts being enforced at the tool boundary. The install output mentions it when such notes exist.
 
 ### What `hm install` writes
 
@@ -172,7 +175,7 @@ Every hook appends **one JSON line** (≤ 32 KB, a single `appendFileSync`, cred
 Regexes are used **only** to set flags — they never produce memory text (the v0.5 "template candidate" defect). Signals:
 
 - **correction** — the previous turn's last tool call failed, or the prompt matches correction vocabulary (`don't`, `instead`, `wrong`, `revert`, `아니`, `하지 마`, `말고`, `대신`, `틀렸`, …).
-- **remember** — `remember`, `from now on`, `기억`, `앞으로`, `절대`; `always` / `항상` only at a sentence start or together with another cue.
+- **remember** — `remember`, `from now on`, `기억`, `앞으로`, `절대`; `always` / `항상` only at a sentence start or together with another cue. The flag weights the episode (3). The human path of §7.3 additionally needs an explicit request in the prompt itself (`remember this`, `기억해`, `from now on` followed by a rule); `I don't remember whether …` never counts.
 - **failure → resolution** — a `tool_ok` for the same tool and the same path (or the same canonical program token, e.g. `pm test`) as an earlier unresolved `tool_fail`. A failing `npm test` followed by a successful `ls` is *not* a resolution; a successful `pnpm test` is.
 - **decision marker** — `decided`, `we'll use`, `switch to`, `결정`, `이제부터`, `전환`, … in the last assistant message.
 
@@ -222,7 +225,7 @@ Under `locks/db.lock` (held for seconds, never around the LLM call) the worker a
 | `memory.sqlite.prev`, `memory.sqlite.bak-v<N>`, `memory.sqlite.corrupt-<ts>`, `memory.sqlite.rollback-<ts>` | Last good copy; pre-migration backup per schema version; damaged file kept aside; file replaced by `db:rollback` | keep `.bak-v<N>` until you trust the upgrade |
 | `config.json` | Your settings (see [Configuration](#configuration)) | Yes |
 | `install-manifest.json` | What `hm install` touched | no (re-run `hm install`) |
-| `snapshot/active.v1.json`, `lexical.v1.json`, `dense.v1.bin`, `.reindex-requested` | Read model for the hooks: active memories with precompiled scope regexes and signatures, derived rules, failure index, counts; serialized MiniSearch index; optional embedding matrix | no (derived; `hm snapshot:rebuild`) |
+| `snapshot/active.v1.json`, `lexical.v1.json`, `recall.v1.json`, `dense.v1.bin`, `.reindex-requested` | Read model for the hooks: active memories with precompiled scope regexes and signatures, derived rules, failure index, counts; serialized MiniSearch index; per-episode recall summaries with their own index (when `recall.enabled`); optional embedding matrix | no (derived; `hm snapshot:rebuild`) |
 | `ledger/*.jsonl`, `state/*.json`, `state/*.notify.json` | Per-session raw events (14 d), open-turn cursor, worker → next-prompt notices | no |
 | `queue/*.json`, `raw/*.json` | Episodes waiting for extraction; provider raw output cache (24 h; invalid or suspect answers are kept as `<run>.<attempt>.json` for the same time) | no |
 | `locks/db.lock/`, `locks/worker.lock/`, `*.pid`, `embed-helper.spawn` | `mkdir`-based locks with `owner.json` heartbeats; pid files; spawn throttle | no |
@@ -254,7 +257,8 @@ Under `locks/db.lock` (held for seconds, never around the LLM call) the worker a
 |---|---|---|
 | hard `policy` with a signature; a **confirmed** import rule with `never` / `must not` / `always` / `do not` / `절대` / `반드시` / `항상` and a signature | human | `confirm` (`before_tool.hard_policy`) |
 | soft policy, policy without a signature, `hm import --yes` rows (`import_unconfirmed = 1`), other imports | human | `advise` |
-| auto `pitfall` with a specific signature and `knowledge_kind ∈ {correction, failure_resolution}` | auto | `soft_deny` (`before_tool.auto_enforcement`) |
+| auto `pitfall` with a specific signature and `knowledge_kind ∈ {correction, failure_resolution}` | auto | `advise` (`before_tool.auto_enforcement`); climbs to `soft_deny` when a second session reinforces it (`before_tool.auto_escalation`, default `{ enabled: true, sessions: 2 }`; `autonomy_level: shadow` never climbs; a row downgraded by overrides climbs again only after a new session reinforces it). Shown in `hm memory:history` as `active (enforcement) by auto_rule` |
+| a rule from a turn with an explicit remember request (`remember this`, `기억해`, `from now on` + a rule) whose fact cites that prompt line | human (`status_reason remember`, active at once, at most 2 per turn) | policy with a signature → `confirm` (`before_tool.hard_policy`); pitfall with a signature → `soft_deny`; everything else → `advise`. Named at `SessionStart` for 24 h with its undo (`hm memory:demote <id>`); the automatic path never touches it afterwards |
 | every other auto row (`pitfall` without signature, `workflow`, `decision`, `architecture_constraint`) | auto | `advise` |
 
 ### Auto tier — when a memory activates on its own
@@ -281,7 +285,7 @@ Review is exception handling, with a budget (≤ 3 items per active day is the d
 | trigger | Claude Code hook | what | budget |
 |---|---|---|---|
 | `session_start` | `SessionStart` | active rows with `session_start` in their triggers and type baseline / `decision` / `architecture_constraint` / `workflow`; plus the daily digest `systemMessage` | 5 items / 3 KB |
-| `before_model` | `UserPromptSubmit` (once per user turn) | baseline rows always; other rows when their scope intersects path tokens in the prompt (or the last touched file) **and** BM25 over summary / details / aliases ≥ `before_model.min_score` — or, with the embedding helper, cosine ≥ 0.80 | 5 items / 3 KB |
+| `before_model` | `UserPromptSubmit` (once per user turn) | baseline rows always; other rows when their scope intersects path tokens in the prompt (or the last touched file) **and** BM25 over summary / details / aliases ≥ `before_model.min_score` — or, with the embedding helper, cosine ≥ 0.80; then, when `recall.enabled` is on, up to `before_model.recall.max_items` summaries of past episodes from other sessions (`[harness-memory] RECALL <date>: …`, BM25 over `snapshot/recall.v1.json` ≥ `before_model.recall.min_score`, plain context, never enforced) | 5 items / 3 KB (+ 2 items / 1 KB recall) |
 | `before_tool` | `PreToolUse` | the ladder above | 3 items / 2 KB |
 | `after_tool` | `PostToolUseFailure` | `failure_index[failure_class]` hints (e.g. memories about `enoent` on this tool) as `additionalContext` | 2 items / 1 KB |
 
@@ -308,12 +312,15 @@ hm install --host claude --with-embeddings   # npm install @xenova/transformers 
 |---|---|---|
 | `autonomy_level` | `standard` | `off` / `shadow` / `standard` (see above) |
 | `before_tool.max_items` / `max_bytes` | 3 / 2048 | injection budget at `PreToolUse` |
-| `before_tool.auto_enforcement` | `soft_deny` | default for correction / failure-derived auto pitfalls with a signature (`soft_deny` or `advise`) |
+| `before_tool.auto_enforcement` | `advise` | where correction / failure-derived auto pitfalls with a signature are born (`advise` or `soft_deny`) |
+| `before_tool.auto_escalation.enabled` / `sessions` | true / 2 | the autonomy ladder: an auto `advise` pitfall becomes `soft_deny` once its evidence spans this many sessions |
 | `before_tool.hard_policy` | `confirm` | default for hard human policies with a signature (`confirm`, `advise`, `deny`) |
 | `before_model.max_items` / `max_bytes` | 5 / 3072 | injection budget at `UserPromptSubmit` |
 | `before_model.min_score` | 0.35 | normalized BM25 threshold (`s / (s + 1)`) for non-baseline rows |
 | `before_model.dense` | `helper` | `helper` (use the embedding helper when `embeddings.enabled`) or `off` |
 | `before_model.dense_timeout_ms` | 80 | how long the prompt hook waits for the helper |
+| `before_model.recall.max_items` / `max_bytes` / `min_score` | 2 / 1024 / 0.5 | recall items appended after the memory items at `UserPromptSubmit` |
+| `recall.enabled` / `keep_episodes` | false / 300 | the recall layer (episode summaries, `snapshot/recall.v1.json`, `hm recall`); off by default until it proves useful |
 | `session_start.max_items` / `max_bytes` | 5 / 3072 | startup budget |
 | `after_tool.max_items` / `max_bytes` | 2 / 1024 | failure-hint budget |
 | `extraction.provider` | `auto` | `auto`, `claude`, `codex`, `replay` (`HARNESS_MEMORY_PROVIDER` overrides) |
@@ -345,7 +352,7 @@ Exit codes: `0` ok · `1` error · `2` usage error, unknown command, or a comman
 | `hm doctor [--fix] [--host-debug <path>] [--self-test] [--hook-script <path>]` | Cross-check manifest vs registered hooks, node path, last call per event and p95 from `hooks.log`, database (`quick_check`, `user_version`), snapshot freshness, unreachable memories, queue depth, last extraction, probe, locks, embeddings, Git Bash. `--fix` rewrites moved node / hook paths and rebuilds the snapshot; `--self-test` runs the `session-start` hook once; `--host-debug` counts `finished with status N` lines in a Claude Code debug log. |
 | `hm db:migrate` | Apply pending schema migrations under the lock (copies `memory.sqlite` to `.bak-v<N>` first) and rebuild the snapshot. |
 | `hm db:rollback [--to <version>] [--yes]` | Restore `memory.sqlite.bak-v<N>` (newest by default) after a y/N confirmation (`--yes` / `-y` when there is no TTY); keeps the replaced file as `memory.sqlite.rollback-<ts>` and removes `.prev` and the snapshot. The next writer migrates forward again — downgrade or `hm uninstall` first. |
-| `hm snapshot:rebuild` | Rebuild `snapshot/active.v1.json`, `lexical.v1.json` (and `dense.v1.bin`) from the database; migrates first when needed. |
+| `hm snapshot:rebuild` | Rebuild `snapshot/active.v1.json`, `lexical.v1.json`, `recall.v1.json` when `recall.enabled` (and `dense.v1.bin`) from the database; migrates first when needed. |
 | **Status** | |
 | `hm status` | One line: `active N (auto M) \| candidates C \| proposals P (E expiring) \| queue Q (waiting: reason) \| last extraction <ago> <status> \| probe <result> \| snapshot fresh\|stale\|missing \| p95 <ms>`, plus a `probe:` hint line when the provider needs attention. Exit 1 when not installed. |
 | **Review** | |
@@ -373,8 +380,9 @@ Exit codes: `0` ok · `1` error · `2` usage error, unknown command, or a comman
 | `hm extract [--now] [--provider <name>] [--dry-run]` | Run the extraction worker in the foreground; `--dry-run` renders the prompts without calling the provider. |
 | `hm dream` | Run consolidation now (TTL, expiry, override downgrade, merge proposals, embedding backfill, GC). |
 | `hm trace <session_key>` | Ledger timeline of a session: prompts, fired memories, tool calls, failures and resolutions. |
+| `hm recall <query> [--limit <n>] [--since <iso>]` | Search past episodes by their summaries — what `before_model` recalls when `recall.enabled` is on: prints date, session (`<host>-<key>`, usable with `hm trace`), kind (`extracted` = the extractor's summary, `derived` = the worker's deterministic one) and summary, newest-relevant first. Reads `snapshot/recall.v1.json` when it is fresh, else the database (and says which). `--since` filters on `closed_at`; the command applies no score threshold. With recall disabled it says so and exits 0. |
 | **Import** | |
-| `hm import [--from <file>] [--yes] [--sync]` | Split `CLAUDE.md` / `AGENTS.md` / `.cursorrules` bullets into import episodes, run the extractor with `action = create`, show a confirmation table and insert the confirmed rows as `human` / `import` memories with `source_ref = import:<file>#L<n>`. `--yes` skips confirmation (`import_unconfirmed = 1`, enforcement capped at `advise`, shown in `hm review`); `--sync` stales rows whose bullets disappeared. Re-runs are idempotent by line hash. |
+| `hm import [--from <file>] [--from auto-memory] [--auto-memory] [--include-project] [--memory-dir <dir>] [--yes] [--sync] [--dry-run] [--provider <name>]` | Split `CLAUDE.md` / `AGENTS.md` / `.cursorrules` bullets — or, with `--from auto-memory` (`--auto-memory`), the `type: feedback` notes of Claude Code's auto memory under `~/.claude/projects/<slug>/memory/` (`--include-project` adds `type: project` notes; `--memory-dir <dir>` names the directory when it cannot be derived) — into import episodes, run the extractor with `action = create`, show a confirmation table and insert the confirmed rows as `human` / `import` memories with `source_ref = import:<file>#L<n>` (`import:auto-memory:<file>#L<n>`). Bullets that cannot be typed yet (no extraction CLI) are stored verbatim as `advise` rows and typed later. `--yes` skips confirmation (`import_unconfirmed = 1`, enforcement capped at `advise`, shown in `hm review`); `--sync` stales rows whose bullets disappeared (directory-wide for auto-memory); `--dry-run` previews. Re-runs are idempotent by line hash. |
 | **Evaluation** | |
 | `hm eval:latency [--local] [--runs <n>] [--threshold <ms>] [--memories <n>] [--large] [--hook-script <path>]` | Spawn `dist/hook.js pre-tool` 50× against a generated 300-memory fixture and report min / p50 / p95 / max; exits 1 when p95 exceeds the budget (default 90 ms, `--threshold`). `--local` measures the installed project instead of a fixture, `--large` adds an informational 2,000-memory pass, `--hook-script` points at another `dist/hook.js`. |
 | `hm eval:replay [--scenario <ids>] [--fixtures <dir>] [--keep] [--verbose]` | Replay the recorded ledger fixtures s01–s12 through the real hooks and the worker with the replay provider and check the scenario assertions (needs the repository checkout's `test/fixtures/replay`, or `--fixtures`); exits 1 on any failing check. `--keep` leaves each scenario's temp project on disk. |

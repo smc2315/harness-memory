@@ -25,9 +25,10 @@ import type { Store } from "../../db/store";
 import { normalizeProbe, selectProvider, writeProbeCache, type ExtractionProvider } from "../../dream/extract/providers";
 import type { CommandContext, NpmRunResult } from "../context";
 import { flagBoolean, flagString, type OptionSpecs } from "../lib/args";
+import { AUTO_MEMORY_DEFAULT_TYPES, listAutoMemoryNotes, locateAutoMemory, selectAutoMemoryNotes } from "../lib/auto-memory";
 import { probeGuidance, readSnapshotFacts } from "../lib/diagnostics";
 import { sha256File, writeManifest, type InstallManifest, type ManifestFile } from "../lib/manifest";
-import { formatMs } from "../lib/output";
+import { formatMs, pluralize } from "../lib/output";
 import {
   ensureStateGitignore,
   findExecutable,
@@ -85,6 +86,8 @@ export interface InstallReport {
   git_exclude: { path: string; added: boolean; already: boolean } | null;
   /** `.harness-memory/.gitignore` (`*`), written for every scope and checkout layout; `created` is false when a file was already there. */
   git_ignore: { path: string; created: boolean };
+  /** Claude Code's auto memory directory of this project and its feedback-note count (`hm import --from auto-memory`); null when absent. */
+  auto_memory: { dir: string; notes: number } | null;
   manifest: string;
   probe: { provider: string | null; result: ProbeResult | null; skipped: boolean; guidance: string | null; detail?: string | null };
   self_test: SelfTestResult | { skipped: true; reason: string };
@@ -222,6 +225,21 @@ export async function probeForInstall(
   return { provider: provider.name, result: outcome.result, detail: outcome.detail, guidance: probeGuidance(outcome.result) };
 }
 
+/**
+ * The project's Claude Code auto memory directory and how many of its notes are `feedback` (what `hm import --from
+ * auto-memory` would take), for the install hint. Read-only; null when the directory is absent or unreadable.
+ */
+export function detectAutoMemory(ctx: Pick<CommandContext, "paths" | "env" | "platform">): InstallReport["auto_memory"] {
+  try {
+    const lookup = locateAutoMemory(ctx.paths.root, { env: ctx.env, platform: ctx.platform });
+    if (lookup.location === null) return null;
+    const notes = selectAutoMemoryNotes(listAutoMemoryNotes(lookup.location.dir).notes, AUTO_MEMORY_DEFAULT_TYPES).selected.length;
+    return { dir: lookup.location.dir, notes };
+  } catch {
+    return null;
+  }
+}
+
 export function renderInstallReport(report: InstallReport): string[] {
   const lines: string[] = [];
   lines.push(`harness-memory ${report.version} ${report.ok ? "installed" : "installed with problems"} for Claude Code`);
@@ -250,6 +268,9 @@ export function renderInstallReport(report: InstallReport): string[] {
   const importable = report.ok ? ["CLAUDE.md", "AGENTS.md"].find((name) => existsSync(join(report.root, name))) : undefined;
   if (importable !== undefined) {
     lines.push(`  import      \`hm import --from ${importable}\` turns its bullets into human memories (a confirmation table lets you pick)`);
+  }
+  if (report.ok && report.auto_memory !== null && report.auto_memory.notes > 0) {
+    lines.push(`  import      \`hm import --from auto-memory\` turns Claude Code's ${pluralize(report.auto_memory.notes, "auto-memory feedback note")} into human memories (${report.auto_memory.dir})`);
   }
   lines.push(report.ok ? "Open Claude Code in this project; `hm status` shows what the hooks learn." : "Run `hm doctor` for details.");
   return lines;
@@ -398,6 +419,7 @@ export async function runInstall(ctx: CommandContext): Promise<number> {
       snapshotFacts.counts === null ? null : { active: snapshotFacts.counts.active, candidates: snapshotFacts.counts.candidates, unreachable: snapshotFacts.counts.unreachable },
     git_exclude: gitExclude,
     git_ignore: gitIgnore,
+    auto_memory: detectAutoMemory(ctx),
     manifest: ctx.paths.manifest,
     probe,
     self_test: selfTest,

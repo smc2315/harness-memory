@@ -54,8 +54,12 @@ const STRONG_IMPORT_WORDING = /\b(?:never|must not|always|do not)\b|절대|반�
  * | memory | authority | default |
  * | policy hard + signature; confirmed import rule with strong wording + signature | human | `before_tool.hard_policy` (confirm) |
  * | policy soft or no signature; import `--yes` and other imports | human | advise |
- * | auto pitfall + signature + knowledge_kind ∈ {correction, failure_resolution} + V10 ok | auto | `before_tool.auto_enforcement` (soft_deny) |
+ * | auto pitfall + signature + knowledge_kind ∈ {correction, failure_resolution} + V10 ok | auto | `before_tool.auto_enforcement` (advise by default since A′; `soft_deny` stays selectable) |
  * | everything else (other auto pitfalls, auto workflow, decision, architecture_constraint) | — | advise |
+ *
+ * A′ ladder: the auto row of the third line is born at `before_tool.auto_enforcement` and climbs to `soft_deny`
+ * only when another session reinforces it (src/promotion/escalation.ts); a row the user asked to remember takes
+ * the human defaults instead (src/promotion/remember.ts).
  */
 export function enforcementDefault(input: EnforcementDefaultInput): Enforcement {
   const unconfirmed = input.importUnconfirmed === true || input.importUnconfirmed === 1;

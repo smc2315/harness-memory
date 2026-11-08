@@ -21,10 +21,19 @@ export interface HarnessConfig {
   schema: "config.v1";
   autonomy_level: AutonomyLevel;
   before_tool: TriggerBudget & {
-    /** Default enforcement for correction/failure-derived auto pitfalls with a specific signature. */
+    /**
+     * Enforcement an auto pitfall (correction / failure-derived, specific signature) is born with. `advise` since A′:
+     * the ladder below raises it; `soft_deny` restores the pre-A′ behaviour of blocking on the first evidence.
+     */
     auto_enforcement: "soft_deny" | "advise";
     /** Enforcement for approved hard policies with a signature. */
     hard_policy: "confirm" | "advise" | "deny";
+    /**
+     * The autonomy ladder (src/promotion/escalation.ts): an active auto pitfall at `advise` whose evidence spans
+     * ≥ `sessions` distinct sessions is raised to `soft_deny` by the reconciler when another session reinforces it.
+     * `autonomy_level` `shadow` disables the climb (auto rows never exceed advise); human rows are never touched.
+     */
+    auto_escalation: { enabled: boolean; sessions: number };
   };
   before_model: TriggerBudget & {
     /** BM25 threshold for non-baseline rows (scope intersection is also required). */
@@ -33,6 +42,13 @@ export interface HarnessConfig {
     dense: "helper" | "off";
     /** How long before_model waits for the helper's dense top-k before continuing lexical-only (ms). */
     dense_timeout_ms: number;
+    /**
+     * Recall items (past episode summaries, plain context) appended after the memory items: at most `max_items`
+     * within `max_bytes` — and only inside what the memory items left of `before_model.max_bytes`. `min_score` is the
+     * normalized BM25 threshold (`s / (s + 1)`) a summary must reach; stricter than the memory path because recall
+     * text is never enforced and competes for the same budget.
+     */
+    recall: TriggerBudget & { min_score: number };
   };
   session_start: TriggerBudget;
   after_tool: TriggerBudget;
@@ -57,6 +73,12 @@ export interface HarnessConfig {
   dream: {
     interval_hours: number;
   };
+  recall: {
+    /** False skips everything: no summaries in the snapshot, nothing injected, `hm recall` reports it off. */
+    enabled: boolean;
+    /** Newest episodes with a summary kept in `snapshot/recall.v1.json` (≈ 500 B each). */
+    keep_episodes: number;
+  };
   retention: {
     ledger_days: number;
     raw_hours: number;
@@ -74,8 +96,15 @@ export interface HarnessConfig {
 export const DEFAULT_CONFIG: HarnessConfig = {
   schema: "config.v1",
   autonomy_level: "standard",
-  before_tool: { max_items: 3, max_bytes: 2_048, auto_enforcement: "soft_deny", hard_policy: "confirm" },
-  before_model: { max_items: 5, max_bytes: 3_072, min_score: 0.35, dense: "helper", dense_timeout_ms: 80 },
+  before_tool: { max_items: 3, max_bytes: 2_048, auto_enforcement: "advise", hard_policy: "confirm", auto_escalation: { enabled: true, sessions: 2 } },
+  before_model: {
+    max_items: 5,
+    max_bytes: 3_072,
+    min_score: 0.35,
+    dense: "helper",
+    dense_timeout_ms: 80,
+    recall: { max_items: 2, max_bytes: 1_024, min_score: 0.5 },
+  },
   session_start: { max_items: 5, max_bytes: 3_072 },
   after_tool: { max_items: 2, max_bytes: 1_024 },
   extraction: {
@@ -95,6 +124,7 @@ export const DEFAULT_CONFIG: HarnessConfig = {
     cache_dir: null,
   },
   dream: { interval_hours: 6 },
+  recall: { enabled: false, keep_episodes: 300 },
   retention: { ledger_days: 14, raw_hours: 24, audit_days: 30, candidate_days: 45, proposal_days: 30 },
   log: { debug: false, max_bytes: 5 * 1024 * 1024, rotations: 3 },
 };
@@ -126,10 +156,13 @@ function pickBudget(value: unknown, fallback: TriggerBudget): TriggerBudget {
 export function mergeConfig(base: HarnessConfig, override: unknown): HarnessConfig {
   if (!isRecord(override)) return structuredClone(base);
   const beforeTool = isRecord(override.before_tool) ? override.before_tool : {};
+  const autoEscalation = isRecord(beforeTool.auto_escalation) ? beforeTool.auto_escalation : {};
   const beforeModel = isRecord(override.before_model) ? override.before_model : {};
   const extraction = isRecord(override.extraction) ? override.extraction : {};
   const embeddings = isRecord(override.embeddings) ? override.embeddings : {};
   const dream = isRecord(override.dream) ? override.dream : {};
+  const recall = isRecord(override.recall) ? override.recall : {};
+  const beforeModelRecall = isRecord(beforeModel.recall) ? beforeModel.recall : {};
   const retention = isRecord(override.retention) ? override.retention : {};
   const log = isRecord(override.log) ? override.log : {};
 
@@ -140,12 +173,20 @@ export function mergeConfig(base: HarnessConfig, override: unknown): HarnessConf
       ...pickBudget(override.before_tool, base.before_tool),
       auto_enforcement: pickEnum(beforeTool.auto_enforcement, ["soft_deny", "advise"] as const, base.before_tool.auto_enforcement),
       hard_policy: pickEnum(beforeTool.hard_policy, ["confirm", "advise", "deny"] as const, base.before_tool.hard_policy),
+      auto_escalation: {
+        enabled: pickBoolean(autoEscalation.enabled, base.before_tool.auto_escalation.enabled),
+        sessions: pickNumber(autoEscalation.sessions, base.before_tool.auto_escalation.sessions, 1),
+      },
     },
     before_model: {
       ...pickBudget(override.before_model, base.before_model),
       min_score: pickNumber(beforeModel.min_score, base.before_model.min_score),
       dense: pickEnum(beforeModel.dense, ["helper", "off"] as const, base.before_model.dense),
       dense_timeout_ms: pickNumber(beforeModel.dense_timeout_ms, base.before_model.dense_timeout_ms, 1),
+      recall: {
+        ...pickBudget(beforeModel.recall, base.before_model.recall),
+        min_score: pickNumber(beforeModelRecall.min_score, base.before_model.recall.min_score),
+      },
     },
     session_start: pickBudget(override.session_start, base.session_start),
     after_tool: pickBudget(override.after_tool, base.after_tool),
@@ -166,6 +207,10 @@ export function mergeConfig(base: HarnessConfig, override: unknown): HarnessConf
       cache_dir: typeof embeddings.cache_dir === "string" && embeddings.cache_dir.length > 0 ? embeddings.cache_dir : base.embeddings.cache_dir,
     },
     dream: { interval_hours: pickNumber(dream.interval_hours, base.dream.interval_hours) },
+    recall: {
+      enabled: pickBoolean(recall.enabled, base.recall.enabled),
+      keep_episodes: pickNumber(recall.keep_episodes, base.recall.keep_episodes),
+    },
     retention: {
       ledger_days: pickNumber(retention.ledger_days, base.retention.ledger_days, 1),
       raw_hours: pickNumber(retention.raw_hours, base.retention.raw_hours, 1),

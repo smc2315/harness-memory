@@ -12,7 +12,7 @@ For anyone with an existing `.harness-memory/memory.sqlite` written by 0.3–0.5
 | Candidates | `DreamWorker` template candidates + LLM candidates, all `**/*` + `before_model` | validated facts with scope, triggers and a trigger signature; no templates |
 | Promotion | 5-gate auto-promoter + `memory:review` | `authority` (human / auto), `decideTier`, proposals, `hm review` |
 | `before_tool` | scope glob only; warnings arrived with the tool result | tool + argument signature; `permissionDecision ask / deny` before execution |
-| Database | `user_version` 9–16 | `user_version` 21 (migrations 017–021), backups `memory.sqlite.bak-v<N>` |
+| Database | `user_version` 9–16 | `user_version` 22 (migrations 017–022), backups `memory.sqlite.bak-v<N>` |
 | Embeddings | installed by default | optional (`hm install --with-embeddings`), idle-exit helper |
 
 ## Before you upgrade
@@ -43,7 +43,7 @@ Optional but recommended: `hm import --from CLAUDE.md`. v0.5's `install` importe
 
 ## What the migrations do
 
-All five files run on a fresh connection without a surrounding transaction (017 and 021 toggle `PRAGMA foreign_keys`); atomicity comes from applying them in memory and saving via tmp + rename. `PRAGMA user_version` is set after each file; a database already at 21 is untouched, and a database newer than 21 makes the CLI refuse with "upgrade harness-memory".
+All six files run on a fresh connection without a surrounding transaction (017 and 021 toggle `PRAGMA foreign_keys`); atomicity comes from applying them in memory and saving via tmp + rename. `PRAGMA user_version` is set after each file; a database already at 22 is untouched, and a database newer than 22 makes the CLI refuse with "upgrade harness-memory".
 
 | # | file | effect |
 |---|---|---|
@@ -52,6 +52,7 @@ All five files run on a fresh connection without a surrounding transaction (017 
 | 019 | `019_proposals_provenance.sql` | Creates `proposals` (eight kinds, one open per (kind, target, candidate)), `proposal_support`, `memory_provenance` (memory ↔ episode ↔ cited line, relation `origin | reinforce | contradict | import`, confidence) and `memory_transitions` (every status change with actor and reason). Opens one `fix_scope` proposal (90 days) per row 017 flagged `needs_scope = 1`. |
 | 020 | `020_policy_rules_v2.sql` | Adds `tool_pattern`, `target_kind`, `pattern_kind`, `arg_pattern`, `enforcement`, `derived_at` to `policy_rules`. Rules with `derived_at` set are rewritten from active policy memories on every commit; your manual rules (`derived_at IS NULL`) are preserved. |
 | 021 | `021_legacy_archive.sql` | Renames `dream_evidence_events`, `dream_runs`, `dream_memory_evidence_links` to `legacy_*`; marks unconsumed legacy evidence `discarded` (it is **not** re-extracted — those blobs have no tool set or scope refs, and re-extraction would burn a day of LLM budget for nothing); drops the never-populated `topic_summaries`. The `evidence` table stays for manual notes. |
+| 022 | `022_episode_summaries.sql` | Adds `summary` (one line, ≤ 400 chars) and `summary_kind` (`extracted` = the extractor's `episode_summary`, `derived` = the worker's deterministic summary built from the descriptor and ledger lines) to `episodes` for the recall layer (`recall.enabled`, off by default). No backfill: episodes closed before the upgrade keep `NULL` and are invisible to `hm recall` until re-queued. |
 
 **Post-migrate** (same lock session, idempotent through `meta.semantic_key_backfill`): (1) v0.5 `DreamWorker` template candidates — `status = 'candidate'` rows linked from `legacy_dream_memory_evidence_links` — are `rejected` with `status_reason = migration` and a `memory_transitions` row; (2) every live row gets a `semantic_key` (`sha256(type | scope | signature | normalized summary)`); when two live rows collide, the oldest keeps the key and a `merge` proposal (30 days) is opened for the pair.
 

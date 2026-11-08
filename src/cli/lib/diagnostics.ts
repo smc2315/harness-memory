@@ -54,6 +54,8 @@ export interface DbFacts {
   lastRun: ExtractionRunRecord | null;
   probe: ProbeCache | null;
   episodes: Record<EpisodeStatus, number> | null;
+  /** Episodes the recall snapshot carries (newest `recall.keep_episodes` with a summary); null when unreadable. */
+  recallEpisodes: number | null;
   installedVersion: string | null;
   lastDreamAt: string | null;
   /** Why the database could not be read (missing, corrupt, newer than code …). */
@@ -73,6 +75,7 @@ export async function readDbFacts(store: Store, paths: HarnessPaths, config: Har
     lastRun: null,
     probe: null,
     episodes: null,
+    recallEpisodes: null,
     installedVersion: null,
     lastDreamAt: null,
     error: null,
@@ -98,6 +101,7 @@ export async function readDbFacts(store: Store, paths: HarnessPaths, config: Har
       const data = buildSnapshotData(db, paths, { now, config });
       facts.counts = data.active.counts;
       facts.unreachable = data.unreachable;
+      facts.recallEpisodes = data.recallEpisodes.length;
     });
   } catch (error) {
     facts.error = error instanceof Error ? error.message : String(error);
@@ -238,7 +242,7 @@ export function probeGuidance(result: string | null): string | null {
     case "ok":
       return null;
     case "not_logged_in":
-      return "run `claude auth login` in a terminal (older CLIs: `claude`, then `/login`); the worker re-probes within ten minutes, or run `hm install --host claude` to re-probe now; nothing is lost meanwhile";
+      return "the hooks enforce rules without the login — rules you import (`hm import`, verbatim until the extractor types them) and add (`hm memory:add`) fire as soon as they exist; learning from sessions, including what you ask it to remember, starts after `claude auth login` in a terminal (older CLIs: `claude`, then `/login`); the worker re-probes within ten minutes, or run `hm install --host claude` to re-probe now; nothing is lost meanwhile";
     case "missing":
       return "no extraction CLI found (claude or codex); install one or set HARNESS_MEMORY_CLAUDE_BIN";
     case "nested_refusal":

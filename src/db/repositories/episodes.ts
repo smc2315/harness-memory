@@ -9,6 +9,7 @@
 
 import type { Database as SqlJsDatabase } from "sql.js";
 
+import { stripControlCharacters } from "../../activation/injection";
 import {
   EPISODE_SCHEMA,
   type EpisodeDescriptor,
@@ -17,6 +18,7 @@ import {
   type FiredEntry,
 } from "../../core/episode-types";
 import { sessionKey } from "../../core/paths";
+import type { RecallSummaryKind } from "../../core/snapshot-types";
 import {
   CLOSE_REASONS,
   EPISODE_STATUSES,
@@ -30,6 +32,7 @@ import {
   addSeconds,
   correctionEpisodeSql,
   expectEnum,
+  expectNullableEnum,
   expectNullableString,
   expectNumber,
   expectString,
@@ -70,9 +73,26 @@ const EPISODE_COLUMNS = [
   "next_attempt_at",
   "last_error",
   "extraction_run_id",
+  "summary",
+  "summary_kind",
 ].join(", ");
 
 const MAX_ERROR_CHARS = 2_000;
+/** `episodes.summary` cap (migration 022); matches the extractor schema's `episode_summary` maxLength. */
+export const EPISODE_SUMMARY_MAX_CHARS = 400;
+export const EPISODE_SUMMARY_KINDS: readonly RecallSummaryKind[] = ["extracted", "derived"];
+
+/**
+ * Storage-boundary normalization shared by both summary kinds (the worker's derived text and the extractor's
+ * `episode_summary`): ANSI CSI sequences and C0 / C1 control characters removed, whitespace collapsed to one
+ * line, at most `EPISODE_SUMMARY_MAX_CHARS` (an over-long text ends in `…`). What `hm recall` prints and what
+ * the prompt hook injects is therefore terminal-safe before either strips again at render time.
+ */
+export function normalizeEpisodeSummary(summary: string): string {
+  const flat = stripControlCharacters(summary).replace(/\s+/g, " ").trim();
+  if (flat.length <= EPISODE_SUMMARY_MAX_CHARS) return flat;
+  return `${flat.slice(0, EPISODE_SUMMARY_MAX_CHARS - 1)}…`;
+}
 
 export interface EpisodeRecord {
   id: string;
@@ -100,6 +120,9 @@ export interface EpisodeRecord {
   nextAttemptAt: string | null;
   lastError: string | null;
   extractionRunId: string | null;
+  /** Recall summary (migration 022): the extractor's `episode_summary` or the worker's derived one; null until set. */
+  summary: string | null;
+  summaryKind: RecallSummaryKind | null;
 }
 
 /** Name used by the implementation plan for the leased rows. */
@@ -121,6 +144,13 @@ export interface MarkFailedOptions {
 
 export interface ListEpisodesOptions {
   limit?: number;
+}
+
+export interface ListWithSummaryOptions {
+  /** Newest `limit` episodes (closed_at DESC); -1 / undefined = all. */
+  limit?: number;
+  /** Only episodes closed at or after this ISO timestamp. */
+  since?: string | null;
 }
 
 export function isCorrectionEpisode(record: Pick<EpisodeRecord, "correctionFor" | "flags">): boolean {
@@ -376,6 +406,57 @@ export class EpisodeRepository {
     return row === null ? null : mapEpisodeRow(row);
   }
 
+  /**
+   * Stores the recall summary of an episode, normalized at this boundary (`normalizeEpisodeSummary`: one line,
+   * ANSI / C0 / C1 control characters removed, ≤ 400 chars; an empty summary is ignored). The caller decides the
+   * precedence: reconcile writes 'extracted' over anything, the worker writes 'derived' only where no summary
+   * exists yet. Import episodes (`host = 'import'`, one per CLAUDE.md / auto-memory bullet) never carry one: the
+   * bullet already reaches the model as the imported rule, so recalling it would say the same thing twice.
+   * True when the row was updated.
+   */
+  setSummary(id: string, summary: string, kind: RecallSummaryKind): boolean {
+    const flat = normalizeEpisodeSummary(summary);
+    if (flat.length === 0) return false;
+    this.db.run(
+      `
+        UPDATE episodes
+        SET summary = $summary, summary_kind = $kind
+        WHERE id = $id AND host <> 'import'
+      `,
+      { $id: id, $summary: flat, $kind: kind }
+    );
+
+    return rowsChanged(this.db) === 1;
+  }
+
+  /**
+   * Session episodes that carry a summary, newest first (the recall snapshot's source and `hm recall`'s database
+   * fallback). Import rows are excluded here as well, so `recall.keep_episodes` is never spent on a row the
+   * snapshot builder would drop anyway.
+   */
+  listWithSummary(options: ListWithSummaryOptions = {}): EpisodeRecord[] {
+    const limit = options.limit === undefined ? -1 : nonNegativeInt(options.limit, "limit");
+    const since = options.since ?? null;
+
+    return selectAll(
+      this.db,
+      `
+        SELECT ${EPISODE_COLUMNS}
+        FROM episodes
+        WHERE summary IS NOT NULL AND host <> 'import' AND ($since IS NULL OR closed_at >= $since)
+        ORDER BY closed_at DESC, id ASC
+        LIMIT $limit
+      `,
+      { $since: since, $limit: limit }
+    ).map(mapEpisodeRow);
+  }
+
+  countWithSummary(): number {
+    const row = selectOne(this.db, "SELECT COUNT(*) AS n FROM episodes WHERE summary IS NOT NULL AND host <> 'import'");
+
+    return row === null ? 0 : expectNumber(row.n, "n");
+  }
+
   countQueued(): number {
     const row = selectOne(this.db, "SELECT COUNT(*) AS n FROM episodes WHERE status = 'queued'");
 
@@ -430,5 +511,7 @@ export function mapEpisodeRow(row: SqlRow): EpisodeRecord {
     nextAttemptAt: expectNullableString(row.next_attempt_at, "next_attempt_at"),
     lastError: expectNullableString(row.last_error, "last_error"),
     extractionRunId: expectNullableString(row.extraction_run_id, "extraction_run_id"),
+    summary: expectNullableString(row.summary, "summary"),
+    summaryKind: expectNullableEnum(row.summary_kind, "summary_kind", EPISODE_SUMMARY_KINDS),
   };
 }

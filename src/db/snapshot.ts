@@ -5,6 +5,8 @@
  *                             policy rules, failure index, counts, probe / dream metadata
  *   snapshot/lexical.v1.json  MiniSearch index over summary / details / aliases (storeFields: []) + recent summaries
  *   snapshot/dense.v1.bin     rows with an embedding: 4-byte LE header length, UTF-8 JSON header, Float32 LE matrix
+ *   snapshot/recall.v1.json   the newest `recall.keep_episodes` episodes that carry a summary (A′ recall layer); omitted
+ *                             (and a stale file removed) when `recall.enabled` is false
  *
  * Active rows that violate V11 (no trigger a hook can deliver) are excluded and counted in
  * `counts.unreachable`; a signature that no longer compiles is dropped before the check.
@@ -18,17 +20,21 @@ import MiniSearch from "minisearch";
 import type { Database as SqlJsDatabase } from "sql.js";
 
 import { LEXICAL_TOKENIZER_ID, lexicalSnapshotOptions, type LexicalSnapshotDocument } from "../activation/lexical-snapshot";
+import { recallIndexOptions, toRecallDocument, type RecallDocument } from "../activation/recall";
 import { compileGlobSource, compileSignature } from "../activation/signature";
-import type { HarnessConfig } from "../core/config";
-import type { HarnessPaths } from "../core/paths";
+import { DEFAULT_CONFIG, type HarnessConfig } from "../core/config";
+import { sessionKey, type HarnessPaths } from "../core/paths";
 import {
   ACTIVE_SNAPSHOT_SCHEMA,
   DENSE_SNAPSHOT_SCHEMA,
   LEXICAL_SNAPSHOT_SCHEMA,
+  RECALL_SNAPSHOT_SCHEMA,
   type ActiveSnapshot,
   type CompiledSignature,
   type DenseSnapshotHeader,
   type LexicalSnapshot,
+  type RecallEpisode,
+  type RecallSnapshot,
   type RecentSummary,
   type SnapshotCounts,
   type SnapshotMemory,
@@ -38,6 +44,7 @@ import { isGlobalScope, type Enforcement, type PatternKind, type SignatureTarget
 import type { LifecycleTrigger } from "./schema/types";
 import { MemoryRepository, type MemoryRecord } from "../memory/repository";
 import { isReachableTrigger } from "../promotion/authority";
+import { EpisodeRepository, type EpisodeRecord } from "./repositories/episodes";
 import { META_KEYS, MetaRepository } from "./repositories/meta";
 import { ProposalRepository } from "./repositories/proposals";
 import { getDbGeneration } from "./meta";
@@ -46,6 +53,8 @@ import { selectAll, selectCount, userVersion } from "./sql";
 export const SNAPSHOT_DETAILS_CHARS = 600;
 export const SNAPSHOT_RECENT_SUMMARIES = 20;
 export const LEXICAL_FIELDS = ["summary", "details", "aliases"] as const;
+/** Scope refs carried per recall episode (indexed next to the summary; the episode row may hold up to 50). */
+export const RECALL_SCOPE_REFS_PER_EPISODE = 5;
 
 /** `{id, summary, details, aliases (space-joined)}` — the shape the hooks' reader expects (src/activation/lexical-snapshot.ts). */
 export type LexicalDocument = LexicalSnapshotDocument;
@@ -60,6 +69,8 @@ export interface SnapshotData {
   active: ActiveSnapshot;
   lexicalDocuments: LexicalDocument[];
   recentSummaries: RecentSummary[];
+  /** Newest `recall.keep_episodes` episodes with a summary (closed_at DESC); the content of `recall.v1.json`. */
+  recallEpisodes: RecallEpisode[];
   dense: { header: DenseSnapshotHeader; vectors: Float32Array[] } | null;
   unreachable: UnreachableMemory[];
   /** Active rows whose stored signature does not compile (still included when another trigger reaches them). */
@@ -77,14 +88,14 @@ export interface BuildSnapshotOptions {
 }
 
 export interface SnapshotBuildResult extends SnapshotData {
-  files: { active: string; lexical: string; dense: string | null };
-  bytes: { active: number; lexical: number; dense: number };
+  files: { active: string; lexical: string; dense: string | null; recall: string | null };
+  bytes: { active: number; lexical: number; dense: number; recall: number };
 }
 
-/** `import:<file>#L<n>` → `<file>`; anything else → null. */
+/** `import:<file>#L<n>` and `import:auto-memory:<file>#L<n>` → `<file>`; anything else → null. */
 export function sourceFileOf(sourceRef: string | null): string | null {
   if (sourceRef === null || !sourceRef.startsWith("import:")) return null;
-  const rest = sourceRef.slice("import:".length);
+  const rest = sourceRef.slice("import:".length).replace(/^auto-memory:/, "");
   const file = rest.split("#")[0] ?? "";
   return file.length === 0 ? null : file;
 }
@@ -141,6 +152,7 @@ export function toSnapshotMemory(memory: MemoryRecord): MemoryConversion {
     authority: memory.authority,
     enforcement: memory.enforcement,
     status: memory.status,
+    status_reason: memory.statusReason,
     knowledge_kind: memory.knowledgeKind,
     policy_subtype: memory.policySubtype,
     confidence: memory.confidence,
@@ -189,6 +201,37 @@ function readRules(db: SqlJsDatabase): SnapshotRule[] {
       message: String(row.message),
     };
   });
+}
+
+/**
+ * The recall view of one episode row (shared by the snapshot builder and `hm recall`'s database fallback). Import
+ * episodes never appear: their text is the imported rule the hooks already inject (the repository stores no summary
+ * for them; this guards rows written by another build).
+ */
+export function toRecallEpisode(record: Pick<EpisodeRecord, "id" | "host" | "sessionId" | "closedAt" | "summary" | "summaryKind" | "tools" | "scopeRefs" | "failureSignatures">): RecallEpisode | null {
+  if (record.summary === null || record.summaryKind === null || record.host === "import") return null;
+  const failureClasses = [...new Set(record.failureSignatures.map((entry) => entry.class))].sort();
+  return {
+    id: record.id,
+    session_key: sessionKey(record.host, record.sessionId),
+    host: record.host,
+    closed_at: record.closedAt,
+    summary: record.summary,
+    summary_kind: record.summaryKind,
+    tools: [...new Set(record.tools)],
+    scope_refs: [...new Set(record.scopeRefs)].slice(0, RECALL_SCOPE_REFS_PER_EPISODE),
+    failure_classes: failureClasses,
+  };
+}
+
+function readRecallEpisodes(db: SqlJsDatabase, keep: number): RecallEpisode[] {
+  if (keep <= 0) return [];
+  const episodes: RecallEpisode[] = [];
+  for (const record of new EpisodeRepository(db).listWithSummary({ limit: Math.floor(keep) })) {
+    const episode = toRecallEpisode(record);
+    if (episode !== null) episodes.push(episode);
+  }
+  return episodes;
 }
 
 function readRecentSummaries(db: SqlJsDatabase): RecentSummary[] {
@@ -308,7 +351,8 @@ export function buildSnapshotData(db: SqlJsDatabase, paths: HarnessPaths, option
     dense = { header, vectors: denseVectors };
   }
 
-  return { active, lexicalDocuments, recentSummaries: readRecentSummaries(db), dense, unreachable, signatureDropped };
+  const keepEpisodes = options.config?.recall.keep_episodes ?? DEFAULT_CONFIG.recall.keep_episodes;
+  return { active, lexicalDocuments, recentSummaries: readRecentSummaries(db), recallEpisodes: readRecallEpisodes(db, keepEpisodes), dense, unreachable, signatureDropped };
 }
 
 /** Same options as the hooks' reader (`lexicalOptionsFor(LEXICAL_TOKENIZER_ID)`): MiniSearch serializes posting lists, not options. */
@@ -327,6 +371,31 @@ export function buildLexicalSnapshot(data: SnapshotData): LexicalSnapshot {
     tokenizer: LEXICAL_TOKENIZER_ID,
     index: index.toJSON(),
     recent_summaries: data.recentSummaries,
+  };
+}
+
+export interface RecallSnapshotInput {
+  builtAt: string;
+  dbGeneration: number;
+  /** Newest first, as `buildSnapshotData` lists them. */
+  episodes: readonly RecallEpisode[];
+}
+
+/**
+ * `recall.v1.json`: the episodes plus the serialized MiniSearch index over summary + scope refs, built with the
+ * same options the hook loads it with (`recallIndexOptions()`; MiniSearch serializes posting lists, not options).
+ * Measured on 300 episodes: tokenizing at read time ≈ 10 ms, `loadJS` of this index < 1 ms, 59 KB on disk.
+ */
+export function buildRecallSnapshot(input: RecallSnapshotInput): RecallSnapshot {
+  const index = new MiniSearch<RecallDocument>(recallIndexOptions());
+  index.addAll(input.episodes.map(toRecallDocument));
+  return {
+    schema: RECALL_SNAPSHOT_SCHEMA,
+    built_at: input.builtAt,
+    db_generation: input.dbGeneration,
+    tokenizer: LEXICAL_TOKENIZER_ID,
+    index: index.toJSON(),
+    episodes: [...input.episodes],
   };
 }
 
@@ -373,7 +442,7 @@ function writeAtomic(file: string, data: Buffer | string, pid: number): number {
   return typeof data === "string" ? Buffer.byteLength(data, "utf8") : data.byteLength;
 }
 
-/** Builds and writes the three snapshot files; also clears `snapshot/.reindex-requested`. */
+/** Builds and writes the snapshot files (active, lexical, recall, dense when any row has an embedding); also clears `snapshot/.reindex-requested`. */
 export function buildSnapshot(db: SqlJsDatabase, paths: HarnessPaths, options: BuildSnapshotOptions): SnapshotBuildResult {
   const pid = options.pid ?? process.pid;
   const data = buildSnapshotData(db, paths, options);
@@ -392,12 +461,21 @@ export function buildSnapshot(db: SqlJsDatabase, paths: HarnessPaths, options: B
     rmSync(paths.snapshotDense, { force: true });
   }
 
+  let recallBytes = 0;
+  let recallFile: string | null = null;
+  if (options.config?.recall.enabled ?? DEFAULT_CONFIG.recall.enabled) {
+    recallBytes = writeAtomic(paths.snapshotRecall, JSON.stringify(buildRecallSnapshot({ builtAt: data.active.built_at, dbGeneration: data.active.db_generation, episodes: data.recallEpisodes })), pid);
+    recallFile = paths.snapshotRecall;
+  } else if (existsSync(paths.snapshotRecall)) {
+    rmSync(paths.snapshotRecall, { force: true });
+  }
+
   rmSync(paths.reindexRequested, { force: true });
 
   return {
     ...data,
-    files: { active: paths.snapshotActive, lexical: paths.snapshotLexical, dense: denseFile },
-    bytes: { active: activeBytes, lexical: lexicalBytes, dense: denseBytes },
+    files: { active: paths.snapshotActive, lexical: paths.snapshotLexical, dense: denseFile, recall: recallFile },
+    bytes: { active: activeBytes, lexical: lexicalBytes, dense: denseBytes, recall: recallBytes },
   };
 }
 

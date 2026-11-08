@@ -161,8 +161,8 @@ describe("release metadata", () => {
     expect(pkg.keywords).toContain("project-memory");
   });
 
-  test("upgrade notes cover migrations 017–021 and the target schema version", () => {
-    for (const file of ["017_memories_authority.sql", "018_episodes_runs.sql", "019_proposals_provenance.sql", "020_policy_rules_v2.sql", "021_legacy_archive.sql"]) {
+  test("upgrade notes cover migrations 017–022 and the target schema version", () => {
+    for (const file of ["017_memories_authority.sql", "018_episodes_runs.sql", "019_proposals_provenance.sql", "020_policy_rules_v2.sql", "021_legacy_archive.sql", "022_episode_summaries.sql"]) {
       expect(upgrade, file).toContain(file);
       expect(existsSync(join(repoRoot, "src", "db", "migrations", file)), `${file} exists`).toBe(true);
     }

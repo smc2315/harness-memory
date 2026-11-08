@@ -576,6 +576,23 @@ describe("migrator safety harness", () => {
     expect(db.exec("PRAGMA foreign_key_check;")).toEqual([]);
   });
 
+  test("022 adds the recall summary columns and index to episodes; re-running applies nothing", async () => {
+    db.close();
+    db = await createTestDbAtVersion(21);
+    expect(hasColumn(db, "episodes", "summary")).toBe(false);
+    expect(hasColumn(db, "episodes", "summary_kind")).toBe(false);
+
+    const report = runMigrationsOnDb(db);
+    expect(report).toEqual({ from: 21, to: 22, applied: ["022_episode_summaries.sql"] });
+    expect(getCurrentVersion(db)).toBe(TARGET_USER_VERSION);
+    expect(hasColumn(db, "episodes", "summary")).toBe(true);
+    expect(hasColumn(db, "episodes", "summary_kind")).toBe(true);
+    expect(readFirstValue(db, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_episodes_recall';")).toBe(1);
+    expect(readFirstValue(db, "PRAGMA integrity_check;")).toBe("ok");
+
+    expect(runMigrationsOnDb(db)).toEqual({ from: 22, to: 22, applied: [] });
+  });
+
   test("migrations are idempotent in ordering", async () => {
     const migrations = getMigrationFiles();
     const versions = migrations.map((migration) => migration.version);

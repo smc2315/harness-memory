@@ -57,6 +57,7 @@ import {
   type ProviderResult,
 } from "./extract/providers";
 import { readLedgerRangeLines } from "./ledger";
+import { buildRecallSummary } from "./recall-summary";
 import { recordExtractionFailure, reconcileRun, type ReconcileRunInfo, type ReconcileWriteOp } from "./reconcile";
 import { createTransformersEmbedder, type Embedder } from "../embed/helper";
 
@@ -110,6 +111,10 @@ export interface ProcessedEpisode {
   created: string[];
   activated: string[];
   proposals: string[];
+  /** Rows whose enforcement the autonomy ladder raised to soft_deny in this run (Phase F). */
+  escalated: string[];
+  /** Rows created or adopted as human from a remember turn in this run (Phase F). */
+  remembered: string[];
 }
 
 export interface WorkerResult {
@@ -418,13 +423,27 @@ function rollUpFires(repository: MemoryRepository, descriptor: EpisodeDescriptor
   return count;
 }
 
+export interface LeaseSessionOptions {
+  config: HarnessConfig;
+  provider: ExtractionProvider | null;
+  logger: WorkerLogger;
+  /**
+   * Derived recall summaries per queued episode id, built outside the lock from the descriptor and its ledger
+   * lines (`derivedSummaryFor`); a newly inserted episode stores its summary in the same lock session, so recall
+   * covers episodes the extractor never sees (waiting, skipped, dead). Missing entries fall back to the descriptor.
+   * Import episodes are never summarized (`recallEligible`): the imported rule itself reaches the model.
+   */
+  derivedSummaries?: ReadonlyMap<string, string>;
+}
+
 export function leaseSession(
   db: SqlJsDatabase,
   ctx: WriteContext,
   queued: readonly QueueEntry[],
-  options: { config: HarnessConfig; provider: ExtractionProvider | null; logger: WorkerLogger }
+  options: LeaseSessionOptions
 ): LeaseSessionResult & { op: WriteOp } {
   const { config, provider } = options;
+  const derivedSummary = (descriptor: EpisodeDescriptor): string => options.derivedSummaries?.get(descriptor.id) ?? buildRecallSummary(descriptor);
   const now = ctx.now;
   const episodes = new EpisodeRepository(db);
   const runs = new ExtractionRunRepository(db);
@@ -445,6 +464,9 @@ export function leaseSession(
         inserted += 1;
         wrote = true;
         rolledUp += rollUpFires(repository, entry.descriptor);
+        // A′ recall layer: every session episode gets a derived summary the moment it exists; reconcile replaces
+        // it with the extractor's 'extracted' summary when one arrives (and passes the content scanner).
+        if (recallEligible(entry.descriptor)) episodes.setSummary(entry.descriptor.id, derivedSummary(entry.descriptor), "derived");
       }
       queuedById.set(entry.descriptor.id, entry.descriptor);
       db.run(`RELEASE ${savepoint}`);
@@ -502,6 +524,8 @@ export function leaseSession(
       const eligibility = isEligibleForExtraction(episodeRecordToDescriptor(record));
       if (!eligibility.eligible) {
         episodes.markSkipped(record.id, eligibility.reason);
+        // Rows inserted by a build before migration 022 have no summary yet; a skipped episode is still recallable.
+        if (record.summary === null) episodes.setSummary(record.id, derivedSummary(queuedDescriptor ?? episodeRecordToDescriptor(record)), "derived");
         result.skipped.push(record.id);
         continue;
       }
@@ -583,7 +607,9 @@ function readImportSourceLine(paths: Pick<HarnessPaths, "root">, importPath: str
  * the text kept by `rememberImportText`, or (inside the project root only) the source file. The synthesized line
  * goes through the same credential redaction as ledger lines (§5.1).
  */
-export function readEpisodeLines(paths: HarnessPaths, record: EpisodeRecord, queued: EpisodeDescriptor | null): EpisodeLines {
+export type EpisodeSource = Pick<EpisodeRecord, "id" | "ledgerRef" | "startedAt" | "turnKey" | "flags">;
+
+export function readEpisodeLines(paths: HarnessPaths, record: EpisodeSource, queued: EpisodeDescriptor | null): EpisodeLines {
   const ledgerMatch = LEDGER_REF.exec(record.ledgerRef);
   if (ledgerMatch !== null) {
     const file = join(paths.ledgerDir, basename(ledgerMatch[1]!));
@@ -599,6 +625,38 @@ export function readEpisodeLines(paths: HarnessPaths, record: EpisodeRecord, que
     lines: [{ kind: "prompt", ts: record.startedAt, seq: 1, turn_key: record.turnKey, text: redactCredentials(text), correction: record.flags.correction ?? 0, remember: record.flags.remember ?? 0 }],
     badLines: 0,
   };
+}
+
+/**
+ * Derived recall summary of a queued descriptor from its ledger lines (A′ recall layer), computed outside the
+ * lock; the descriptor alone when the ledger range cannot be read. Deterministic (`buildRecallSummary`).
+ */
+export function derivedSummaryFor(paths: HarnessPaths, descriptor: EpisodeDescriptor): string {
+  let lines: LedgerLine[] = [];
+  try {
+    const source: EpisodeSource = { id: descriptor.id, ledgerRef: descriptor.ledger_ref, startedAt: descriptor.started_at, turnKey: descriptor.turn_key, flags: descriptor.flags };
+    lines = readEpisodeLines(paths, source, descriptor).lines;
+  } catch {
+    lines = [];
+  }
+  return buildRecallSummary(descriptor, lines);
+}
+
+/**
+ * Import episodes carry no recall summary: their text is the imported rule, which the hooks already inject as a
+ * memory, and `hm recall`'s `hm trace` hint would name a non-session. (`EpisodeRepository.setSummary` refuses
+ * them too; this keeps the worker from building and the lease session from attempting the write.)
+ */
+export function recallEligible(descriptor: Pick<EpisodeDescriptor, "host">): boolean {
+  return descriptor.host !== "import";
+}
+
+/** Stores `derived` as the episode's recall summary when it has none (rows older than migration 022). */
+function ensureDerivedSummary(db: SqlJsDatabase, episodeId: string, derived: string): boolean {
+  const episodes = new EpisodeRepository(db);
+  const row = episodes.getById(episodeId);
+  if (row === null || row.summary !== null || !recallEligible(row)) return false;
+  return episodes.setSummary(episodeId, derived, "derived");
 }
 
 function toolLinesOf(paths: HarnessPaths, record: EpisodeRecord | null): LedgerLine[] | null {
@@ -630,6 +688,8 @@ export interface ExtractedWork {
   fromCache: boolean;
   /** The failure is the provider's (probe), not this episode's: lock session 2 requeues it without burning an attempt. */
   providerUnavailable: boolean;
+  /** Deterministic recall summary, stored when the episode still has none after reconcile (no `episode_summary`, old row). */
+  derivedSummary: string;
 }
 
 function probeFailureStatus(result: ProbeResult): Exclude<RunStatus, "started" | "ok"> {
@@ -683,6 +743,7 @@ export async function unlockedPhase(batch: readonly LeasedWork[], options: Unloc
     const startedAt = options.clock();
     const { lines } = readEpisodeLines(paths, work.record, work.queued);
     const descriptor = hydrateDescriptor(work.record, work.queued, lines);
+    const derivedSummary = buildRecallSummary(descriptor, lines);
     const built = buildExtractionPrompt({
       descriptor,
       lines,
@@ -708,7 +769,7 @@ export async function unlockedPhase(batch: readonly LeasedWork[], options: Unloc
       try {
         const raw = readFileSync(cached, "utf8");
         if (parseExtractionOutput(raw).ok) {
-          extracted.push({ work, descriptor, runId, seqMap: eventIdMap(lines), run: { ...run, rawOutputRef: `raw/${basename(cached)}` }, result: { status: "ok", raw, model: "cache" }, fromCache: true, providerUnavailable: false });
+          extracted.push({ work, descriptor, runId, seqMap: eventIdMap(lines), run: { ...run, rawOutputRef: `raw/${basename(cached)}` }, result: { status: "ok", raw, model: "cache" }, fromCache: true, providerUnavailable: false, derivedSummary });
           logger.line("cache_reuse", { episode: descriptor.id, run: runId });
           continue;
         }
@@ -727,7 +788,7 @@ export async function unlockedPhase(batch: readonly LeasedWork[], options: Unloc
       // A failed probe says nothing about this episode: it is recorded for `doctor` but waits like `no_provider`
       // (§9.4 F3 "N episodes waiting") instead of consuming one of its three attempts.
       const status = probeFailureStatus(probeResult.result);
-      extracted.push({ work, descriptor, runId, seqMap: built.seqMap, run, result: { status, raw: "", error: `probe: ${probeResult.result}${probeResult.detail === null ? "" : ` — ${probeResult.detail}`}` }, fromCache: false, providerUnavailable: true });
+      extracted.push({ work, descriptor, runId, seqMap: built.seqMap, run, result: { status, raw: "", error: `probe: ${probeResult.result}${probeResult.detail === null ? "" : ` — ${probeResult.detail}`}` }, fromCache: false, providerUnavailable: true, derivedSummary });
       continue;
     }
 
@@ -763,7 +824,7 @@ export async function unlockedPhase(batch: readonly LeasedWork[], options: Unloc
       ...(result.model === undefined ? {} : { model: result.model }),
       ...(result.costUsd === undefined ? {} : { cost_usd: result.costUsd }),
     });
-    extracted.push({ work, descriptor, runId, seqMap: built.seqMap, run: { ...run, rawOutputRef, model: result.model ?? run.model }, result, fromCache: false, providerUnavailable: false });
+    extracted.push({ work, descriptor, runId, seqMap: built.seqMap, run: { ...run, rawOutputRef, model: result.model ?? run.model }, result, fromCache: false, providerUnavailable: false, derivedSummary });
   }
 
   return { extracted, probeResult };
@@ -781,7 +842,7 @@ export interface ReconcileSessionOptions {
   probeToCache: ProbeCache | null;
 }
 
-export function reconcileSession(db: SqlJsDatabase, ctx: WriteContext, item: ExtractedWork, options: ReconcileSessionOptions): WriteOp & { status: RunStatus; outcomes: number; created: string[]; activated: string[]; proposals: string[] } {
+export function reconcileSession(db: SqlJsDatabase, ctx: WriteContext, item: ExtractedWork, options: ReconcileSessionOptions): WriteOp & { status: RunStatus; outcomes: number; created: string[]; activated: string[]; proposals: string[]; escalated: string[]; remembered: string[] } {
   const now = ctx.now;
   if (options.probeToCache !== null) writeProbeCache(db, options.probeToCache);
 
@@ -797,7 +858,8 @@ export function reconcileSession(db: SqlJsDatabase, ctx: WriteContext, item: Ext
       providerUnavailable: item.providerUnavailable,
     });
     options.logger.line("failed", { episode: item.descriptor.id, run: item.runId, status: item.result.status, disposition: failure.disposition, next: failure.nextAttemptAt });
-    return { ...failure.op, status: item.result.status, outcomes: 0, created: [], activated: [], proposals: [] };
+    const wroteSummary = ensureDerivedSummary(db, item.descriptor.id, item.derivedSummary);
+    return { ...failure.op, wrote: failure.op.wrote || wroteSummary, status: item.result.status, outcomes: 0, created: [], activated: [], proposals: [], escalated: [], remembered: [] };
   }
 
   const repository = new MemoryRepository(db, { clock: () => now });
@@ -847,9 +909,13 @@ export function reconcileSession(db: SqlJsDatabase, ctx: WriteContext, item: Ext
     created: op.report.created.length,
     activated: op.report.activated.length,
     proposals: op.report.proposals.length,
+    escalated: op.report.escalated.length,
+    remembered: op.report.remembered.length,
     noop: op.noop,
   });
-  return { ...op, status: op.report.status, outcomes: op.report.outcomes.length, created: op.report.created, activated: op.report.activated, proposals: op.report.proposals };
+  // An extraction without an `episode_summary` (or a row from before migration 022) keeps the derived summary.
+  const wroteSummary = ensureDerivedSummary(db, item.descriptor.id, item.derivedSummary);
+  return { ...op, wrote: op.wrote || wroteSummary, status: op.report.status, outcomes: op.report.outcomes.length, created: op.report.created, activated: op.report.activated, proposals: op.report.proposals, escalated: op.report.escalated, remembered: op.report.remembered };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -884,10 +950,15 @@ async function extractLoop(ctx: LoopContext): Promise<void> {
   for (let loop = 0; loop < maxLoops; loop += 1) {
     ctx.result.loops += 1;
     const queued = scanQueue(options.paths, logger);
+    // Derived recall summaries are built here, outside the lock (ledger reads); the lease session only stores them.
+    const derivedSummaries = new Map<string, string>();
+    for (const entry of queued) {
+      if (recallEligible(entry.descriptor)) derivedSummaries.set(entry.descriptor.id, derivedSummaryFor(options.paths, entry.descriptor));
+    }
 
     let lease!: LeaseSessionResult;
     await options.store.withWriteLock("extract:lease", dbLockWaitMs, (db, wctx) => {
-      const session = leaseSession(db, wctx, queued, { config: options.config, provider, logger });
+      const session = leaseSession(db, wctx, queued, { config: options.config, provider, logger, derivedSummaries });
       lease = session;
       return session.op;
     });
@@ -931,7 +1002,7 @@ async function extractLoop(ctx: LoopContext): Promise<void> {
       await options.store.withWriteLock("extract:reconcile", dbLockWaitMs, (db, wctx) => {
         const op = reconcileSession(db, wctx, item, { paths: options.paths, config: options.config, logger, probeToCache });
         probeToCache = null;
-        processed = { episodeId: item.descriptor.id, runId: item.runId, status: op.status, fromCache: item.fromCache, op, outcomes: op.outcomes, created: op.created, activated: op.activated, proposals: op.proposals };
+        processed = { episodeId: item.descriptor.id, runId: item.runId, status: op.status, fromCache: item.fromCache, op, outcomes: op.outcomes, created: op.created, activated: op.activated, proposals: op.proposals, escalated: op.escalated, remembered: op.remembered };
         return op;
       });
       if (processed !== null) ctx.result.processed.push(processed);

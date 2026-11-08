@@ -2,7 +2,7 @@
  * SQLite Schema Type Definitions
  *
  * This file defines TypeScript interfaces that match the SQLite schema (snake_case, one interface
- * per table, final schema = migration 021 / user_version 21). Repositories map these rows onto
+ * per table, final schema = migration 022 / user_version 22). Repositories map these rows onto
  * camelCase records; nothing outside src/db and the repositories should read raw rows.
  *
  * Enumerated values live in src/core/vocabulary.ts (type-only imports here, so there is no runtime cycle).
@@ -110,6 +110,8 @@ export interface Episode {
   next_attempt_at: string | null;
   last_error: string | null;
   extraction_run_id: string | null;
+  summary: string | null; // migration 022: recall text, one line, ≤ 400 chars
+  summary_kind: "extracted" | "derived" | null; // extracted = the extractor's episode_summary, derived = the worker's deterministic one
 }
 
 /**

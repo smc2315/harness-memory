@@ -4,8 +4,10 @@
  * - `snapshot/active.v1.json`  — active memories (no embeddings), derived policy rules, failure index, counts.
  * - `snapshot/lexical.v1.json` — serialized MiniSearch index over summary/details/aliases + recent session summaries.
  * - `snapshot/dense.v1.bin`    — optional: 4-byte LE header length, UTF-8 JSON header, Float32 LE matrix (ids × dims).
+ * - `snapshot/recall.v1.json`  — the newest `recall.keep_episodes` episodes that carry a summary (A′ recall layer):
+ *                                plain context for `before_model` and `hm recall`, never enforced.
  *
- * All three are written by every DB writer via tmp + rename after the commit (§9.2 step 6).
+ * All of them are written by every DB writer via tmp + rename after the commit (§9.2 step 6).
  */
 
 import type { ActivationClass, LifecycleTrigger, MemoryStatus, MemoryType } from "../db/schema/types";
@@ -20,6 +22,7 @@ import type {
 export const ACTIVE_SNAPSHOT_SCHEMA = "active.v1";
 export const LEXICAL_SNAPSHOT_SCHEMA = "lexical.v1";
 export const DENSE_SNAPSHOT_SCHEMA = "dense.v1";
+export const RECALL_SNAPSHOT_SCHEMA = "recall.v1";
 
 /** Precompiled signature so the hook does no parsing (§4.6). */
 export interface CompiledSignature {
@@ -53,6 +56,11 @@ export interface SnapshotMemory {
   authority: Authority;
   enforcement: Enforcement;
   status: MemoryStatus;
+  /**
+   * memories.status_reason; `remember` marks a rule born active from the user's own request (A′), which the
+   * SessionStart hook names for 24 h. Absent in snapshots built before this field existed.
+   */
+  status_reason?: string | null;
   knowledge_kind: KnowledgeKind | null;
   policy_subtype: "hard" | "soft" | null;
   confidence: number;
@@ -148,4 +156,38 @@ export interface DenseSnapshotHeader {
   dtype: "float32";
   /** Row i of the matrix is the embedding of ids[i]. */
   ids: string[];
+}
+
+/** Who produced an episode summary: the extractor's `episode_summary`, or the worker's deterministic builder. */
+export type RecallSummaryKind = "extracted" | "derived";
+
+/** One past episode as the `prompt` hook and `hm recall` see it (≈ 500 B each; `recall.keep_episodes` of them). */
+export interface RecallEpisode {
+  id: string;
+  /** sha1(host + ':' + session_id).slice(0, 16) — the hook excludes its own session by this key. */
+  session_key: string;
+  host: string;
+  closed_at: string;
+  /** ≤ 400 chars, one line, redaction-safe (ledger text is redacted before it reaches the worker). */
+  summary: string;
+  summary_kind: RecallSummaryKind;
+  tools: string[];
+  /** ≤ 5 scope refs of the episode (indexed next to the summary). */
+  scope_refs: string[];
+  failure_classes: string[];
+}
+
+export interface RecallSnapshot {
+  schema: typeof RECALL_SNAPSHOT_SCHEMA;
+  built_at: string;
+  db_generation: number;
+  /** Tokenizer the builder indexed with (`LEXICAL_TOKENIZER_ID`); a reader with another tokenizer rebuilds from `episodes`. */
+  tokenizer: string;
+  /**
+   * `MiniSearch.toJSON()` of the index over summary + scope_refs (`recallIndexOptions()`), loaded with `loadJS`:
+   * tokenizing 300 summaries costs ~10 ms per hook call, loading the serialized index < 1 ms. Absent → readers index `episodes`.
+   */
+  index?: unknown;
+  /** Newest first (closed_at DESC, id ASC). */
+  episodes: RecallEpisode[];
 }

@@ -118,19 +118,19 @@ describe("hm snapshot:rebuild", () => {
     const report = result.json<SnapshotRebuildReport>();
     expect(report.built).toBe(true);
     expect(report.counts).toMatchObject({ active: 0, candidates: 0, queue: 0 });
-    expect(report.files.map((file) => file.path).sort()).toEqual([project.paths.snapshotActive, project.paths.snapshotLexical].sort());
+    expect(report.files.map((file) => file.path).sort()).toEqual([project.paths.snapshotActive, project.paths.snapshotLexical, project.paths.snapshotRecall].filter((file) => existsSync(file)).sort());
     const text = await runHm(project, ["snapshot:rebuild"]);
     expect(text.stdout).toContain("snapshot rebuilt");
   });
 });
 
 describe("hm dispatcher", () => {
-  test("registers the 33 commands of spec §11; only eval:live (a later release) is not in this build", async () => {
-    expect(COMMANDS).toHaveLength(33);
-    expect(new Set(COMMANDS.map((command) => command.name)).size).toBe(33);
+  test("registers the 34 commands (spec §11 plus recall); only eval:live (a later release) is not in this build", async () => {
+    expect(COMMANDS).toHaveLength(34);
+    expect(new Set(COMMANDS.map((command) => command.name)).size).toBe(34);
     const notInBuild = COMMANDS.filter((command) => command.run === undefined).map((command) => command.name);
     expect(notInBuild).toEqual(["eval:live"]);
-    expect(implementedCommands()).toHaveLength(32);
+    expect(implementedCommands()).toHaveLength(33);
     const help = await runHm(project, ["--help"]);
     expect(help.code).toBe(0);
     for (const command of COMMANDS) expect(help.stdout).toContain(command.name);

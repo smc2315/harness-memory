@@ -13,6 +13,8 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import { bundledNpmCli, planNpmSpawn, type InstallReport } from "../src/cli/commands/install";
 import type { UninstallReport } from "../src/cli/commands/uninstall";
+import { canonicalDirectory, projectSlug } from "../src/cli/lib/auto-memory";
+import { probeGuidance } from "../src/cli/lib/diagnostics";
 import type { InstallManifest } from "../src/cli/lib/manifest";
 import { GIT_EXCLUDE_LINE, STATE_GITIGNORE_CONTENT } from "../src/cli/lib/paths";
 import { listHarnessHooks } from "../src/cli/lib/settings";
@@ -268,6 +270,15 @@ describe("hm install --host claude", () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("probe not_logged_in");
     expect(result.stdout).toContain("/login");
+    // Login-optional messaging (phase F A′ §4), pinned verbatim so a reword cannot drift back to a claim the pipeline
+    // does not keep: imported rules (verbatim until the extractor types them) and hand-added rules fire without the
+    // login; learning from sessions — remember turns included — starts after `claude auth login`.
+    const guidance =
+      "the hooks enforce rules without the login — rules you import (`hm import`, verbatim until the extractor types them) and add (`hm memory:add`) fire as soon as they exist; learning from sessions, including what you ask it to remember, starts after `claude auth login` in a terminal (older CLIs: `claude`, then `/login`); the worker re-probes within ten minutes, or run `hm install --host claude` to re-probe now; nothing is lost meanwhile";
+    expect(probeGuidance("not_logged_in")).toBe(guidance);
+    const providerLine = result.stdout.split("\n").find((line) => line.trim().startsWith("provider")) ?? "";
+    expect(providerLine.trim()).toBe(`provider    claude — probe not_logged_in; ${guidance}`);
+    expect(probeGuidance("ok")).toBeNull();
     const SQL = await loadSqlJs();
     const db = new SQL.Database(readFileSync(project.paths.db));
     try {
@@ -278,6 +289,28 @@ describe("hm install --host claude", () => {
     }
     const snapshot = readJson<{ last_probe: { result: string } | null }>(project.paths.snapshotActive);
     expect(snapshot.last_probe?.result).toBe("not_logged_in");
+  });
+
+  test("names Claude Code's auto-memory feedback notes of this project as an import source", async () => {
+    const without = await runHm(project, ["install", "--host", "claude", "--skip-probe", "--skip-self-test", "--json"]);
+    expect(without.code).toBe(0);
+    expect(without.json<InstallReport>().auto_memory).toBeNull();
+
+    const memoryDir = join(project.configDir, "projects", projectSlug(project.root), "memory");
+    mkdirSync(memoryDir, { recursive: true });
+    writeFileSync(join(memoryDir, "MEMORY.md"), "- [Terminals](no-terminating-terminals.md) — never close terminals without asking\n", "utf8");
+    writeFileSync(join(memoryDir, "no-terminating-terminals.md"), "---\nname: no-terminating-terminals\ndescription: \"Never close terminals without asking\"\nmetadata:\n  type: feedback\n---\n\nAsk before closing any terminal tab or stopping a process you did not start.\n", "utf8");
+    writeFileSync(join(memoryDir, "user-profile.md"), "---\nname: user-profile\nmetadata:\n  type: user\n---\n\nWrites in Korean.\n", "utf8");
+
+    const result = await runHm(project, ["install", "--host", "claude", "--skip-probe", "--skip-self-test", "--json"]);
+    expect(result.code).toBe(0);
+    expect(result.json<InstallReport>().auto_memory).toEqual({ dir: canonicalDirectory(memoryDir), notes: 1 });
+    const text = await runHm(project, ["install", "--host", "claude", "--skip-probe", "--skip-self-test"]);
+    expect(text.code).toBe(0);
+    expect(text.stdout).toContain("`hm import --from auto-memory` turns Claude Code's 1 auto-memory feedback note into human memories");
+    expect(text.stdout).toContain(canonicalDirectory(memoryDir));
+    // The lookup is read-only: nothing under the config directory changes.
+    expect(readFileSync(join(memoryDir, "MEMORY.md"), "utf8")).toContain("never close terminals");
   });
 
   test("refuses unknown hosts and a missing hook script", async () => {

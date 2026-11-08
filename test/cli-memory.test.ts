@@ -15,10 +15,13 @@ import type { MemoryListReport } from "../src/cli/commands/memory-list";
 import type { MemoryShowReport } from "../src/cli/commands/memory-show";
 import type { MemoryStatsReport } from "../src/cli/commands/memory-stats";
 import type { MemoryTransitionReport } from "../src/cli/commands/memory-transitions";
+import { TARGET_USER_VERSION } from "../src/core/paths";
 import { hasWriteOp } from "../src/db/meta";
 import { ProvenanceRepository } from "../src/db/repositories/provenance";
 import { TransitionRepository } from "../src/db/repositories/transitions";
 import { MemoryRepository } from "../src/memory/repository";
+import { rememberTransitionReason } from "../src/promotion/remember";
+import { adoptActiveMemory } from "../src/promotion/transitions";
 import { createCliProject, runHm, type CliProject } from "./helpers/cli-run";
 import { CLI_NOW, clockOptions, readProject, seedProject } from "./helpers/cli-seed";
 import { autoMemory, humanMemory, insertEpisode } from "./helpers/memory-fixtures";
@@ -38,7 +41,7 @@ async function memoryById(id: string) {
 }
 
 describe("hm memory:add", () => {
-  // Mutations never conjure a database (install / db:migrate do); every test starts from an empty v21 store.
+  // Mutations never conjure a database (install / db:migrate do); every test starts from an empty v22 store.
   beforeEach(async () => {
     await seedProject(project, () => {});
   });
@@ -289,7 +292,7 @@ describe("hm memory:export / memory:export-skill", () => {
     const dump = first.json<MemoryExportReport>();
     expect(dump.sql).toContain("CREATE TABLE");
     expect(dump.sql).toContain("Exported human policy");
-    expect(dump.sql).toContain("PRAGMA user_version = 21;");
+    expect(dump.sql).toContain(`PRAGMA user_version = ${String(TARGET_USER_VERSION)};`);
     const second = await runHm(project, ["memory:export", "--json"]);
     expect(second.json<MemoryExportReport>().sql).toBe(dump.sql);
 
@@ -324,5 +327,79 @@ describe("hm memory:export / memory:export-skill", () => {
     const lowered = await runHm(project, ["memory:export-skill", "--out", out, "--min-importance", "0.05", "--json"]);
     expect(lowered.json<MemoryExportSkillReport>().files).toHaveLength(2);
     expect((await runHm(project, ["memory:export-skill", "--min-importance", "7"])).code).toBe(2);
+  });
+});
+
+describe("A′ in the CLI: remember rows and the escalation ladder", () => {
+  test("memory:list tags [remember], memory:show prints the remember authority line, memory:history shows the escalation and the adoption", async () => {
+    let rememberId = "";
+    let ladderId = "";
+    let adoptedId = "";
+    await seedProject(project, (db) => {
+      const memories = new MemoryRepository(db, { clock: () => CLI_NOW });
+      rememberId = memories.create(
+        humanMemory({
+          type: "policy",
+          summary: "Run pnpm lint before every git commit in this repository",
+          status: "active",
+          statusReason: "remember",
+          sourceKind: "extraction",
+          knowledgeKind: "convention",
+          sourceRef: "episode:ep-remember-0001",
+          enforcement: "confirm",
+          policySubtype: "hard",
+        })
+      ).id;
+      ladderId = memories.create(autoMemory({ summary: "Run pnpm test instead of npm test here", status: "active", enforcement: "soft_deny" })).id;
+      new TransitionRepository(db).insert({ memoryId: ladderId, fromStatus: "candidate", toStatus: "active", actor: "auto_rule", reason: "decideTier", createdAt: CLI_NOW });
+      new TransitionRepository(db).insert({ memoryId: ladderId, fromStatus: "active", toStatus: "active", actor: "auto_rule", extractionRunId: "run-escalate", reason: "auto_escalation: advise → soft_deny (2 sessions)", createdAt: CLI_NOW });
+      // An active auto row a later remember turn adopted (src/dream/reconcile.ts adoptRememberTwin → adoptActiveMemory):
+      // its source episode stays the original one; the remember turn is read from the adoption transition.
+      adoptedId = memories.create(autoMemory({ summary: "Never push to main directly in this repository", status: "active", enforcement: "advise", sourceRef: "episode:ep-origin-0001" })).id;
+      new TransitionRepository(db).insert({ memoryId: adoptedId, fromStatus: "candidate", toStatus: "active", actor: "auto_rule", reason: "decideTier", createdAt: CLI_NOW });
+      adoptActiveMemory(db, { memoryId: adoptedId, reason: rememberTransitionReason("ep-remember-0002"), now: CLI_NOW, runId: "run-adopt", statusReason: "remember" });
+    });
+
+    const list = await runHm(project, ["memory:list"]);
+    expect(list.code).toBe(0);
+    const rememberLine = list.stdout.split("\n").find((line) => line.includes("Run pnpm lint before every git commit")) ?? "";
+    expect(rememberLine).toContain("[remember]");
+    expect(rememberLine).toContain(" active ");
+    const ladderLine = list.stdout.split("\n").find((line) => line.includes("Run pnpm test instead of npm test")) ?? "";
+    expect(ladderLine).not.toContain("[remember]");
+    const adoptedLine = list.stdout.split("\n").find((line) => line.includes("Never push to main directly")) ?? "";
+    expect(adoptedLine).toContain("[remember]");
+    expect(adoptedLine).toContain(" human ");
+    const json = (await runHm(project, ["memory:list", "--json"])).json<MemoryListReport>();
+    expect(json.memories.find((memory) => memory.id === rememberId)).toMatchObject({ statusReason: "remember", authority: "human" });
+    expect(json.memories.find((memory) => memory.id === adoptedId)).toMatchObject({ statusReason: "remember", authority: "human", promotionSource: "manual" });
+
+    const show = await runHm(project, ["memory:show", rememberId]);
+    expect(show.code).toBe(0);
+    expect(show.stdout).toContain("status             active (remember)");
+    expect(show.stdout).toContain("authority          human (remember, episode ep-remem) / extraction");
+    expect((await runHm(project, ["memory:show", rememberId, "--json"])).json<MemoryShowReport>().remember_episode_id).toBeNull();
+    const shownAdopted = await runHm(project, ["memory:show", adoptedId]);
+    expect(shownAdopted.stdout).toContain("authority          human (remember, episode ep-remem) / extraction");
+    expect(shownAdopted.stdout).not.toContain("ep-origi");
+    expect((await runHm(project, ["memory:show", adoptedId, "--json"])).json<MemoryShowReport>().remember_episode_id).toBe("ep-remember-0002");
+    const shownAuto = await runHm(project, ["memory:show", ladderId]);
+    expect(shownAuto.stdout).toContain("authority          auto / extraction (episode:ep-1)");
+    expect((await runHm(project, ["memory:show", ladderId, "--json"])).json<MemoryShowReport>()).not.toHaveProperty("remember_episode_id");
+
+    const adoptedHistory = await runHm(project, ["memory:history", adoptedId]);
+    expect(adoptedHistory.code).toBe(0);
+    expect(adoptedHistory.stdout).toContain("candidate → active  by auto_rule  decideTier");
+    expect(adoptedHistory.stdout).toContain("active (authority)  by human  remember:episode ep-remember-0002  (run run-adop)");
+
+    const history = await runHm(project, ["memory:history", ladderId]);
+    expect(history.code).toBe(0);
+    expect(history.stdout).toContain("candidate → active  by auto_rule  decideTier");
+    expect(history.stdout).toContain("active (enforcement)  by auto_rule  auto_escalation: advise → soft_deny (2 sessions)  (run run-esca)");
+    const historyJson = (await runHm(project, ["memory:history", ladderId, "--json"])).json<MemoryHistoryReport>();
+    expect(historyJson.transitions.map((transition) => [transition.fromStatus, transition.toStatus, transition.reason.split(":")[0]])).toEqual([
+      ["candidate", "active", "decideTier"],
+      ["active", "active", "auto_escalation"],
+    ]);
   });
 });
