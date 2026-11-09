@@ -19,14 +19,16 @@ For anyone with an existing `.harness-memory/memory.sqlite` written by 0.3–0.5
 
 1. **Back up** `.harness-memory/memory.sqlite` (the migrator also copies it to `memory.sqlite.bak-v<N>`, where `<N>` is the schema version it found — 9, 10 or 16 on real installs).
 2. **Decide on the host.** 0.6.0 supports Claude Code only. If you work in OpenCode, stay on 0.5.1 until 0.6.2 — the two versions must not write the same database (0.6 migrates it to a schema 0.5 cannot open).
-3. **Log in the extraction CLI.** Run `claude` once in a terminal and `/login`. The desktop app's login does not carry over to `claude -p`; without it episodes queue up and `hm status` shows `probe not_logged_in` until you do.
+3. **Log in the extraction CLI (for learning).** `claude auth login` in a terminal (older CLIs: `claude`, then `/login`). The desktop app's login does not carry over to `claude -p`. Without it the hooks still enforce every migrated, imported and hand-added rule; new episodes queue up and `hm status` shows `probe not_logged_in` / `queue N (waiting: not_logged_in)` until you log in — nothing is lost, and `hm install --host claude` re-probes at once afterwards.
 
 ## Upgrade steps (Claude Code)
 
 ```bash
-npm install -g harness-memory@0.6          # or update the project devDependency
+# 0.6.0-rc.1 is a GitHub pre-release, not on npm yet: plain `npm install -g harness-memory` still installs 0.5.1
+npm install -g https://github.com/smc2315/harness-memory/releases/download/v0.6.0-rc.1/harness-memory-0.6.0-rc.1.tgz
+#   (once published: npm install -g harness-memory@next; or update the project devDependency the same way)
 cd <project>
-hm install --host claude                   # migrates memory.sqlite → v21 (backup first), builds the snapshot, registers 9 hooks
+hm install --host claude                   # migrates memory.sqlite → v22 (backup first), builds the snapshot, registers 9 hooks
 hm doctor                                  # every check OK / WARN / FAIL
 hm review                                  # fix_scope proposals for legacy rows, merge proposals for duplicates
 ```
@@ -97,6 +99,6 @@ On the author's real v0.5 databases: v9 (13 memories, 142 evidence rows, 75 lega
 
 ## Known gaps in 0.6.0-rc.1
 
-- Live `claude -p` extraction has only been verified through the `not_logged_in` path and the replay provider on the author's machine (the standalone CLI there is not logged in); the `ok` path is covered by seams and fixtures. Report a probe result other than `ok` / `not_logged_in` with `hm doctor --json`.
+- Live `claude -p` extraction has run in two synthetic sessions only (six calls on the `sonnet` alias; see docs/redesign/phase-e-notes.md); the replay provider covers the tests and the dogfood weeks have not started. The first live probe failed with `api 404` because the interactive default model was a gateway id — the claude provider now passes `--model sonnet` unless `extraction.model` is set, and such failures show as `probe provider_error` with the API message. Report any probe result other than `ok` / `not_logged_in` with `hm doctor --json`.
 - Exec-form hooks are written when `claude --version` ≥ 2.1.139 or unknown; the minimum is inferred from release mirrors. If Claude Code reports hook errors on every call, re-run `hm install --host claude --hook-form shell`.
 - `fix_scope` proposals carry their payload (scope, triggers, signature) in the proposal rationale; the interactive editor for it is part of `hm review` (Phase C).

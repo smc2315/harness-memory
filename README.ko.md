@@ -7,7 +7,7 @@
 
 [claude-mem](https://github.com/thedotmack/claude-mem)과 보완 관계다: claude-mem은 무슨 일이 있었는지 기억하고, harness-memory는 에이전트가 알려진 실수를 반복하려는 순간에 멈춰 세운다. 계정도, 텔레메트리도, 데몬도, 툴 호출당 LLM 호출도 없다 — 핫패스는 미리 계산된 JSON 파일 하나를 읽는다.
 
-> **0.6.0-rc.1 — Claude Code 전용.** Codex 훅은 0.6.1, OpenCode(V2 플러그인)는 0.6.2에 들어온다. v0.5는 OpenCode 플러그인이었다; 기존 `.harness-memory/` 위에 0.6을 설치하기 전에 [0.5에서 업그레이드](#05에서-업그레이드)를 먼저 읽을 것.
+> **0.6.0-rc.1 — Claude Code 전용.** Codex 훅은 0.6.1, OpenCode(V2 플러그인)는 0.6.2에 들어온다. v0.5는 OpenCode 플러그인이었다; 기존 `.harness-memory/` 위에 0.6을 설치하기 전에 [0.5에서 업그레이드](#05에서-업그레이드)를 먼저 읽을 것. 아직 npm에 없다: 프리릴리스 tarball로 설치한다, [설치](#설치) 참고.
 
 - [한 턴으로 보는 동작](#한-턴으로-보는-동작)
 - [요구 사항](#요구-사항)
@@ -54,20 +54,34 @@ claude:  Bash: pnpm test
 ## 요구 사항
 
 - **Node.js ≥ 20** (24에서 개발). 훅은 평범한 `node` 프로세스이고 worker는 sql.js(WASM)로 SQLite를 다룬다 — 네이티브 의존성 없음.
-- **Claude Code ≥ 2.1.139**: exec-form 훅(`{"command": "<node>", "args": [...]}`)용. 더 오래된 버전은 자동으로 shell-form 훅을 받는다(`--hook-form`으로 덮어쓸 수 있다).
+- **Claude Code ≥ 2.1.139**: exec-form 훅(`{"command": "<node>", "args": [...]}`)용. `claude --version`을 감지할 수 있을 때 더 오래된 버전은 자동으로 shell-form 훅을 받는다; `claude` 바이너리를 못 찾으면 버전을 알 수 없어 exec form을 그대로 쓴다 — 그 뒤 Claude Code가 매 호출마다 훅 오류를 보고하면 `hm install --host claude --hook-form shell`을 다시 실행한다.
 - **학습용 추출 CLI(터미널에서 로그인)**: `claude`(권장) 또는 `codex`. 추출은 당신의 헤드리스 CLI와 구독으로 돈다 — API 키 없음. 로그인은 집행에는 선택 사항이다: 훅은 스냅샷에 이미 있는 모든 규칙(`hm memory:add`, import된 행)을 로그인 없이 발화시킨다; 새 `hm import` 불릿을 타입 있는 행으로 바꾸는 일과 세션에서 배우는 일 — "기억해"라고 한 것 포함 — 은 `claude auth login` 뒤에 시작된다(구버전 CLI: `claude` 실행 후 `/login`; 데스크톱 앱 로그인은 `claude -p`에 적용되지 않는다). 그때까지 불릿과 에피소드는 큐에서 기다리며 잃는 것은 없다.
 - Windows, macOS, Linux. Windows에서 Git Bash는 선택 사항이다([아래](#node-경로-npx-windows-셸) 참고).
 
 ## 설치
 
+### 릴리스 후보 설치
+
+0.6.0-rc.1은 아직 npm에 없다: `npm install -g harness-memory`는 여전히 **0.5.1, OpenCode 플러그인**을 설치하며 거기에는 `hm` 바이너리가 없다. 대신 GitHub 프리릴리스에 붙은 tarball을 설치한다:
+
 ```bash
-npm install -g harness-memory        # 또는: npm install -D harness-memory  (이후 `npx hm …`)
+node --version                      # ≥ 20; nvm이면 계속 쓸 버전으로 (nvm alias default <v>)
+npm uninstall -g harness-memory     # 남아 있는 0.5.1 제거; 설치된 것이 없으면 아무 일도 없다
+npm install -g https://github.com/smc2315/harness-memory/releases/download/v0.6.0-rc.1/harness-memory-0.6.0-rc.1.tgz
+hm --version                        # 0.6.0-rc.1
 cd <your project>
-hm install --host claude
+hm install --host claude            # Claude Code 세션 안의 셸이 아니라 일반 터미널에서
 hm status
 ```
 
-`hm install --host claude`의 출력(요약):
+- **`hm`을 찾지 못한다.** npm 전역 prefix(`npm prefix -g`; Windows 기본 `%APPDATA%\npm`)가 PATH에 없거나 터미널이 Node 설치보다 오래됐다 — 새 터미널을 연다. 그동안은 `node "$(npm root -g)/harness-memory/dist/bin/harness-memory.js" --version`이 동작한다. `harness-memory --version`이 `0.5.1`을 찍으면 다른 Node의 전역 디렉터리가 먼저 잡힌 것이다: Node마다 `npm ls -g harness-memory`.
+- **Windows PowerShell:** `hm.ps1 cannot be loaded because running scripts is disabled`는 기본 실행 정책 아래의 npm PowerShell 심(shim)이다(npm 자신의 `npm.ps1`도 똑같이 실패한다). 한 번만: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, 또는 `hm.cmd` 실행 / Git Bash 사용. 훅은 심을 쓰지 않고 `node.exe`를 직접 실행한다.
+- **전역 대신 프로젝트별로:** `npm install -D <같은 URL>` 뒤 `npx hm install --host claude`; 훅은 `node_modules/harness-memory/dist/hook.js`를 가리킨다. npm `latest`가 0.5.1인 동안 `npx harness-memory …`는 쓰지 말 것(옛 플러그인의 `install`이 돈다). git에서 설치도 안 된다(`github:smc2315/harness-memory#redesign/v0.6`에는 `dist/`가 없다; 빌드는 `prepack`에서만 돈다).
+- **나중에:** rc가 `next` 태그로 공개되면 `npm install -g harness-memory@next`, 0.6.0이 `latest`가 되면 그냥 `harness-memory`. 어떤 업데이트든 뒤에는 각 프로젝트에서 `hm install --host claude`를 다시 실행한다: 데이터베이스를 마이그레이션하고(백업 먼저) 훅 항목을 교체하고 다시 probe하고 self-test를 돌린다. 전역 설치는 훅 경로가 그대로이므로 그 사이에 깨지는 것은 없다.
+- **학습에는 터미널에서 로그인한 `claude` CLI가 필요하다:** `claude auth login`(구버전 CLI: `claude` 실행 후 `/login`). 데스크톱 앱 로그인은 해당되지 않고, 데스크톱 앱만으로는 PATH에 `claude`가 생기지 않는다 — CLI를 설치할 것; 없으면 `hm install`은 `provider none found`를 보고하고 그래도 성공한다. import한 규칙과 손으로 추가한 규칙의 집행은 로그인 없이 동작한다; 그때까지 `probe not_logged_in` / `queue N (waiting: not_logged_in)`은 정상이고, 로그인 직후 `hm install --host claude`가 바로 다시 probe한다.
+- **다른 컴퓨터로 옮기기:** 복사할 것은 없다. `.harness-memory/`는 프로젝트별이고 git이 무시하므로 새 clone은 비어서 시작한다; 메모리를 가져가려면 Claude Code를 닫은 상태에서 그 프로젝트의 `memory.sqlite`(와 `config.json`)만 복사하고 거기서 `hm install --host claude`를 실행한다. `.claude/settings.local.json`과 `install-manifest.json`은 절대 복사하지 말 것: 다른 기계의 node·hook 경로가 들어 있다. 단계별 체크리스트: [docs/setup-new-machine.ko.md](docs/setup-new-machine.ko.md).
+
+새 프로젝트에서 `hm install --host claude`의 출력(요약):
 
 ```text
 harness-memory 0.6.0-rc.1 installed for Claude Code
@@ -75,17 +89,20 @@ harness-memory 0.6.0-rc.1 installed for Claude Code
   hooks       9 events → C:\src\my-app\.claude\settings.local.json (exec form)
   node        C:\Program Files\nodejs\node.exe  (claude 2.1.172)
   hook script C:\Users\me\AppData\Roaming\npm\node_modules\harness-memory\dist\hook.js
-  database    C:\src\my-app\.harness-memory\memory.sqlite v21
+  database    C:\src\my-app\.harness-memory\memory.sqlite v22 (created)
   snapshot    built (active 0, candidates 0)
   config      C:\src\my-app\.harness-memory\config.json (created); embeddings off
   git         .claude/settings.local.json added to C:\src\my-app\.git\info\exclude
-  provider    claude — probe not_logged_in; imported and hand-added rules fire without the login; learning starts after `claude auth login`; …
-  self-test   session-start ok (…, hook status ok)
+  git         C:\src\my-app\.harness-memory\.gitignore written (nothing under .harness-memory/ is ever committed)
+  provider    claude — probe not_logged_in (Not logged in · Please run /login); the hooks enforce rules without the login — …; learning from sessions … starts after `claude auth login` …
+  self-test   session-start ok (105ms, hook status ok)
   manifest    C:\src\my-app\.harness-memory\install-manifest.json
 Open Claude Code in this project; `hm status` shows what the hooks learn.
 ```
 
-재시작은 필요 없다; Claude Code가 설정 파일 변경을 감지한다. 프로젝트를 Claude Code에서 열고 평소처럼 작업하면서 `hm status`를 보면 된다. 프로젝트에 `CLAUDE.md`나 `AGENTS.md`가 있으면 설치 출력이 `hm import --from CLAUDE.md`를 제안한다; 확인 표를 거쳐 그 bullet들을 사람 메모리로 만든다.
+v0.5 데이터베이스가 이미 있는 프로젝트는 대신 `v22 (migrated from v9, backup …\memory.sqlite.bak-v9)`를 보여 준다; [0.5에서 업그레이드](#05에서-업그레이드)를 먼저 읽을 것.
+
+재시작은 필요 없다: Claude Code의 파일 감시자가 새 훅 항목을 읽는다(첫 프롬프트 뒤에도 `hm doctor`의 `hooks.calls`가 `never`면 새 세션을 연다). 프로젝트를 Claude Code에서 열고 평소처럼 작업하면서 `hm status`를 보면 된다. 프로젝트에 `CLAUDE.md`나 `AGENTS.md`가 있으면 설치 출력이 `hm import --from CLAUDE.md`를 제안한다; 확인 표를 거쳐 그 bullet들을 사람 메모리로 만든다.
 
 Claude Code 자체의 **auto memory**(`~/.claude/projects/<slug>/memory/`, `type: feedback` 노트)도 두 번째 import 소스다: `hm import --from auto-memory`가 그 노트들을 같은 확인 표를 거쳐 사람 규칙으로 만들어, Claude가 이미 적어 둔 교정이 도구 경계에서 집행되기 시작한다. 그런 노트가 있으면 설치 출력이 알려 준다.
 
@@ -138,9 +155,10 @@ Claude Code 자체의 **auto memory**(`~/.claude/projects/<slug>/memory/`, `type
 
 ### Node 경로, npx, Windows 셸
 
-- **Node 경로.** 훅은 `hm install`을 실행한 정확한 `node` 바이너리(`process.execPath`)와 그 패키지의 정확한 `dist/hook.js`를 기록한다. 덕분에 PATH, nvm, volta 전환에 영향을 받지 않지만, 그 Node 버전을 지우거나 패키지를 옮기면 훅은 조용히 멈춘다. `hm doctor`가 이를 보고하고(`install.node`, `install.hook_script`) `hm doctor --fix`가 현재 바이너리와 스크립트로 항목을 다시 쓴다.
-- **npx.** `npx harness-memory install --host claude`도 동작하지만 npx 캐시의 복사본을 등록하며, npm은 그 캐시를 정리할 수 있다. 자리를 지키는 곳에서 설치할 것: 전역 설치 또는 프로젝트 `devDependency`.
-- **Git Bash / PowerShell(Windows).** Claude Code는 `Bash`를 Git Bash로 실행하고, Git Bash가 없으면 `PowerShell` 툴을 노출한다. harness-memory는 둘을 모두 정규 툴 `bash`로 매핑하고 dialect를 기록하므로 한 셸에서 배운 피트폴이 다른 셸에서도 발화한다(`pnpm test; git status`와 `& npm test`는 같은 정규형이 된다). exec-form 훅에는 셸이 전혀 개입하지 않는다. shell form이 필요하면(오래된 Claude Code) install은 Git Bash가 발견될 때(`CLAUDE_CODE_GIT_BASH_PATH`, `Program Files\Git`, `%LOCALAPPDATA%\Programs\Git`, `PATH`) `"shell": "bash"`, 아니면 `"powershell"`을 고른다. 분리된 worker는 `windowsHide`로 실행되므로 콘솔 창이 깜빡이지 않는다.
+- **Node 경로.** 훅은 `hm install`을 실행한 정확한 `node` 바이너리(`process.execPath`를 심볼릭 링크와 Windows 정션까지 풀어서 — fnm, nvm-windows, Scoop의 링크는 실제 버전으로 고정된다)와 그 패키지의 정확한 `dist/hook.js`를 기록한다. 덕분에 PATH, nvm, volta 전환에 영향을 받지 않지만, 그 Node 버전이 사라지거나 패키지가 옮겨지면 훅은 조용히 멈춘다: `brew upgrade node`는 옛 `Cellar/node/<version>`을 지우고(install이 경고한다), `nvm uninstall`도 같으며, pnpm / yarn / npx 아래의 재설치는 경로를 바꾼다. `hm doctor`가 이를 보고하고(`install.node`, `install.hook_script`) `hm doctor --fix`가 현재 바이너리와 스크립트로 항목을 다시 쓴다; nvm이면 `hm install` 전에 `nvm alias default <v>`로 고정된 버전을 남겨 둔다. CLI 자체는 PATH에 `node`가 있어야 한다(`hm`은 `#!/usr/bin/env node` 스크립트다); 훅은 그렇지 않다.
+- **npx, pnpm, yarn.** npm `latest`가 0.5.1인 동안 `npx harness-memory …`를 실행하지 말 것: 옛 OpenCode 플러그인을 받아 그 `install`을 돌린다. pnpm과 npx(그리고 패키지가 `.yarn/` 아래에 놓이는 yarn)는 버전마다 디렉터리를 하나씩 두므로 등록된 `dist/hook.js`는 다음 업그레이드에서 사라진다(install이 경고한다; 업그레이드 뒤 `hm install --host claude`를 다시 실행). npm 설치 — 전역이든 프로젝트 `devDependency`든 — 는 업그레이드 뒤에도 같은 경로를 유지한다.
+- **Git Bash / PowerShell(Windows).** Claude Code는 `Bash`를 Git Bash로 실행하고, Git Bash가 없으면 `PowerShell` 툴을 노출한다. harness-memory는 둘을 모두 정규 툴 `bash`로 매핑하고 dialect를 기록하므로 한 셸에서 배운 피트폴이 다른 셸에서도 발화한다(`pnpm test; git status`와 `& npm test`는 같은 정규형이 된다). exec-form 훅에는 셸이 전혀 개입하지 않는다. shell form이 필요하면(오래된 Claude Code) install은 Git Bash가 발견될 때(`CLAUDE_CODE_GIT_BASH_PATH`, `Program Files\Git`, `%LOCALAPPDATA%\Programs\Git`, `PATH`) `"shell": "bash"`, 아니면 `"powershell"`을 고른다. 분리된 worker는 `windowsHide`로 실행되므로 콘솔 창이 깜빡이지 않는다. PowerShell용 shell-form 항목은 호출 연산자를 붙인다(`& "<node>" "<hook.js>" <event>`); 없으면 PowerShell은 따옴표 친 명령을 실행하지 않고 출력만 한다.
+- **WSL.** Claude Code가 도는 환경 안에서 패키지를 설치하고 `hm install`을 실행한다: WSL 세션에는 리눅스 `node`와 리눅스 `dist/hook.js` 경로가 `.claude/settings.local.json`에 있어야 하고, `/mnt/c` 아래 체크아웃은 설정 파일이 하나뿐이라 한쪽만 고른다. 사용자 공간 Node(nvm, `$HOME` 아래 tarball)라면 `hm`을 실행하는 셸에서 그 환경을 source하고, prefix는 `/tmp` 밖에 둔다(systemd가 WSL 부팅마다 비운다).
 
 ### 확인과 제거
 
@@ -299,6 +317,8 @@ evidence_weight = correction 2 + remember 3 + (실패마다 resolution 2 | 미�
 hm install --host claude --with-embeddings   # 패키지 루트에서 npm install @xenova/transformers, embeddings.enabled = true
 ```
 
+`--with-embeddings`는 설치된 패키지 디렉터리(전역 설치면 `$(npm root -g)/harness-memory`) 안에서 `npm install @xenova/transformers`를 돌리는데, 그 package.json의 devDependencies까지 함께 끌어온다: rc tarball로 재 보니 약 350 MB, 빠른 기계에서 17 s다. 거기에 쓰기 권한이 있어야 하고 — `sudo`로 설치한 prefix는 거부한다(`installed with problems`; 훅은 그대로 등록된다); 그때는 의존성을 패키지 옆에 설치한다: `npm install -g @xenova/transformers`(그 prefix가 요구하면 `sudo`로; Node가 상위 `node_modules`에서 찾는다) 뒤 `config.json`에 `embeddings.enabled: true`. `hm install` 자체를 `sudo`로 돌리지는 말 것: 프로젝트에 root 소유 파일이 남는다. 다음 패키지 업그레이드가 패키지 안의 복사본을 지우므로 업그레이드 뒤 `hm install --host claude --with-embeddings`를 다시 실행한다. 더 가볍고 업그레이드에 견디는 위치(`~/.harness-memory/` 아래)는 0.6.1에 계획돼 있다.
+
 - 작은 **helper 프로세스**(`dist/embed-helper.js <root>`)가 Windows 명명 파이프(`\\.\pipe\harness-memory-embed-<repo_hash>`) 또는 `$XDG_RUNTIME_DIR`(없으면 임시 디렉터리) 아래의 Unix 소켓 `harness-memory-embed-<repo_hash>.sock`(저장소 밖에 두므로 깊은 체크아웃에서도 Unix 소켓 경로 길이 제한에 걸리지 않는다; `hm doctor`가 경로를 보여 준다)으로 top-k 질의에 답한다. `prompt` 훅은 `before_model.dense_timeout_ms`(80 ms) 예산 안에서 묻고, 답이 없으면 lexical 전용으로 넘어간다; 첫 실패가 helper를 분리 스폰한다(60 s에 한 번으로 제한). helper는 `snapshot/dense.v1.bin`을 로드하고 그 파일이 바뀌면 다시 로드하며, `embeddings.idle_exit_minutes`(15) 동안 요청이 없거나 SIGTERM을 받으면 **스스로 종료**한다. 설치되는 서비스도, 고정 포트도 없다.
 - 모델: `Xenova/multilingual-e5-small`(양자화), `~/.harness-memory/models`(`embeddings.cache_dir`)에 캐시. 다운로드는 임베딩이 켜져 있고 모델이 없을 때 한 번만 일어난다; 당신의 추출 CLI 외에 유일한 네트워크 접근이다.
 - worker는 추출 직후 새 행을 임베딩하고(`passage:` 접두어) `hm dream`이 나머지를 백필한다; `dense.v1.bin`은 임베딩을 가진 행이 하나라도 있을 때만 쓰인다.
@@ -411,6 +431,10 @@ hm install --host claude --with-embeddings   # 패키지 루트에서 npm instal
 | 메모리가 너무 자주 / 엉뚱하게 발화 | `hm memory:why --tool bash --target "<command>"`가 모든 억제를 설명한다; `hm memory:enforce <id> advise`가 행을 낮춘다; 세 번 override된 auto 행은 스스로 강등된다. |
 | `confirm` 정책이 묻지 않는다 | `permission_mode`가 `bypassPermissions` / `dontAsk`면 물어볼 사람이 없으므로 `confirm`은 `soft_deny`가 된다(`fired` 라인의 `delivery = before_downgraded`). |
 | Windows: Claude Code가 `PowerShell` 툴을 보여 준다 | Git Bash가 없다; 메모리는 여전히 일치한다(정규형 `bash`). `hm doctor`가 `env.git_bash`를 보고한다. |
+| `npm install -g` 뒤 `hm: command not found` / `'hm' is not recognized` | npm 전역 prefix가 PATH에 없거나(`npm prefix -g`; Windows 기본 `%APPDATA%\npm`, nvm `~/.nvm/versions/node/<v>/bin`, Homebrew `/opt/homebrew/bin`) 터미널이 설치보다 오래됐다 — 새 터미널을 연다. 그동안은 `node "$(npm root -g)/harness-memory/dist/bin/harness-memory.js"`가 동작한다. `harness-memory --version`이 `0.5.1`이면 다른 Node의 전역 디렉터리가 먼저 잡힌 것이다(Node마다 `npm ls -g harness-memory`); 0.5에는 `hm`이 없었다. |
+| Windows PowerShell: `hm.ps1 cannot be loaded because running scripts is disabled` | 기본 실행 정책 아래의 npm PowerShell 심(`npm.ps1`도 같은 식으로 실패한다). 한 번만 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, 또는 `hm.cmd` 실행 / Git Bash 사용. 훅은 심을 쓰지 않는다. |
+| 설치 직후 Claude Code가 툴 호출마다 훅 오류를 보여 준다 | exec-form 훅에는 Claude Code ≥ 2.1.139가 필요하다(릴리스 노트에서 추정); `claude --version`을 감지하지 못하면 install은 exec form을 가정한다. `hm install --host claude --hook-form shell`을 다시 실행한다(Git Bash 없는 Windows: PowerShell, `&` 호출 연산자 포함). |
+| 터미널에서는 `claude`가 되는데 `probe not_logged_in` | worker는 허용 목록 환경으로 `claude -p`를 실행한다. CLI 자신의 인증·라우팅 변수는 전달된다(`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK` / `USE_VERTEX`, `AWS_*`, `GOOGLE_*`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE` / `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`); 로그인이 그 밖의 변수에 걸려 있으면 전달되지 않는다. `hm doctor --json`이 probe detail을 보여 준다. |
 
 **`logs/hooks.log`**에는 훅 호출당 한 줄이 남는다:
 
@@ -433,7 +457,7 @@ hm install --host claude --with-embeddings   # 패키지 루트에서 npm instal
 
 v0.5는 다른 쓰기 경로(대화 버퍼 → evidence 행 → dream consolidation → 사람이 리뷰하는 승격)를 가진 OpenCode 플러그인이었다. v0.6은 당신의 `memory.sqlite`와 다섯 타입 / 네 트리거를 유지하면서 그 주위를 모두 다시 짓는다:
 
-- `hm install --host claude`는 `user_version` 9 / 10 / 16 → **21**로 마이그레이션한다(마이그레이션 017–021), 파일을 `memory.sqlite.bak-v<N>`으로 복사한 뒤에. 메모리 행은 하나도 삭제되지 않는다. 모든 행은 `authority`를 받는다: `candidate` 행과 자동 승격된 행은 `auto`, 그 외는 `human`; scope `**/*`에 `before_model`만 있는 v0.5 LLM 행은 `needs_scope = 1`과 `hm review`의 `fix_scope` 제안(90 d)을 받는다; v0.5 dream 테이블은 `legacy_*`로 이름이 바뀌고(한 릴리스 동안 `hm memory:history`가 읽는다), 템플릿 후보는 거부되며, 중복된 살아 있는 행은 `merge` 제안을 받는다.
+- `hm install --host claude`는 `user_version` 9 / 10 / 16 → **22**로 마이그레이션한다(마이그레이션 017–022), 파일을 `memory.sqlite.bak-v<N>`으로 복사한 뒤에. 메모리 행은 하나도 삭제되지 않는다. 모든 행은 `authority`를 받는다: `candidate` 행과 자동 승격된 행은 `auto`, 그 외는 `human`; scope `**/*`에 `before_model`만 있는 v0.5 LLM 행은 `needs_scope = 1`과 `hm review`의 `fix_scope` 제안(90 d)을 받는다; v0.5 dream 테이블은 `legacy_*`로 이름이 바뀌고(한 릴리스 동안 `hm memory:history`가 읽는다), 템플릿 후보는 거부되며, 중복된 살아 있는 행은 `merge` 제안을 받는다.
 - OpenCode는 **0.6.0에서 지원되지 않는다**(V2 플러그인은 0.6.2; Codex 훅은 0.6.1). `opencode.json`의 v0.5 플러그인 항목(그리고 `.opencode/package.json`, `.opencode/commands/harness-memory-*.md`)은 직접 제거할 것; `hm uninstall --purge`가 레거시 `.conversation-buffer.json` / `.dream-extract-state.json` 파일을 제거한다.
 - `hm db:rollback`은 마이그레이션 전 백업을 복원한다; 다음 writer가 다시 앞으로 마이그레이션하므로 0.5로 돌아갈 생각이면 먼저 `hm uninstall` 할 것.
 
@@ -464,7 +488,7 @@ npm run package:verify   # pack → 임시 프로젝트에 tarball 설치 → hm
 | `src/dream/` | ledger, 에피소드, 추출 프롬프트 / 스키마 / 검증, provider(`claude`, `codex`, `replay`), reconcile, consolidate, worker |
 | `src/promotion/` | `transitionMemory`와 §4.7 전이 표, `decideTier` / `enforcementDefault`, 제안, 재검증 |
 | `src/policy/` | 정책 엔진(툴 + 인자 시그니처 매칭)과 규칙 파생 |
-| `src/db/` | Store(lock → load → migrate → 트랜잭션 → 원자 저장 → 스냅샷), lock, 마이그레이터, 마이그레이션 001–021, 저장소, 스냅샷 빌더 |
+| `src/db/` | Store(lock → load → migrate → 트랜잭션 → 원자 저장 → 스냅샷), lock, 마이그레이터, 마이그레이션 001–022, 저장소, 스냅샷 빌더 |
 | `src/memory/` | `MemoryRepository` |
 | `src/embed/` | 임베딩 helper, 클라이언트, `dense.v1.bin` 코덱 |
 | `src/cli/` | `hm` 디스패처, 공용 lib, 명령 모듈 |

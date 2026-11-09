@@ -232,3 +232,97 @@ caught something real, recorded below, and the fourth's remaining nits are liste
   measured on its dense member, not on two sparse fixtures. The Windows checkout is CRLF (`core.autocrlf = true`);
   patch scripts with multi-line anchors must normalise line endings before matching.
 - **Gates after the fix.** `npx tsc --noEmit` 0 errors. Windows (Node 24.14): `npm test` 81 files / 1161 tests passed (1 todo), `hm eval:replay` 13 / 13 scenarios, 350 / 350 checks. Linux (WSL Ubuntu-22.04, Node 24.14): 80 files passed + 1 skipped (1157 tests, 4 skipped), eval:replay 350 / 350, `hm eval:latency` p95 55–68 ms over three runs, `npm run test:latency` 9 / 9. The recall-cost median test (`test/recall-hook.test.ts`, 10 ms line) failed twice during the day while review agents ran benchmarks on this machine; it passes alone and on an idle machine, and CI judges it against 25 ms. CI and calibration results for this commit are recorded with the per-runner table above.
+
+## Fresh-machine verification and the pre-release (2026-11-09)
+
+The author will run the build on another computer, so the question moved from "does the suite pass here" to "does the
+packed tarball install and work on a machine that is not this one". npm `latest` is still 0.5.1 (the OpenCode plugin) and
+this machine is not logged in to npm, so the distribution for the rc is a GitHub pre-release with the tarball attached
+(`npm install -g https://github.com/smc2315/harness-memory/releases/download/v0.6.0-rc.1/harness-memory-0.6.0-rc.1.tgz`);
+installing from git does not work because the build runs only in `prepack`, and adding `prepare` would make every git
+install pull the devDependencies (`@xenova/transformers` with onnxruntime and sharp among them). `npm publish --tag next`
+stays the author's step (`docs/setup-new-machine.ko.md` §10).
+
+### What was run
+
+One workflow, ten agents, 46 minutes, nothing in the repository modified by them:
+
+- **Windows 11 / Node 24.14.0** — the tarball (sha1 73e5248893c3078f91e4f3b3753dc72423137e7a, 86 files, 3.3 MB packed /
+  13.2 MB unpacked, runtime deps minimatch · minisearch · sql.js) into `npm install -g --prefix <tmp>`: 23 steps, 23 ok.
+  `hm.cmd`, the `hm` sh shim and `hm.ps1` all print 0.6.0-rc.1; under the Windows-default execution policy (Restricted,
+  simulated with `-ExecutionPolicy Restricted`) `hm.ps1` is refused exactly like npm's own `npm.ps1`, RemoteSigned and
+  `hm.cmd` work. Project A: real probe `ok` (4.9 s including the probe, detected `claude 2.1.317` through
+  `CLAUDE_CODE_EXECPATH` because the tester ran inside the desktop app), `database … v22 (migrated from v0)`, self-test
+  105 ms, `hm doctor` 15 ok / 0 warn; `hm memory:add --type policy --summary "…" --signature "bash:command:cmd:npm test" --enforce deny
+  --active` rebuilt the snapshot itself, `pre-tool` on Bash `npm test` → `permissionDecision: deny` with the policy text,
+  `pnpm test` → `{}` (signature_mismatch); five PreToolUse calls 93–98 ms wall, 10–15 ms inside the hook (bare
+  `node -e 0` ≈ 72–79 ms, Defender real-time on). Project B at `<tmp>\프로젝트 테스트`: installed, self-tested, one
+  hook call, uninstalled; the Korean path appears only in `install-manifest.json`, as UTF-8, round-tripping exactly.
+  Project C with the real v9 fixture: `v22 (migrated from v9, backup memory.sqlite.bak-v9)`, backup byte-identical,
+  active 12 / candidates 1 / proposals 2. Project D `--with-embeddings`: exit 0 in 17.3 s, but see F3.
+- **WSL2 Ubuntu 22.04 / Node 24.14.0 and 20.20.2** (user-space tarball nodes): 20 steps, 19 ok; the one failure was
+  systemd-tmpfiles wiping `/tmp` between separate `wsl --` invocations (the distro stops when the last client exits) — an
+  environment trap, recorded in the README's WSL bullet (keep the prefix out of `/tmp`). Real probe `not_logged_in` with the
+  guidance text as designed (2.07 s including the probe), `deny` on `npm test` / `git status && npm test` /
+  `npm test -- --watch`, `{}` on `pnpm test`; PreToolUse 49–56 ms wall / 8–10 ms inside (bare node 22–25 ms); Node 20 has no
+  `module.enableCompileCache` and the optional call is silent; the `#!/usr/bin/env node` shebang means the CLI (not the
+  hooks) needs `node` on PATH — `/usr/bin/env: 'node': No such file or directory`, exit 127, in a shell without it. Korean
+  path intact everywhere; v9 and v10 fixtures migrate; the helper socket path check (107 bytes) and the `/proc` recursion
+  guard behave on their native platform.
+- **Fresh-machine code review** (11 findings, 12 "handled" confirmations) and **documentation critic** (20 wrong or
+  misleading statements, 13 missing topics, as read by someone installing on a second computer), each medium-or-higher
+  code finding handed to an adversarial verifier with repository access and a scratch directory.
+
+### Findings and what was done
+
+| id | verdict | finding | action |
+|---|---|---|---|
+| F1 | confirmed (medium) | On macOS/Linux `process.execPath` is already the real path, so Homebrew pins `/opt/homebrew/Cellar/node/<v>/bin/node` and `brew upgrade node` (which cleans the old version) deletes it; nvm likewise on `nvm uninstall`. Reproduced in WSL with a Homebrew-shaped layout. | Install warns when the binary lives under `/Cellar/`; README Node-path bullet names `brew upgrade node` and `nvm alias default`; the "prefer the stable PATH symlink" code fix was rejected (fnm's per-shell link resolves to the same binary and would be pinned instead). |
+| F2 | confirmed (low) | On Windows `process.execPath` keeps the junction it was started through (verified with `mklink /J`): fnm's `%LOCALAPPDATA%\fnm_multishells\<pid>_…` is one link per shell, nvm-windows' `C:\Program Files\nodejs` follows `nvm use`, so the hooks ran whatever that shell last selected or died with it. | `stableExecPath()` (`fs.realpathSync.native`, guarded) in `main.ts`, so install, doctor `--fix` and the self-test all pin the real binary; a no-op on POSIX and on a plain MSI install. |
+| F3 | confirmed (medium) | `--with-embeddings` runs plain `npm install @xenova/transformers` inside the installed package, whose published manifest still carries devDependencies: 45 → 385 MB, 144 top-level entries, a `package-lock.json` written into the global package; EACCES on a `sudo`-installed prefix (reported as `installed with problems`, exit 1); the copy is wiped by the next package upgrade. `--omit=dev` alone drops transformers itself (npm infers the dev save-type from the manifest). | Documented (README Embeddings, CHANGELOG known limitations, the Korean guide): size, `npm install -g @xenova/transformers` next to the package plus `embeddings.enabled: true` (never `sudo hm install`, which would leave root-owned files in the project), re-run after upgrades. The proper fix — a dedicated directory under `~/.harness-memory/` resolved through `createRequire` — is 0.6.1 work. |
+| F4 | confirmed (medium) | Shell-form PowerShell entries were `"<node>" "<hook.js>" <event>`; PowerShell does not execute a statement that starts with a quoted string (Claude Code's hooks reference says the same), so every hook exited 1 — reachable with Claude Code < 2.1.139 without Git Bash or `--hook-form shell`. Verified through `-EncodedCommand`, the way the host runs it. | `& ` call operator for `shell: "powershell"`; `nodeOf()` accepts it so uninstall / doctor still recognise the entry; tests for both shells. |
+| F5 | confirmed (medium) | `providerEnv()` forwarded only the fixed allowlist plus `ANTHROPIC_` / `OPENAI_` / `XDG_`; a `claude` authenticated or routed through `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN`, Bedrock / Vertex with `AWS_*` / `GOOGLE_*`, or a corporate CA probed `not_logged_in` / `provider_error` and the guidance said to log in. Both hops (hook → worker, worker → `claude -p`) use the same filter, so the fix had to be there. | Names and prefixes added; `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_EXECPATH` stay dropped (recursion guards); test. Troubleshooting row. |
+| F6 | confirmed (medium) | pnpm registers `<project>/node_modules/.pnpm/harness-memory@<v>/…/dist/hook.js` (its own bin shim targets the realpath), npx `~/.npm/_npx/<hash>/…`; both change on upgrade or prune, nothing warned, and the README said a devDependency "stays put". | Install warns on `.pnpm` / `_npx` / `.yarn` segments; README bullet rewritten (npm installs keep the path, pnpm / yarn / npx do not). |
+| — | observed | After an idempotent re-install, `hm uninstall --purge` left `.claude/settings.local.json` as `{}` and the exclude line (the rewritten manifest said `created: false`, `added: false`). | Manifest provenance carried over from the previous manifest; test installs twice, uninstalls, checks both are gone. |
+| F9 | low | A brand-new database printed `v22 (migrated from v0)`. | `(created)` when no backup was written; an existing file at `user_version` 0 keeps `migrated from v0, backup …`. |
+| F10 | low | README, README.ko and the upgrade note said the schema ends at v21 (`TARGET_USER_VERSION` is 22). | Fixed in the docs before this round. |
+| F7, F8, F11 | low, left | Settings / manifest writes use a single `renameSync` (the database save retries); source maps are 9.3 of the 13.2 MB unpacked; `SessionEnd` has a 1 s timeout against 95–170 ms wall per hook on Windows. | Recorded here; none blocks a fresh install. |
+
+Documentation findings folded into README / README.ko / the upgrade note: the install command (0.5.1!), `npx` as an active
+hazard, the shell-form fallback only when `claude --version` is detectable, `hm` not on PATH, the PowerShell execution
+policy, env-based logins, moving to another machine (nothing to copy; never the settings file or the manifest), schema
+version 22 where four places still said 21 (CHANGELOG line 34 contradicted its own Phase F entry), `migrations 001–022` in
+the development table, the upgrade note's login step and its stale live-extraction paragraph. The critic's claim that
+settings edits need a restart was checked against the current hooks reference, which says direct edits are picked up by
+the file watcher; the README keeps that sentence and adds the `hooks.calls` check.
+
+The diff itself was reviewed before the commit (code, documentation and the Korean guide, each finding handed to a
+verifier). Code: two tests still compared the pinned node to `process.execPath` (doctor `--fix`, the dist smoke test)
+and the Homebrew negative ran on the real binary, so a Homebrew Mac would have failed them — all three now use the
+resolved path or an explicit one; two existing env tests assumed no `CLAUDE*` name reaches a child, which the forwarded
+auth names break for a developer whose shell carries them — they now exclude exactly those names; `(created)` is
+printed only when no backup was written (a valid file at `user_version` 0 is backed up and migrated, verified with a
+fresh sql.js export); `hm doctor` does not notice a PowerShell entry written by the old form (compareRegistration
+matches on node and script only) — documented, since no released build wrote that form. Docs: the yarn generalisation,
+`SSL_CERT_*` as if a prefix, a stale v21 in v1-explained, an abridged command quoted without `--summary`, F10 missing
+from the table. Guide: `hm memory:reject` cannot remove an active row (`memory:demote` can), `hm doctor` shows a WARN for
+`extraction.probe` before the login (so "WARN 0" was wrong at that step), worker.log line names, `nested_refusal` as a
+possibility rather than a certainty, the p95 measures the hook's inside time, `dogfood` spelled as the other Korean
+documents spell it.
+
+### Known limits after this round
+
+- `--with-embeddings` as above (F3). The `npm install -g @xenova/transformers` alternative is resolvable by Node's lookup
+  from the package directory but was not exercised end to end here.
+- Not tested: a fresh machine with `LANG=C` / POSIX locale and a Korean path; a project inside a OneDrive-synced folder
+  (every hook call appends to the ledger and the CLI renames the database — plausible interference, not observed); macOS
+  itself (the Homebrew case was reproduced on Linux with the same layout); nvm-windows (the junction behaviour is inferred
+  from `mklink /J`, which is what nvm-windows uses).
+- The Windows PowerShell shim needs RemoteSigned or `hm.cmd`; the hooks are unaffected. Documented, not changed (it is
+  npm's shim).
+
+### Gates
+
+tsc 0; the targeted suites first (install 22, settings 11, process 2), then the full Windows suite, `npm run package:verify`
+and CI on the pushed commit; the tarball attached to the pre-release is packed from the tagged commit and installed once
+more from its release URL on Windows and WSL before the release is announced as usable.

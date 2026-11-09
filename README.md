@@ -7,7 +7,7 @@
 
 It is complementary to [claude-mem](https://github.com/thedotmack/claude-mem): claude-mem remembers what happened; harness-memory stops the agent at the moment it is about to repeat a known mistake. No account, no telemetry, no daemon, no LLM call per tool call — the hot path reads one precomputed JSON file.
 
-> **0.6.0-rc.1 — Claude Code only.** Codex hooks arrive in 0.6.1 and OpenCode (V2 plugin) in 0.6.2. v0.5 was an OpenCode plugin; read [Upgrading from 0.5](#upgrading-from-05) before installing 0.6 over an existing `.harness-memory/`.
+> **0.6.0-rc.1 — Claude Code only.** Codex hooks arrive in 0.6.1 and OpenCode (V2 plugin) in 0.6.2. v0.5 was an OpenCode plugin; read [Upgrading from 0.5](#upgrading-from-05) before installing 0.6 over an existing `.harness-memory/`. Not on npm yet: install the pre-release tarball, see [Install](#install).
 
 - [How it works in one turn](#how-it-works-in-one-turn)
 - [Requirements](#requirements)
@@ -54,20 +54,34 @@ Three ideas carry the design:
 ## Requirements
 
 - **Node.js ≥ 20** (developed on 24). Hooks are plain `node` processes; the worker runs SQLite through sql.js (WASM) — no native dependencies.
-- **Claude Code ≥ 2.1.139** for exec-form hooks (`{"command": "<node>", "args": [...]}`). Older versions get shell-form hooks automatically (`--hook-form` overrides).
+- **Claude Code ≥ 2.1.139** for exec-form hooks (`{"command": "<node>", "args": [...]}`). Older versions get shell-form hooks automatically when `claude --version` can be detected; with no `claude` binary found the version is unknown and exec form is assumed — if Claude Code then reports a hook error on every call, re-run `hm install --host claude --hook-form shell`.
 - **An extraction CLI, logged in from a terminal, for learning**: `claude` (preferred) or `codex`. Extraction runs through your own headless CLI and subscription — no API key. The login is optional for enforcement: the hooks fire every rule already in the snapshot (`hm memory:add`, imported rows) without it; turning new `hm import` bullets into typed rows and learning from your sessions — including what you ask it to remember — start after `claude auth login` (older CLIs: `claude`, then `/login`; the desktop app's login does not apply to `claude -p`). Until then bullets and episodes wait in the queue and nothing is lost.
 - Windows, macOS, Linux. On Windows, Git Bash is optional (see [below](#node-path-npx-and-windows-shells)).
 
 ## Install
 
+### Install the release candidate
+
+0.6.0-rc.1 is not on npm yet: `npm install -g harness-memory` still installs **0.5.1, the OpenCode plugin**, which has no `hm` binary. Install the tarball attached to the GitHub pre-release instead:
+
 ```bash
-npm install -g harness-memory        # or: npm install -D harness-memory  (then use `npx hm …`)
+node --version                      # ≥ 20; with nvm, the version you will keep (nvm alias default <v>)
+npm uninstall -g harness-memory     # removes a leftover 0.5.1; harmless when nothing is installed
+npm install -g https://github.com/smc2315/harness-memory/releases/download/v0.6.0-rc.1/harness-memory-0.6.0-rc.1.tgz
+hm --version                        # 0.6.0-rc.1
 cd <your project>
-hm install --host claude
+hm install --host claude            # from a plain terminal, not from a shell inside a Claude Code session
 hm status
 ```
 
-Abridged output of `hm install --host claude`:
+- **`hm` not found.** The npm global prefix (`npm prefix -g`; Windows default `%APPDATA%\npm`) is not on PATH, or the terminal predates the Node install — open a new one. Meanwhile `node "$(npm root -g)/harness-memory/dist/bin/harness-memory.js" --version` works. `harness-memory --version` printing `0.5.1` means another Node's global directory wins: `npm ls -g harness-memory` under each Node.
+- **Windows PowerShell:** `hm.ps1 cannot be loaded because running scripts is disabled` is npm's PowerShell shim under the default execution policy (npm's own `npm.ps1` fails the same way). Once: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, or run `hm.cmd` / use Git Bash. The hooks never use the shim: they run `node.exe` directly.
+- **Per project instead of global:** `npm install -D <same URL>`, then `npx hm install --host claude`; the hooks then point at `node_modules/harness-memory/dist/hook.js`. Not `npx harness-memory …` while npm's `latest` is 0.5.1 (that runs the old plugin's `install`), and not from git (`github:smc2315/harness-memory#redesign/v0.6` has no `dist/`; the build runs only in `prepack`).
+- **Later:** `npm install -g harness-memory@next` once the rc is published under the `next` tag, plain `harness-memory` once 0.6.0 is `latest`. After any update run `hm install --host claude` again in each project: it migrates the database (backup first), replaces the hook entries, re-probes and re-runs the self-test. A global install keeps its hook path, so nothing breaks in between.
+- **Learning needs the `claude` CLI logged in from a terminal:** `claude auth login` (older CLIs: `claude`, then `/login`). The desktop app's login does not count, and the desktop app alone puts no `claude` on your PATH — install the CLI; without it `hm install` reports `provider none found` and still succeeds. Enforcement of imported and hand-added rules works without the login; `probe not_logged_in` / `queue N (waiting: not_logged_in)` are expected until then, and `hm install --host claude` re-probes at once afterwards.
+- **Moving to another machine:** nothing to copy. `.harness-memory/` is per project and git-ignored, so a fresh clone starts empty; to carry memories, copy that project's `memory.sqlite` (and `config.json`) with Claude Code closed and run `hm install --host claude` there. Never copy `.claude/settings.local.json` or `install-manifest.json`: they hold the other machine's node and hook paths. Korean step-by-step checklist: [docs/setup-new-machine.ko.md](docs/setup-new-machine.ko.md).
+
+Abridged output of `hm install --host claude` on a new project:
 
 ```text
 harness-memory 0.6.0-rc.1 installed for Claude Code
@@ -75,17 +89,20 @@ harness-memory 0.6.0-rc.1 installed for Claude Code
   hooks       9 events → C:\src\my-app\.claude\settings.local.json (exec form)
   node        C:\Program Files\nodejs\node.exe  (claude 2.1.172)
   hook script C:\Users\me\AppData\Roaming\npm\node_modules\harness-memory\dist\hook.js
-  database    C:\src\my-app\.harness-memory\memory.sqlite v21
+  database    C:\src\my-app\.harness-memory\memory.sqlite v22 (created)
   snapshot    built (active 0, candidates 0)
   config      C:\src\my-app\.harness-memory\config.json (created); embeddings off
   git         .claude/settings.local.json added to C:\src\my-app\.git\info\exclude
-  provider    claude — probe not_logged_in; imported and hand-added rules fire without the login; learning starts after `claude auth login`; …
-  self-test   session-start ok (…, hook status ok)
+  git         C:\src\my-app\.harness-memory\.gitignore written (nothing under .harness-memory/ is ever committed)
+  provider    claude — probe not_logged_in (Not logged in · Please run /login); the hooks enforce rules without the login — …; learning from sessions … starts after `claude auth login` …
+  self-test   session-start ok (105ms, hook status ok)
   manifest    C:\src\my-app\.harness-memory\install-manifest.json
 Open Claude Code in this project; `hm status` shows what the hooks learn.
 ```
 
-No restart is needed; Claude Code picks up the settings file change. Open the project in Claude Code, work normally, and watch `hm status`. If the project has a `CLAUDE.md` or `AGENTS.md`, the install output also suggests `hm import --from CLAUDE.md`, which turns its bullets into human memories after a confirmation table.
+A project that already has a v0.5 database shows `v22 (migrated from v9, backup …\memory.sqlite.bak-v9)` instead; read [Upgrading from 0.5](#upgrading-from-05) first.
+
+No restart is needed: Claude Code's file watcher picks up the new hook entries (if `hm doctor` → `hooks.calls` still says `never` after your first prompt, start a new session). Open the project in Claude Code, work normally, and watch `hm status`. If the project has a `CLAUDE.md` or `AGENTS.md`, the install output also suggests `hm import --from CLAUDE.md`, which turns its bullets into human memories after a confirmation table.
 
 Claude Code's own **auto memory** (`~/.claude/projects/<slug>/memory/`, notes with `type: feedback`) is a second import source: `hm import --from auto-memory` turns those notes into human rules through the same confirmation table, so a correction Claude already wrote down starts being enforced at the tool boundary. The install output mentions it when such notes exist.
 
@@ -138,9 +155,10 @@ Each registered hook is an exec-form command — the absolute Node binary that r
 
 ### Node path, npx, and Windows shells
 
-- **Node path.** Hooks record the exact `node` binary (`process.execPath`) and the exact `dist/hook.js` of the package that ran `hm install`. That makes them immune to PATH, nvm and volta switches — but if you delete that Node version or move the package, the hooks stop silently. `hm doctor` reports it (`install.node`, `install.hook_script`) and `hm doctor --fix` rewrites the entries to the current binary and script.
-- **npx.** `npx harness-memory install --host claude` works, but it registers the copy in the npx cache, which npm may prune. Install from a location that stays put: a global install or a project `devDependency`.
-- **Git Bash / PowerShell (Windows).** Claude Code runs `Bash` through Git Bash and exposes a `PowerShell` tool when Git Bash is absent. harness-memory maps both to the canonical tool `bash` and records the dialect, so a pitfall learned under one shell fires under the other (`pnpm test; git status` and `& npm test` canonicalize the same way). Exec-form hooks involve no shell at all. If shell form is needed (old Claude Code), install picks `"shell": "bash"` when Git Bash is found (`CLAUDE_CODE_GIT_BASH_PATH`, `Program Files\Git`, `%LOCALAPPDATA%\Programs\Git`, `PATH`) and `"powershell"` otherwise. The detached worker runs with `windowsHide`, so no console window flashes.
+- **Node path.** Hooks record the exact `node` binary that ran `hm install` (`process.execPath`, resolved through symlinks and Windows junctions, so fnm, nvm-windows and Scoop links pin the real version) and the exact `dist/hook.js` of that package. That makes them immune to PATH, nvm and volta switches — but if that Node version goes away or the package moves, the hooks stop silently: `brew upgrade node` removes the old `Cellar/node/<version>` (install warns), `nvm uninstall` does the same, and a reinstall under pnpm / yarn / npx changes the path. `hm doctor` reports it (`install.node`, `install.hook_script`) and `hm doctor --fix` rewrites the entries to the current binary and script; with nvm, `nvm alias default <v>` before `hm install` keeps the pinned version around. The CLI itself needs `node` on PATH (`hm` is a `#!/usr/bin/env node` script); the hooks do not.
+- **npx, pnpm, yarn.** Do not run `npx harness-memory …` while npm's `latest` is 0.5.1: it fetches the old OpenCode plugin and runs its `install`. pnpm and npx (and yarn when the package lands under `.yarn/`) keep one directory per version, so the registered `dist/hook.js` dies with the next upgrade (install warns; run `hm install --host claude` again afterwards). npm installs — global or project `devDependency` — keep the same path across upgrades.
+- **Git Bash / PowerShell (Windows).** Claude Code runs `Bash` through Git Bash and exposes a `PowerShell` tool when Git Bash is absent. harness-memory maps both to the canonical tool `bash` and records the dialect, so a pitfall learned under one shell fires under the other (`pnpm test; git status` and `& npm test` canonicalize the same way). Exec-form hooks involve no shell at all. If shell form is needed (old Claude Code), install picks `"shell": "bash"` when Git Bash is found (`CLAUDE_CODE_GIT_BASH_PATH`, `Program Files\Git`, `%LOCALAPPDATA%\Programs\Git`, `PATH`) and `"powershell"` otherwise. The detached worker runs with `windowsHide`, so no console window flashes. Shell-form entries for PowerShell carry the call operator (`& "<node>" "<hook.js>" <event>`); without it PowerShell prints the quoted command instead of running it.
+- **WSL.** Install the package and run `hm install` inside the environment that runs Claude Code: a WSL session needs the Linux `node` and a Linux `dist/hook.js` path in `.claude/settings.local.json`, and a checkout under `/mnt/c` holds one settings file, so pick one side. With a user-space Node (nvm, a tarball under `$HOME`) source its environment in the shell that runs `hm`, and keep the prefix out of `/tmp`, which systemd clears at every WSL boot.
 
 ### Verify and remove
 
@@ -299,6 +317,8 @@ Dense retrieval is **off by default** and never on the `PreToolUse` path. When y
 hm install --host claude --with-embeddings   # npm install @xenova/transformers in the package root, embeddings.enabled = true
 ```
 
+`--with-embeddings` runs `npm install @xenova/transformers` inside the installed package directory (for a global install `$(npm root -g)/harness-memory`), which also pulls that manifest's devDependencies: about 350 MB and 17 s on a fast machine, measured on the rc tarball. It needs write access there — a `sudo`-installed prefix refuses (`installed with problems`; the hooks are registered all the same); then install the dependency next to the package instead, `npm install -g @xenova/transformers` (with `sudo` if that prefix needs it; Node resolves it from the parent `node_modules`), and set `embeddings.enabled: true` in `config.json`. Never run `hm install` itself with `sudo`: it would leave root-owned files in the project. The next package upgrade drops the in-package copy, so run `hm install --host claude --with-embeddings` again afterwards. A leaner, upgrade-proof location under `~/.harness-memory/` is planned for 0.6.1.
+
 - A small **helper process** (`dist/embed-helper.js <root>`) serves top-k queries over a Windows named pipe (`\\.\pipe\harness-memory-embed-<repo_hash>`) or a Unix socket `harness-memory-embed-<repo_hash>.sock` in `$XDG_RUNTIME_DIR` (else the temp directory) — never under the repository, so a deep checkout stays below the Unix socket path limit; `hm doctor` prints the path. The `prompt` hook asks it with a `before_model.dense_timeout_ms` (80 ms) budget and falls back to lexical-only when it does not answer; the first miss spawns the helper detached (throttled to once per 60 s). It loads `snapshot/dense.v1.bin`, reloads when that file changes, and **exits by itself** after `embeddings.idle_exit_minutes` (15) of inactivity or on SIGTERM. There is no installed service and no fixed port.
 - Model: `Xenova/multilingual-e5-small` (quantized), cached under `~/.harness-memory/models` (`embeddings.cache_dir`). The download happens once, only when embeddings are enabled and the model is absent; it is the only network access besides your own extraction CLI.
 - The worker embeds new rows right after extraction (`passage:` prefix) and `hm dream` backfills the rest; `dense.v1.bin` is only written when at least one row has an embedding.
@@ -411,6 +431,10 @@ Names and flags are taken from the dispatcher (`src/cli/registry.ts` and the com
 | Memories fire too often / wrong memory | `hm memory:why --tool bash --target "<command>"` explains every suppression; `hm memory:enforce <id> advise` lowers a row; an auto row overridden three times downgrades itself. |
 | A `confirm` policy never asks | Under `permission_mode` `bypassPermissions` / `dontAsk` there is nobody to ask, so `confirm` becomes `soft_deny` (`delivery = before_downgraded` in the `fired` line). |
 | Windows: Claude Code shows a `PowerShell` tool | Git Bash is absent; memories still match (canonical `bash`). `hm doctor` reports `env.git_bash`. |
+| `hm: command not found` / `'hm' is not recognized` after `npm install -g` | The npm global prefix is not on PATH (`npm prefix -g`; Windows default `%APPDATA%\npm`, nvm `~/.nvm/versions/node/<v>/bin`, Homebrew `/opt/homebrew/bin`) or the terminal predates the install — open a new one. Meanwhile `node "$(npm root -g)/harness-memory/dist/bin/harness-memory.js"` works. `harness-memory --version` printing `0.5.1` means another Node's global directory wins (`npm ls -g harness-memory` under each Node); `hm` did not exist in 0.5. |
+| Windows PowerShell: `hm.ps1 cannot be loaded because running scripts is disabled` | npm's PowerShell shim under the default execution policy (`npm.ps1` fails the same way). Once: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, or run `hm.cmd` / use Git Bash. The hooks never use the shim. |
+| Claude Code shows a hook error on every tool call right after install | Exec-form hooks need Claude Code ≥ 2.1.139 (inferred from release notes); install assumes exec form when `claude --version` cannot be detected. Re-run `hm install --host claude --hook-form shell` (Windows without Git Bash: PowerShell, with the `&` call operator). |
+| `probe not_logged_in` although `claude` works in your terminal | The worker runs `claude -p` with an allowlisted environment. The CLI's own auth and routing variables are forwarded (`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK` / `USE_VERTEX`, `AWS_*`, `GOOGLE_*`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE` / `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`); anything else your login depends on is not. `hm doctor --json` shows the probe detail. |
 
 **`logs/hooks.log`** has one line per hook call:
 
@@ -433,7 +457,7 @@ Names and flags are taken from the dispatcher (`src/cli/registry.ts` and the com
 
 v0.5 was an OpenCode plugin with a different write path (conversation buffer → evidence rows → dream consolidation → human-reviewed promotion). v0.6 keeps your `memory.sqlite` and the five types / four triggers, and rebuilds everything around it:
 
-- `hm install --host claude` migrates `user_version` 9 / 10 / 16 → **21** (migrations 017–021), after copying the file to `memory.sqlite.bak-v<N>`. No memory row is deleted. Every row gets an `authority`: `candidate` rows and auto-promoted rows become `auto`, every other row `human`; v0.5 LLM rows with scope `**/*` and only `before_model` get `needs_scope = 1` and a `fix_scope` proposal (90 d) in `hm review`; the v0.5 dream tables are renamed `legacy_*` (read by `hm memory:history` for one release), template candidates are rejected, duplicate live rows get `merge` proposals.
+- `hm install --host claude` migrates `user_version` 9 / 10 / 16 → **22** (migrations 017–022), after copying the file to `memory.sqlite.bak-v<N>`. No memory row is deleted. Every row gets an `authority`: `candidate` rows and auto-promoted rows become `auto`, every other row `human`; v0.5 LLM rows with scope `**/*` and only `before_model` get `needs_scope = 1` and a `fix_scope` proposal (90 d) in `hm review`; the v0.5 dream tables are renamed `legacy_*` (read by `hm memory:history` for one release), template candidates are rejected, duplicate live rows get `merge` proposals.
 - OpenCode is **not supported by 0.6.0** (V2 plugin in 0.6.2; Codex hooks in 0.6.1). Remove the v0.5 plugin entry from `opencode.json` (and `.opencode/package.json`, `.opencode/commands/harness-memory-*.md`) yourself; `hm uninstall --purge` removes the legacy `.conversation-buffer.json` / `.dream-extract-state.json` files.
 - `hm db:rollback` restores the pre-migration backup; the next writer migrates forward again, so `hm uninstall` first when you mean to go back to 0.5.
 
@@ -464,7 +488,7 @@ npm run package:verify   # pack, install the tarball into a temp project, run hm
 | `src/dream/` | Ledger, episodes, extraction prompt / schema / validation, providers (`claude`, `codex`, `replay`), reconcile, consolidate, worker |
 | `src/promotion/` | `transitionMemory` and the §4.7 edge table, `decideTier` / `enforcementDefault`, proposals, revalidation |
 | `src/policy/` | Policy engine (tool + argument signature matching) and rule derivation |
-| `src/db/` | Store (lock → load → migrate → transaction → atomic save → snapshot), locks, migrator, migrations 001–021, repositories, snapshot builder |
+| `src/db/` | Store (lock → load → migrate → transaction → atomic save → snapshot), locks, migrator, migrations 001–022, repositories, snapshot builder |
 | `src/memory/` | `MemoryRepository` |
 | `src/embed/` | Embedding helper, client and the `dense.v1.bin` codec |
 | `src/cli/` | The `hm` dispatcher, shared libs and command modules |

@@ -107,7 +107,7 @@ CLI가 로그인된 머신에서는 같은 episode가 다음과 같이 끝나야
 프로젝트별: `<repo>/.harness-memory/`
 
 ```
-memory.sqlite              SQLite (sql.js), user_version 21 — 유일한 진실
+memory.sqlite              SQLite (sql.js), user_version 22 — 유일한 진실
 memory.sqlite.prev         직전 저장본 (헤더 손상 시 자동 복구)
 memory.sqlite.bak-v<N>     마이그레이션 직전 백업 (v0.5 → v0.6 올릴 때 .bak-v9/.bak-v10 등)
 snapshot/active.v1.json    훅이 읽는 전부: active 메모리(임베딩 제외), 파생 정책 규칙, failure_index, counts, source stat
@@ -263,7 +263,7 @@ hm eval:latency   # 300 메모리 픽스처에 pre-tool 훅 50회 스폰, p95 �
 
 ## 11. 미뤄 둔 것 / 다음 단계
 
-- 0.6.0 릴리스: `redesign/v0.6`를 GitHub에 푸시 → PR → `master` 병합 → `npm publish`. 푸시는 2026-11-08 밤에 했고(당신의 "푸시해"), 첫 CI 실행의 후속 수정은 `phase-f-notes.md`의 "CI follow-up"에 있습니다. `master`로 가는 PR은 2026-11-09에 열었습니다([#1](https://github.com/smc2315/harness-memory/pull/1), 당신의 "ㄱㄱ"); 병합과 publish는 아직입니다.
+- 0.6.0 릴리스: `redesign/v0.6`를 GitHub에 푸시 → PR → `master` 병합 → `npm publish`. 푸시는 2026-11-08 밤에 했고(당신의 "푸시해"), 첫 CI 실행의 후속 수정은 `phase-f-notes.md`의 "CI follow-up"에 있습니다. `master`로 가는 PR은 2026-11-09에 열었습니다([#1](https://github.com/smc2315/harness-memory/pull/1), 당신의 "ㄱㄱ"); 병합과 publish는 아직입니다. 다른 컴퓨터에서 쓰기 위해 같은 날 GitHub 프리릴리스 `v0.6.0-rc.1`에 tarball을 붙였고(`npm install -g <그 URL>`로 설치; npm의 `latest`는 아직 0.5.1), 새 기계용 체크리스트는 `docs/setup-new-machine.ko.md`입니다.
 - 0.6.1: Codex 호스트 어댑터(`notify` 훅 기반), `eval:live`.
 - 0.6.2: OpenCode V2 플러그인 어댑터(기존 사용자 이전 경로).
 - 로그인된 머신에서 첫 dogfood 후 `nested_refusal` 문구, 추출 프롬프트 품질, aliases 품질 튜닝.
