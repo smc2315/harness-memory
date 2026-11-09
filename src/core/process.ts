@@ -7,7 +7,13 @@ import { spawn } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { delimiter, join } from "node:path";
 
-/** Exact variable names forwarded to child processes. Everything else — notably CLAUDECODE, CLAUDE_CODE_*, CODEX* — is dropped. */
+/**
+ * Exact variable names forwarded to child processes. Everything else — notably CLAUDECODE, CLAUDE_CODE_ENTRYPOINT /
+ * CLAUDE_CODE_EXECPATH and the other host markers, CODEX* — is dropped. The exception is the extraction CLI's own
+ * auth and routing (config dir, headless OAuth token, Bedrock / Vertex switches with their cloud credentials, corporate
+ * CA bundles): a `claude` that works in the terminal must work for the worker, or the probe says `not_logged_in` to
+ * someone who is logged in.
+ */
 const ENV_ALLOWLIST = new Set<string>([
   "PATH",
   "Path",
@@ -53,9 +59,20 @@ const ENV_ALLOWLIST = new Set<string>([
   "HARNESS_MEMORY_CLAUDE_BIN",
   "HARNESS_MEMORY_CODEX_BIN",
   "HARNESS_MEMORY_PROVIDER",
+  "CLAUDE_CONFIG_DIR",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "CLAUDE_CODE_USE_BEDROCK",
+  "CLAUDE_CODE_USE_VERTEX",
+  "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+  "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+  "CLOUD_ML_REGION",
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "REQUESTS_CA_BUNDLE",
 ]);
 
-const ENV_PREFIX_ALLOWLIST = ["ANTHROPIC_", "OPENAI_", "XDG_"];
+const ENV_PREFIX_ALLOWLIST = ["ANTHROPIC_", "OPENAI_", "XDG_", "AWS_", "GOOGLE_"];
 
 /**
  * Allowlisted environment for every child we spawn. `HARNESS_MEMORY_DISABLE=1` is always set so

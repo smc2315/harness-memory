@@ -13,7 +13,7 @@ import type { DoctorReport } from "../src/cli/commands/doctor";
 import type { StatusReport } from "../src/cli/commands/status";
 import { readGitTrackedFiles } from "../src/cli/lib/diagnostics";
 import type { InstallManifest } from "../src/cli/lib/manifest";
-import { STATE_GITIGNORE_CONTENT } from "../src/cli/lib/paths";
+import { STATE_GITIGNORE_CONTENT, stableExecPath } from "../src/cli/lib/paths";
 import { listHarnessHooks } from "../src/cli/lib/settings";
 import { createCliStore } from "../src/cli/lib/store";
 import { loadConfig } from "../src/core/config";
@@ -193,8 +193,8 @@ describe("hm doctor", () => {
     expect(checkOf(fixedReport, "install.node").status).toBe("ok");
     expect(checkOf(fixedReport, "locks.db").status).toBe("ok");
     const entries = listHarnessHooks(JSON.parse(readFileSync(settingsFile, "utf8")) as Record<string, unknown>);
-    expect(entries.every((entry) => entry.node === process.execPath)).toBe(true);
-    expect((JSON.parse(readFileSync(project.paths.manifest, "utf8")) as InstallManifest).node).toBe(process.execPath);
+    expect(entries.every((entry) => entry.node === stableExecPath())).toBe(true);
+    expect((JSON.parse(readFileSync(project.paths.manifest, "utf8")) as InstallManifest).node).toBe(stableExecPath());
   });
 
   test("reports a pending migration, unreachable memories after a rebuild, and scans a host debug log", async () => {

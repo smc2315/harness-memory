@@ -3,7 +3,7 @@
  * runs from (hook script `dist/hook.js`, version), Claude Code's settings files and the git exclude file.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -98,6 +98,23 @@ export function resolveHookScript(): string {
     if (existsSync(candidate)) return candidate;
   }
   return candidates[candidates.length - 1]!;
+}
+
+/**
+ * The node binary to pin into the hooks: `process.execPath` with symlinks and Windows junctions resolved.
+ * libuv already returns the real path on macOS and Linux; on Windows it keeps the path node was started
+ * through, which under fnm (`%LOCALAPPDATA%\fnm_multishells\<pid>_…`, one junction per shell), nvm-windows
+ * (`C:\Program Files\nodejs` → the active version) or Scoop (`current`) is a link that moves with the next
+ * `nvm use` or vanishes with the shell. Pinning the target keeps the hooks on the version that installed them,
+ * as on POSIX; `hm doctor --fix` repoints them when that version is removed. Falls back to the input when
+ * realpath fails (exotic mounts).
+ */
+export function stableExecPath(execPath: string = process.execPath): string {
+  try {
+    return realpathSync.native(execPath);
+  } catch {
+    return execPath;
+  }
 }
 
 /** Sibling bundles the hook spawns; `doctor` checks they exist next to the hook script. */

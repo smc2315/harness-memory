@@ -53,3 +53,40 @@ describe("spawnDetached and deferred spawn failures (real child_process)", () =>
     expect(JSON.parse(result.stdout) as { errors: string[] }).toEqual({ errors: ["ENOENT"] });
   });
 });
+
+describe("providerEnv", () => {
+  test("forwards the extraction CLI's auth and routing variables and drops the host markers", async () => {
+    const { providerEnv } = await import("../src/core/process");
+    const saved = { ...process.env };
+    const forwarded: Record<string, string> = {
+      CLAUDE_CONFIG_DIR: "/home/me/.claude-work",
+      CLAUDE_CODE_OAUTH_TOKEN: "headless-login",
+      CLAUDE_CODE_USE_BEDROCK: "1",
+      AWS_PROFILE: "work",
+      AWS_REGION: "us-east-1",
+      GOOGLE_APPLICATION_CREDENTIALS: "/home/me/sa.json",
+      NODE_EXTRA_CA_CERTS: "/etc/ssl/corp.pem",
+      ANTHROPIC_VERTEX_PROJECT_ID: "proj",
+    };
+    const dropped: Record<string, string> = {
+      CLAUDECODE: "1",
+      CLAUDE_CODE_ENTRYPOINT: "cli",
+      CLAUDE_CODE_EXECPATH: "C:\\x\\claude.exe",
+      CLAUDE_CODE_SSE_PORT: "1234",
+      RANDOM_UNRELATED_VAR: "x",
+    };
+    Object.assign(process.env, forwarded, dropped);
+    try {
+      const env = providerEnv({ CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" });
+      for (const [key, value] of Object.entries(forwarded)) expect(env[key]).toBe(value);
+      for (const key of Object.keys(dropped)) expect(env[key]).toBeUndefined();
+      expect(env.HARNESS_MEMORY_DISABLE).toBe("1");
+      expect(env.CLAUDE_CODE_DISABLE_AUTO_MEMORY).toBe("1");
+    } finally {
+      for (const key of [...Object.keys(forwarded), ...Object.keys(dropped)]) {
+        if (key in saved) process.env[key] = saved[key];
+        else delete process.env[key];
+      }
+    }
+  });
+});

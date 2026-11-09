@@ -62,7 +62,11 @@ export interface HookCommandSpec {
   /** Absolute `dist/hook.js`. */
   hookScript: string;
   form: HookForm;
-  /** Shell for shell-form entries on Windows (`bash` when Git Bash exists, else `powershell`); null elsewhere. */
+  /**
+   * Shell for shell-form entries on Windows (`bash` when Git Bash exists, else `powershell`); null elsewhere.
+   * PowerShell gets the call operator (`& "<node>" "<hook.js>" <event>`): a statement that starts with a quoted
+   * string only prints it (Claude Code's hooks reference says the same).
+   */
   shell: HookShell | null;
 }
 
@@ -76,7 +80,7 @@ export function buildHookCommand(spec: HookCommandSpec, registration: HookRegist
   }
   const command: HookCommand = {
     type: "command",
-    command: `${quoteForShell(spec.execPath)} ${quoteForShell(spec.hookScript)} ${registration.event}`,
+    command: `${spec.shell === "powershell" ? "& " : ""}${quoteForShell(spec.execPath)} ${quoteForShell(spec.hookScript)} ${registration.event}`,
     timeout: registration.timeout,
   };
   if (spec.shell !== null) command.shell = spec.shell;
@@ -98,7 +102,8 @@ const EVENT_WORDS = new Set<string>(HOOK_EVENTS);
 
 /**
  * True for a hook entry harness-memory wrote: exec form `args = ["…/hook.js", "<event>"]`, or shell form
- * `"<node>" "…/hook.js" <event>`. The event word is what distinguishes it from someone else's `hook.js`.
+ * `"<node>" "…/hook.js" <event>` (PowerShell: `& "<node>" …`). The event word is what distinguishes it from
+ * someone else's `hook.js`.
  */
 export function isHarnessHookCommand(value: unknown): value is HookCommand {
   if (!isRecord(value) || value.type !== "command") return false;
@@ -139,7 +144,7 @@ function scriptOf(command: HookCommand): string | null {
 
 function nodeOf(command: HookCommand): string | null {
   if (Array.isArray(command.args)) return command.command;
-  const match = command.command.match(/^"([^"]+)"/) ?? command.command.match(/^(\S+)/);
+  const match = command.command.match(/^(?:&\s+)?"([^"]+)"/) ?? command.command.match(/^(?:&\s+)?(\S+)/);
   return match === null ? null : match[1]!;
 }
 

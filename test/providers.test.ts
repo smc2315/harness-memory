@@ -250,7 +250,9 @@ describe("providerEnv", () => {
       expect(Object.keys(env).some((key) => key.toUpperCase() === "PATH")).toBe(true);
       const child = claudeChildEnv();
       expect(child.CLAUDE_CODE_DISABLE_AUTO_MEMORY).toBe("1");
-      expect(Object.keys(child).filter((key) => key.startsWith("CLAUDE"))).toEqual(["CLAUDE_CODE_DISABLE_AUTO_MEMORY"]);
+      // The extraction CLI's own auth / routing names are forwarded on purpose (a developer's shell may carry them); every other CLAUDE* is a host marker.
+      const forwardedClaudeNames = new Set(["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH"]);
+      expect(Object.keys(child).filter((key) => key.startsWith("CLAUDE") && !forwardedClaudeNames.has(key))).toEqual(["CLAUDE_CODE_DISABLE_AUTO_MEMORY"]);
     } finally {
       for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
       Object.assign(process.env, saved);

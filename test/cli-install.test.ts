@@ -16,7 +16,7 @@ import type { UninstallReport } from "../src/cli/commands/uninstall";
 import { canonicalDirectory, projectSlug } from "../src/cli/lib/auto-memory";
 import { probeGuidance } from "../src/cli/lib/diagnostics";
 import type { InstallManifest } from "../src/cli/lib/manifest";
-import { GIT_EXCLUDE_LINE, STATE_GITIGNORE_CONTENT } from "../src/cli/lib/paths";
+import { GIT_EXCLUDE_LINE, STATE_GITIGNORE_CONTENT, stableExecPath } from "../src/cli/lib/paths";
 import { listHarnessHooks } from "../src/cli/lib/settings";
 import { TARGET_USER_VERSION } from "../src/core/paths";
 import type { ProbeResult } from "../src/core/vocabulary";
@@ -78,7 +78,7 @@ describe("hm install --host claude", () => {
     expect(Object.keys(settings.hooks).sort()).toEqual(["PostToolUse", "PostToolUseFailure", "PreCompact", "PreToolUse", "SessionEnd", "SessionStart", "Stop", "StopFailure", "UserPromptSubmit"]);
     const preTool = settings.hooks.PreToolUse![0]!;
     expect(preTool.matcher).toBe("Bash|PowerShell|Edit|MultiEdit|Write|NotebookEdit|WebFetch|mcp__.*");
-    expect(preTool.hooks[0]).toEqual({ type: "command", command: process.execPath, args: [project.hookScript, "pre-tool"], timeout: 5 });
+    expect(preTool.hooks[0]).toEqual({ type: "command", command: stableExecPath(), args: [project.hookScript, "pre-tool"], timeout: 5 });
     expect(settings.hooks.SessionEnd![0]!.hooks[0]!.timeout).toBe(1);
     expect(settings.hooks.SessionStart![0]!.matcher).toBeUndefined();
 
@@ -96,7 +96,7 @@ describe("hm install --host claude", () => {
 
     const manifest = readJson<InstallManifest>(project.paths.manifest);
     expect(manifest.schema).toBe("install-manifest.v1");
-    expect(manifest.node).toBe(process.execPath);
+    expect(manifest.node).toBe(stableExecPath());
     expect(manifest.hook_script).toBe(project.hookScript);
     expect(manifest.settings_file).toBe(settingsFile);
     expect(manifest.scope).toBe("project");
@@ -208,8 +208,50 @@ describe("hm install --host claude", () => {
     const entries = listHarnessHooks(readJson(report.settings_file));
     expect(entries).toHaveLength(9);
     expect(entries[0]!.command.args).toBeUndefined();
-    expect(entries[0]!.command.command).toBe(`"${process.execPath}" "${project.hookScript}" ${entries[0]!.event}`);
+    expect(entries[0]!.command.command).toBe(`& "${stableExecPath()}" "${project.hookScript}" ${entries[0]!.event}`);
     expect(entries[0]!.command.shell).toBe("powershell");
+  });
+
+  test("warns when the node binary lives in a Homebrew Cellar and when the hook script sits under a per-version directory", async () => {
+    const pnpmDir = join(project.root, "node_modules", ".pnpm", "harness-memory@0.6.0-rc.1", "node_modules", "harness-memory", "dist");
+    mkdirSync(pnpmDir, { recursive: true });
+    const pnpmHook = join(pnpmDir, "hook.js");
+    writeFileSync(pnpmHook, readFileSync(project.hookScript));
+    const cellar = "/opt/homebrew/Cellar/node/24.14.0/bin/node";
+    const result = await runHm(project, ["install", "--host", "claude", "--skip-probe", "--skip-self-test", "--hook-script", pnpmHook, "--json"], { execPath: cellar });
+    expect(result.code).toBe(0);
+    const report = result.json<InstallReport>();
+    expect(report.ok).toBe(true);
+    expect(report.node).toBe(cellar);
+    expect(report.warnings.some((warning) => warning.startsWith(`Homebrew node: \`brew upgrade node\` removes ${cellar}`))).toBe(true);
+    expect(report.warnings.some((warning) => warning.startsWith("hook script path changes when the package is upgraded"))).toBe(true);
+    // An explicit binary outside any Cellar: on a Homebrew Mac the real execPath would fire the warning on purpose.
+    const plain = await runHm(project, ["install", "--host", "claude", "--skip-probe", "--skip-self-test", "--json"], {
+      execPath: process.platform === "win32" ? process.execPath : "/usr/local/bin/node",
+    });
+    expect(plain.json<InstallReport>().warnings.filter((warning) => warning.startsWith("Homebrew") || warning.startsWith("hook script path"))).toEqual([]);
+  });
+
+  test("a re-run keeps the first run's record of what it created, so uninstall still removes the settings file and the exclude line", async () => {
+    const first = await runHm(project, ["install", "--host", "claude", "--skip-probe", "--skip-self-test", "--json"]);
+    expect(first.code).toBe(0);
+    const second = await runHm(project, ["install", "--host", "claude", "--skip-probe", "--skip-self-test", "--json"]);
+    expect(second.code).toBe(0);
+    expect(second.json<InstallReport>().git_exclude?.added).toBe(false);
+    const manifest = readJson<InstallManifest>(project.paths.manifest);
+    expect(manifest.files.find((file) => file.role === "settings")?.created).toBe(true);
+    expect(manifest.git_exclude?.added).toBe(true);
+    const uninstall = await runHm(project, ["uninstall", "--json"]);
+    expect(uninstall.code).toBe(0);
+    expect(existsSync(join(project.root, ".claude", "settings.local.json"))).toBe(false);
+    expect(readFileSync(join(project.root, ".git", "info", "exclude"), "utf8")).not.toContain(GIT_EXCLUDE_LINE);
+  });
+
+  test("renders a brand-new database as created, not as migrated from v0", async () => {
+    const result = await runHm(project, ["install", "--host", "claude", "--skip-probe", "--skip-self-test"]);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toMatch(/memory\.sqlite v\d+ \(created\)/);
+    expect(result.stdout).not.toContain("migrated from v0");
   });
 
   test("--with-embeddings runs npm through the seam and enables embeddings only on success", async () => {
@@ -444,5 +486,13 @@ describe("npm spawn plan (--with-embeddings)", () => {
     });
     expect(planNpmSpawn(["install", "@xenova/transformers"], { execPath: bareNode, platform: "win32", env: { PATH: join(base, "elsewhere") } })).toBeNull();
     expect(planNpmSpawn(["install", "@xenova/transformers"], { execPath: bareNode, platform: "linux", env })).toEqual({ file: "npm", args: ["install", "@xenova/transformers"], shell: false });
+  });
+});
+
+describe("stableExecPath", () => {
+  test("resolves links and junctions to the binary that actually runs, and returns the input when realpath fails", () => {
+    expect(stableExecPath(process.execPath)).toBe(realpathSync.native(process.execPath));
+    const missing = join(tmpdir(), "definitely-missing-node-dir", "node");
+    expect(stableExecPath(missing)).toBe(missing);
   });
 });

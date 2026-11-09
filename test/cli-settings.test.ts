@@ -40,9 +40,17 @@ describe("hook registrations (§8.2)", () => {
   test("exec form carries the node binary and [hook.js, event] args; shell form quotes both paths", () => {
     const preTool = HOOK_REGISTRATIONS.find((registration) => registration.event === "pre-tool")!;
     expect(buildHookCommand(spec, preTool)).toEqual({ type: "command", command: spec.execPath, args: [spec.hookScript, "pre-tool"], timeout: 5 });
+    const bash = buildHookCommand({ ...spec, form: "shell", shell: "bash" }, preTool);
+    expect(bash).toEqual({ type: "command", command: `"${spec.execPath}" "${spec.hookScript}" pre-tool`, timeout: 5, shell: "bash" });
+    expect(isHarnessHookCommand(bash)).toBe(true);
+    // PowerShell prints a statement that is only quoted strings instead of running it: the call operator is required.
     const shell = buildHookCommand({ ...spec, form: "shell", shell: "powershell" }, preTool);
-    expect(shell).toEqual({ type: "command", command: `"${spec.execPath}" "${spec.hookScript}" pre-tool`, timeout: 5, shell: "powershell" });
+    expect(shell).toEqual({ type: "command", command: `& "${spec.execPath}" "${spec.hookScript}" pre-tool`, timeout: 5, shell: "powershell" });
     expect(isHarnessHookCommand(shell)).toBe(true);
+    const [entry] = listHarnessHooks({ hooks: { PreToolUse: [{ hooks: [shell] }] } });
+    expect(entry?.node).toBe(spec.execPath);
+    expect(entry?.script).toBe(spec.hookScript);
+    expect(entry?.event).toBe("pre-tool");
   });
 });
 

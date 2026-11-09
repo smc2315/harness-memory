@@ -27,7 +27,7 @@ import type { CommandContext, NpmRunResult } from "../context";
 import { flagBoolean, flagString, type OptionSpecs } from "../lib/args";
 import { AUTO_MEMORY_DEFAULT_TYPES, listAutoMemoryNotes, locateAutoMemory, selectAutoMemoryNotes } from "../lib/auto-memory";
 import { probeGuidance, readSnapshotFacts } from "../lib/diagnostics";
-import { sha256File, writeManifest, type InstallManifest, type ManifestFile } from "../lib/manifest";
+import { readManifest, sha256File, writeManifest, type InstallManifest, type ManifestFile } from "../lib/manifest";
 import { formatMs, pluralize } from "../lib/output";
 import {
   ensureStateGitignore,
@@ -240,6 +240,21 @@ export function detectAutoMemory(ctx: Pick<CommandContext, "paths" | "env" | "pl
   }
 }
 
+/** Package layouts that keep one directory per version: the registered hook path dies with the next upgrade. */
+const PER_VERSION_PATH = /[\\/](?:\.pnpm|_npx|\.yarn)[\\/]/;
+
+/**
+ * A re-run rewrites the manifest from the current state, where the settings file now exists and the exclude line
+ * is already present; the first run's record of having created them is what lets `uninstall` remove them again.
+ */
+function previousSettingsCreated(previous: InstallManifest | null, settingsFile: string): boolean {
+  return previous !== null && previous.settings_file === settingsFile && previous.files.some((file) => file.role === "settings" && file.created);
+}
+
+function previousExcludeAdded(previous: InstallManifest | null, path: string): boolean {
+  return previous !== null && previous.git_exclude !== null && previous.git_exclude.path === path && previous.git_exclude.added;
+}
+
 export function renderInstallReport(report: InstallReport): string[] {
   const lines: string[] = [];
   lines.push(`harness-memory ${report.version} ${report.ok ? "installed" : "installed with problems"} for Claude Code`);
@@ -248,7 +263,8 @@ export function renderInstallReport(report: InstallReport): string[] {
   lines.push(`  node        ${report.node}${report.claude_version === null ? "" : `  (claude ${report.claude_version})`}`);
   lines.push(`  hook script ${report.hook_script}`);
   const db = report.database;
-  const migrated = db.migrated_from === null ? "" : ` (migrated from v${String(db.migrated_from)}${db.backup === null ? "" : `, backup ${db.backup}`})`;
+  const migrated =
+    db.migrated_from === null ? "" : db.migrated_from === 0 && db.backup === null ? " (created)" : ` (migrated from v${String(db.migrated_from)}${db.backup === null ? "" : `, backup ${db.backup}`})`;
   lines.push(`  database    ${db.path} v${String(db.user_version)}${migrated}`);
   const counts = report.snapshot_counts;
   lines.push(`  snapshot    ${db.snapshot_built ? "built" : "not rebuilt"}${counts === null ? "" : ` (active ${String(counts.active)}, candidates ${String(counts.candidates)}${counts.unreachable > 0 ? `, unreachable ${String(counts.unreachable)}` : ""})`}`);
@@ -301,6 +317,11 @@ export async function runInstall(ctx: CommandContext): Promise<number> {
   for (const [name, file] of Object.entries(siblings)) {
     if (!existsSync(file)) warnings.push(`${name} bundle missing next to the hook script: ${file}`);
   }
+  if (PER_VERSION_PATH.test(hookScript)) {
+    warnings.push(
+      `hook script path changes when the package is upgraded (pnpm, npx and yarn's .yarn/ layout keep one directory per version): run \`hm install --host claude\` again after upgrading harness-memory, or \`hm doctor --fix\` once the hooks report a missing script`
+    );
+  }
 
   // 1 directories (+ .gitignore) + config
   for (const dir of stateDirectories(ctx.paths)) mkdirSync(dir, { recursive: true });
@@ -337,8 +358,12 @@ export async function runInstall(ctx: CommandContext): Promise<number> {
   const gitBash = (ctx.seams.findGitBash ?? (() => findGitBash(ctx.env, ctx.platform)))();
   const shell: HookShell | null = form === "shell" && ctx.platform === "win32" ? (gitBash === null ? "powershell" : "bash") : null;
   const spec: HookCommandSpec = { execPath: ctx.execPath, hookScript, form, shell };
+  if (ctx.execPath.includes("/Cellar/")) {
+    warnings.push(`Homebrew node: \`brew upgrade node\` removes ${ctx.execPath}, which the hooks pin; afterwards run \`hm doctor --fix\` (or \`hm install --host claude\`) in each project`);
+  }
   const settingsFile = userScope ? userSettingsFile(ctx.env) : projectSettingsFile(ctx.paths.root);
   const current = readSettingsFile(settingsFile);
+  const previous = readManifest(ctx.paths.manifest);
   const merged = mergeHarnessHooks(current.settings, spec);
   writeSettingsFile(settingsFile, merged.settings);
   if (ctx.platform === "win32" && gitBash === null) warnings.push("Git Bash not found: Claude Code will use its PowerShell tool; pitfalls learned under bash still fire (canonical tool `bash`)");
@@ -351,7 +376,7 @@ export async function runInstall(ctx: CommandContext): Promise<number> {
 
   // 5 manifest
   const files: ManifestFile[] = [
-    { path: settingsFile, role: "settings", sha256: sha256File(settingsFile), created: !current.existed },
+    { path: settingsFile, role: "settings", sha256: sha256File(settingsFile), created: !current.existed || previousSettingsCreated(previous, settingsFile) },
     { path: ctx.paths.config, role: "config", sha256: sha256File(ctx.paths.config), created: configFile.created },
     { path: gitIgnore.path, role: "git_ignore", sha256: sha256File(gitIgnore.path), created: gitIgnore.created },
     { path: hookScript, role: "hook_script", sha256: sha256File(hookScript), created: false },
@@ -372,7 +397,7 @@ export async function runInstall(ctx: CommandContext): Promise<number> {
     settings_file: settingsFile,
     events: HOOK_REGISTRATIONS.map((registration) => registration.claudeEvent),
     claude_version: claudeVersion,
-    git_exclude: gitExclude === null ? null : { path: gitExclude.path, line: GIT_EXCLUDE_LINE, added: gitExclude.added },
+    git_exclude: gitExclude === null ? null : { path: gitExclude.path, line: GIT_EXCLUDE_LINE, added: gitExclude.added || previousExcludeAdded(previous, gitExclude.path) },
     files,
   };
   writeManifest(ctx.paths.manifest, manifest);

@@ -44,7 +44,8 @@ describe.skipIf(!built)("dist smoke (requires npm run build)", () => {
     expect(report.self_test.ok).toBe(true);
     const settings = JSON.parse(readFileSync(join(root, ".claude", "settings.local.json"), "utf8")) as { hooks: Record<string, Array<{ hooks: Array<{ command: string; args: string[] }> }>> };
     expect(settings.hooks.PreToolUse![0]!.hooks[0]!.args).toEqual([HOOK, "pre-tool"]);
-    expect(settings.hooks.PreToolUse![0]!.hooks[0]!.command).toBe(process.execPath);
+    // install pins the resolved binary (junctions and symlinks followed), which is process.execPath itself on a plain install
+    expect(settings.hooks.PreToolUse![0]!.hooks[0]!.command).toBe(realpathSync.native(process.execPath));
   });
 
   test("node dist/hook.js session-start exits 0 and appends a hooks.log line", () => {

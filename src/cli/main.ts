@@ -11,7 +11,7 @@ import { EXIT_CODES } from "../core/errors";
 import type { CliSeams, CommandContext } from "./context";
 import { flagBoolean, flagString, GLOBAL_OPTIONS, parseArgs, renderOptionsHelp, type OptionSpecs } from "./lib/args";
 import { Printer, processStreams, type CliStreams } from "./lib/output";
-import { findPackageRoot, readPackageVersion, resolveCliPaths } from "./lib/paths";
+import { findPackageRoot, readPackageVersion, resolveCliPaths, stableExecPath } from "./lib/paths";
 import { describeFailure, EXIT_USAGE } from "./lib/store";
 import { COMMAND_GROUP_TITLES, COMMANDS, findCommand, type CommandDefinition, type CommandGroup } from "./registry";
 
@@ -152,7 +152,7 @@ export async function runCli(argv: readonly string[], options: RunCliOptions = {
     cwd,
     env,
     platform: options.platform ?? process.platform,
-    execPath: options.execPath ?? process.execPath,
+    execPath: options.execPath ?? stableExecPath(),
     json,
     out: printer,
     stderr: streams.stderr,

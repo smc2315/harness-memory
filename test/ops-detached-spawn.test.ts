@@ -84,8 +84,10 @@ function expectDetached(call: RecordedSpawn, expectedArgs: { script: RegExp; res
   expect(call.child.listenerCount("error")).toBe(1);
   const env = call.options.env ?? {};
   expect(env.HARNESS_MEMORY_DISABLE).toBe("1");
+  // The extraction CLI's own auth / routing names are forwarded on purpose (src/core/process.ts); every other CLAUDE* is a host marker.
+  const forwardedClaudeNames = new Set(["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH"]);
   for (const key of Object.keys(env)) {
-    expect(key, `env leaks ${key}`).not.toMatch(/^CLAUDE/);
+    if (!forwardedClaudeNames.has(key)) expect(key, `env leaks ${key}`).not.toMatch(/^CLAUDE/);
     expect(key, `env leaks ${key}`).not.toMatch(/^CODEX_SANDBOX/);
   }
   expect(env.HARNESS_MEMORY_DEBUG).toBe("1");
