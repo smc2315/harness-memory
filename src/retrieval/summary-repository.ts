@@ -19,17 +19,7 @@ const SESSION_SUMMARY_COLUMNS = [
   "updated_at",
 ].join(", ");
 
-const TOPIC_SUMMARY_COLUMNS = [
-  "id",
-  "canonical_topic",
-  "summary_short",
-  "summary_medium",
-  "embedding",
-  "supporting_session_ids",
-  "source_event_ids",
-  "created_at",
-  "updated_at",
-].join(", ");
+// `topic_summaries` was never populated and is dropped by migration 021; only session summaries remain.
 
 export interface SessionSummaryRecord {
   id: string;
@@ -45,18 +35,6 @@ export interface SessionSummaryRecord {
   updatedAt: string;
 }
 
-export interface TopicSummaryRecord {
-  id: string;
-  canonicalTopic: string;
-  summaryShort: string;
-  summaryMedium: string;
-  embedding: Float32Array | null;
-  supportingSessionIds: string[];
-  sourceEventIds: string[];
-  createdAt: string;
-  updatedAt: string;
-}
-
 export interface CreateSessionSummaryInput {
   sessionId: string;
   summaryShort: string;
@@ -66,15 +44,6 @@ export interface CreateSessionSummaryInput {
   toolNames: string[];
   typeDistribution: Record<string, number>;
   eventCount: number;
-}
-
-export interface CreateTopicSummaryInput {
-  canonicalTopic: string;
-  summaryShort: string;
-  summaryMedium: string;
-  embedding?: Float32Array | null;
-  supportingSessionIds: string[];
-  sourceEventIds: string[];
 }
 
 function nowIsoString(): string {
@@ -201,10 +170,6 @@ function createSessionSummaryId(sessionId: string): string {
   return createDeterministicId(`session-summary:${sessionId}`);
 }
 
-function createTopicSummaryId(canonicalTopic: string): string {
-  return createDeterministicId(`topic-summary:${canonicalTopic}`);
-}
-
 function parseSessionSummaryRow(values: readonly unknown[]): SessionSummaryRecord {
   return {
     id: expectString(values[0], "id"),
@@ -221,20 +186,6 @@ function parseSessionSummaryRow(values: readonly unknown[]): SessionSummaryRecor
   };
 }
 
-function parseTopicSummaryRow(values: readonly unknown[]): TopicSummaryRecord {
-  return {
-    id: expectString(values[0], "id"),
-    canonicalTopic: expectString(values[1], "canonical_topic"),
-    summaryShort: expectString(values[2], "summary_short"),
-    summaryMedium: expectString(values[3], "summary_medium"),
-    embedding: parseEmbedding(values[4]),
-    supportingSessionIds: parseStringArrayJson(values[5], "supporting_session_ids"),
-    sourceEventIds: parseStringArrayJson(values[6], "source_event_ids"),
-    createdAt: expectString(values[7], "created_at"),
-    updatedAt: expectString(values[8], "updated_at"),
-  };
-}
-
 export interface SummaryRepository {
   createSessionSummary(input: CreateSessionSummaryInput): SessionSummaryRecord;
   upsertSessionSummary(input: CreateSessionSummaryInput): SessionSummaryRecord;
@@ -243,9 +194,6 @@ export interface SummaryRepository {
     limit?: number;
     orderBy?: "updated_at" | "created_at";
   }): SessionSummaryRecord[];
-  createTopicSummary(input: CreateTopicSummaryInput): TopicSummaryRecord;
-  getTopicSummaryByTopic(canonicalTopic: string): TopicSummaryRecord | null;
-  listTopicSummaries(opts?: { limit?: number }): TopicSummaryRecord[];
 }
 
 export class SummaryRepository {
@@ -373,86 +321,5 @@ export class SummaryRepository {
     }
 
     return result[0].values.map((row) => parseSessionSummaryRow(row));
-  }
-
-  createTopicSummary(input: CreateTopicSummaryInput): TopicSummaryRecord {
-    const createdAt = nowIsoString();
-    const id = createTopicSummaryId(input.canonicalTopic);
-
-    this.db.run(
-      `INSERT INTO topic_summaries (
-        id,
-        canonical_topic,
-        summary_short,
-        summary_medium,
-        embedding,
-        supporting_session_ids,
-        source_event_ids,
-        created_at,
-        updated_at
-      ) VALUES (
-        $id,
-        $canonicalTopic,
-        $summaryShort,
-        $summaryMedium,
-        $embedding,
-        $supportingSessionIds,
-        $sourceEventIds,
-        $createdAt,
-        $updatedAt
-      )`,
-      {
-        $id: id,
-        $canonicalTopic: input.canonicalTopic,
-        $summaryShort: input.summaryShort,
-        $summaryMedium: input.summaryMedium,
-        $embedding: toEmbeddingBlob(input.embedding),
-        $supportingSessionIds: serializeStringArray(input.supportingSessionIds),
-        $sourceEventIds: serializeStringArray(input.sourceEventIds),
-        $createdAt: createdAt,
-        $updatedAt: createdAt,
-      } satisfies SqlParameters
-    );
-
-    return this.getTopicSummaryByTopic(input.canonicalTopic)!;
-  }
-
-  getTopicSummaryByTopic(canonicalTopic: string): TopicSummaryRecord | null {
-    const result = this.db.exec(
-      `SELECT ${TOPIC_SUMMARY_COLUMNS}
-       FROM topic_summaries
-       WHERE canonical_topic = $canonicalTopic
-       ORDER BY updated_at DESC, created_at DESC, id ASC`,
-      { $canonicalTopic: canonicalTopic } satisfies SqlParameters
-    );
-
-    if (result.length === 0 || result[0].values.length === 0) {
-      return null;
-    }
-
-    return parseTopicSummaryRow(result[0].values[0]);
-  }
-
-  listTopicSummaries(opts: { limit?: number } = {}): TopicSummaryRecord[] {
-    const limit = normalizeLimit(opts.limit);
-    const params: SqlParameters = {};
-
-    if (limit !== undefined) {
-      params.$limit = limit;
-    }
-
-    const limitClause = limit === undefined ? "" : " LIMIT $limit";
-    const result = this.db.exec(
-      `SELECT ${TOPIC_SUMMARY_COLUMNS}
-       FROM topic_summaries
-       ORDER BY updated_at DESC, id ASC${limitClause}`,
-      params
-    );
-
-    if (result.length === 0) {
-      return [];
-    }
-
-    return result[0].values.map((row) => parseTopicSummaryRow(row));
   }
 }

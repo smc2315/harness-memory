@@ -1,0 +1,39 @@
+{
+  "A/p7": {
+    "episode_summary": "A PowerShell npm build failed on a type error; after an edit pnpm build succeeded.",
+    "nothing_to_learn": false,
+    "facts": [
+      {
+        "action": "create",
+        "target_memory_id": null,
+        "type": "pitfall",
+        "summary": "Run the build through pnpm build instead of npm run build in this repository.",
+        "details": "npm run build (under PowerShell) failed with a TypeScript error until the source was fixed; pnpm build is the configured script.",
+        "scope_glob": "**/*",
+        "relevant_tools": [
+          "bash"
+        ],
+        "trigger_signature": {
+          "tool": "bash",
+          "target": "command",
+          "pattern_kind": "cmd",
+          "pattern": "npm run build"
+        },
+        "lifecycle_triggers": [
+          "before_tool"
+        ],
+        "confidence": 0.85,
+        "evidence_refs": [
+          "e7002",
+          "e7004"
+        ],
+        "knowledge_kind": "failure_resolution",
+        "rationale": "Failure followed by the pnpm equivalent succeeding.",
+        "aliases": [
+          "pnpm build",
+          "빌드"
+        ]
+      }
+    ]
+  }
+}

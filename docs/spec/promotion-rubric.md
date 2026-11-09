@@ -1,3 +1,6 @@
+<!-- v0.5-historical-banner -->
+> **Historical (v0.5).** The promote / merge / stale / supersede / reject rubric and the "B+ model" auto-promoter described here were replaced in v0.6 by the authority model: `authority ∈ {human, auto}`, `enforcementDefault` and `decideTier` (spec §7.3–7.4), `transitionMemory` as the only status writer (spec §4.7) and the proposal queue reviewed with `hm review` (spec §7.5). Current design: [docs/redesign/spec-v0.6.md](../redesign/spec-v0.6.md); migration: [docs/redesign/upgrade-from-0.5.md](../redesign/upgrade-from-0.5.md). Kept for reference, not updated.
+
 # Promotion Rubric
 
 This document defines the criteria and decision logic for promoting candidate memories to active status, merging duplicates, marking stale entries, and handling supersession.

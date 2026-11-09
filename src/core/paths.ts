@@ -1,0 +1,206 @@
+/**
+ * Where state lives (spec §3.2). Everything project-scoped is under `<root>/.harness-memory/`;
+ * the user-level directory `~/.harness-memory/` holds the headless-CLI cwd, the embedding model
+ * cache and the untouched v0.5 global database. The one exception is the embedding helper's
+ * rendezvous point (`embedHelperSocket`), which is keyed by `repoHash` and lives outside the
+ * repository on every platform — see `embedHelperSocketPath`.
+ */
+
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, posix, resolve, sep } from "node:path";
+
+export const HARNESS_DIR_NAME = ".harness-memory";
+export const DB_FILE_NAME = "memory.sqlite";
+export const TARGET_USER_VERSION = 22;
+
+export interface HarnessPaths {
+  /** Project root (directory that contains .harness-memory). */
+  root: string;
+  dir: string;
+  db: string;
+  dbPrev: string;
+  dbBackup: (userVersion: number) => string;
+  snapshotDir: string;
+  snapshotActive: string;
+  snapshotLexical: string;
+  snapshotDense: string;
+  /** `snapshot/recall.v1.json`: per-episode summaries the `prompt` hook and `hm recall` search (A′ recall layer). */
+  snapshotRecall: string;
+  reindexRequested: string;
+  ledgerDir: string;
+  stateDir: string;
+  queueDir: string;
+  rawDir: string;
+  locksDir: string;
+  dbLock: string;
+  workerLock: string;
+  workerPid: string;
+  embedHelperPid: string;
+  embedHelperSocket: string;
+  logsDir: string;
+  hooksLog: string;
+  workerLog: string;
+  auditLog: string;
+  config: string;
+  manifest: string;
+  /** Legacy v0.5 files that `uninstall --purge` removes. */
+  legacyConversationBuffer: string;
+  legacyExtractState: string;
+}
+
+export function resolvePaths(root: string): HarnessPaths {
+  const absoluteRoot = resolve(root);
+  const dir = join(absoluteRoot, HARNESS_DIR_NAME);
+  const locksDir = join(dir, "locks");
+  const hash = repoHash(absoluteRoot);
+  return {
+    root: absoluteRoot,
+    dir,
+    db: join(dir, DB_FILE_NAME),
+    dbPrev: join(dir, `${DB_FILE_NAME}.prev`),
+    dbBackup: (userVersion: number) => join(dir, `${DB_FILE_NAME}.bak-v${userVersion}`),
+    snapshotDir: join(dir, "snapshot"),
+    snapshotActive: join(dir, "snapshot", "active.v1.json"),
+    snapshotLexical: join(dir, "snapshot", "lexical.v1.json"),
+    snapshotDense: join(dir, "snapshot", "dense.v1.bin"),
+    snapshotRecall: join(dir, "snapshot", "recall.v1.json"),
+    reindexRequested: join(dir, "snapshot", ".reindex-requested"),
+    ledgerDir: join(dir, "ledger"),
+    stateDir: join(dir, "state"),
+    queueDir: join(dir, "queue"),
+    rawDir: join(dir, "raw"),
+    locksDir,
+    dbLock: join(locksDir, "db.lock"),
+    workerLock: join(locksDir, "worker.lock"),
+    workerPid: join(locksDir, "worker.pid"),
+    embedHelperPid: join(locksDir, "embed-helper.pid"),
+    embedHelperSocket: embedHelperSocketPath(hash),
+    logsDir: join(dir, "logs"),
+    hooksLog: join(dir, "logs", "hooks.log"),
+    workerLog: join(dir, "logs", "worker.log"),
+    auditLog: join(dir, "logs", "audit.log"),
+    config: join(dir, "config.json"),
+    manifest: join(dir, "install-manifest.json"),
+    legacyConversationBuffer: join(dir, ".conversation-buffer.json"),
+    legacyExtractState: join(dir, ".dream-extract-state.json"),
+  };
+}
+
+export interface EmbedSocketOptions {
+  platform?: NodeJS.Platform;
+  env?: NodeJS.ProcessEnv;
+  /** POSIX fallback when `XDG_RUNTIME_DIR` is unset; defaults to `os.tmpdir()`. */
+  tmpDir?: string;
+}
+
+/**
+ * Rendezvous point between the `prompt` hook and the embedding helper: the named pipe
+ * `\\.\pipe\harness-memory-embed-<repoHash>` on Windows and, on POSIX, the socket
+ * `harness-memory-embed-<repoHash>.sock` in the per-user runtime directory (`$XDG_RUNTIME_DIR`, else the
+ * temp dir). It deliberately does not live under `<root>/.harness-memory/`: `sockaddr_un.sun_path` holds
+ * at most 107 (Linux) / 103 (macOS, BSD) bytes, so a socket under a deep checkout makes `bind()` /
+ * `connect()` fail with EINVAL on Node ≥ 24 and get silently truncated on Node 20/22. The hook and the
+ * detached helper see the same `XDG_RUNTIME_DIR` / `TMPDIR` (`providerEnv` forwards both).
+ */
+export function embedHelperSocketPath(repoHash: string, options: EmbedSocketOptions = {}): string {
+  const platform = options.platform ?? process.platform;
+  if (platform === "win32") return `\\\\.\\pipe\\harness-memory-embed-${repoHash}`;
+  const env = options.env ?? process.env;
+  const runtimeDir = env.XDG_RUNTIME_DIR || options.tmpDir || tmpdir();
+  return posix.join(runtimeDir, `harness-memory-embed-${repoHash}.sock`);
+}
+
+/** Usable bytes of `sockaddr_un.sun_path` (its size minus the terminating NUL): 107 on Linux, 103 on macOS and the BSDs. */
+export function unixSocketPathMaxBytes(platform: NodeJS.Platform = process.platform): number {
+  return platform === "linux" ? 107 : 103;
+}
+
+/** True when `listen()` / `connect()` would reject this socket path (Node ≥ 24: EINVAL) or truncate it (Node 20/22). */
+export function unixSocketPathTooLong(socketPath: string, platform: NodeJS.Platform = process.platform): boolean {
+  return Buffer.byteLength(socketPath, "utf8") > unixSocketPathMaxBytes(platform);
+}
+
+/** Directories a writer must ensure exist (hooks create them lazily with mkdirSync recursive). */
+export function stateDirectories(paths: HarnessPaths): string[] {
+  return [paths.dir, paths.snapshotDir, paths.ledgerDir, paths.stateDir, paths.queueDir, paths.rawDir, paths.locksDir, paths.logsDir];
+}
+
+/**
+ * Project root = first ancestor of `cwd` (inclusive) containing `.harness-memory/`; otherwise the
+ * first ancestor containing `.git/`; otherwise `cwd` itself (spec §3.4). The user-level
+ * `~/.harness-memory/` (model cache, worker cwd, v0.5 global DB) is never a project install.
+ */
+export function findProjectRoot(cwd: string): string {
+  const start = resolve(cwd);
+  const withHarness = findAncestorContaining(start, HARNESS_DIR_NAME, userHarnessDir());
+  if (withHarness !== null) return withHarness;
+  const withGit = findAncestorContaining(start, ".git");
+  return withGit ?? start;
+}
+
+/** Null when no ancestor has a project-level `.harness-memory/` (hooks then exit immediately with status not_installed). */
+export function findInstalledRoot(cwd: string): string | null {
+  return findAncestorContaining(resolve(cwd), HARNESS_DIR_NAME, userHarnessDir());
+}
+
+function findAncestorContaining(start: string, name: string, excludeDir?: string): string | null {
+  let current = start;
+  for (;;) {
+    const candidate = join(current, name);
+    if ((excludeDir === undefined || resolve(candidate) !== resolve(excludeDir)) && existsSync(candidate)) return current;
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+/** sha1(host + ':' + session_id).slice(0, 16) */
+export function sessionKey(host: string, sessionId: string): string {
+  return createHash("sha1").update(`${host}:${sessionId}`, "utf8").digest("hex").slice(0, 16);
+}
+
+/** Stable per-repository hash from the normalized absolute root path. */
+export function repoHash(root: string): string {
+  let normalized = resolve(root).split(sep).join("/");
+  if (process.platform === "win32") normalized = normalized.toLowerCase();
+  return createHash("sha1").update(normalized, "utf8").digest("hex").slice(0, 16);
+}
+
+export function userHarnessDir(): string {
+  return process.env.HARNESS_MEMORY_HOME ?? join(homedir(), HARNESS_DIR_NAME);
+}
+
+/** Empty cwd for the headless extraction CLI, outside any git repository (§3.2). */
+export function workerCwd(root: string): string {
+  return join(userHarnessDir(), "worker", repoHash(root));
+}
+
+export function modelsDir(): string {
+  return join(userHarnessDir(), "models");
+}
+
+export function globalDbPath(): string {
+  return join(userHarnessDir(), "global.sqlite");
+}
+
+export function ledgerFile(paths: HarnessPaths, host: string, key: string): string {
+  return join(paths.ledgerDir, `${host}-${key}.jsonl`);
+}
+
+export function stateFile(paths: HarnessPaths, host: string, key: string): string {
+  return join(paths.stateDir, `${host}-${key}.json`);
+}
+
+export function notifyFile(paths: HarnessPaths, host: string, key: string): string {
+  return join(paths.stateDir, `${host}-${key}.notify.json`);
+}
+
+export function queueFile(paths: HarnessPaths, episodeId: string): string {
+  return join(paths.queueDir, `${episodeId}.json`);
+}
+
+export function rawFile(paths: HarnessPaths, runId: string, attempt?: number): string {
+  return join(paths.rawDir, attempt === undefined ? `${runId}.json` : `${runId}.${attempt}.json`);
+}

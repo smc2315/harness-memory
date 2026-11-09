@@ -1,0 +1,40 @@
+{
+  "A/p31": {
+    "episode_summary": "The user moved a secret out of .env into the vault.",
+    "nothing_to_learn": false,
+    "facts": [
+      {
+        "action": "reinforce",
+        "target_memory_id": "seed-env-policy",
+        "type": "policy",
+        "summary": "Never write API keys or other secrets into .env files; read them through the vault CLI instead.",
+        "details": "The user removed a key from .env and switched the app to the vault CLI.",
+        "scope_glob": "**/*",
+        "relevant_tools": [
+          "write",
+          "edit"
+        ],
+        "trigger_signature": {
+          "tool": "write|edit",
+          "target": "path",
+          "pattern_kind": "glob",
+          "pattern": "**/.env*"
+        },
+        "lifecycle_triggers": [
+          "before_tool"
+        ],
+        "confidence": 0.85,
+        "evidence_refs": [
+          "e3101",
+          "e3103"
+        ],
+        "knowledge_kind": "convention",
+        "rationale": "Same rule as the existing policy.",
+        "aliases": [
+          "secrets",
+          "vault"
+        ]
+      }
+    ]
+  }
+}

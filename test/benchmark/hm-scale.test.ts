@@ -160,6 +160,8 @@ function generateDistractors(count: number, startIndex: number): DistractorDef[]
       distractors.push({
         tag: `D${String(idx).padStart(4, "0")}`,
         input: {
+          authority: "human",
+          sourceKind: "manual",
           type: memoryTypes[idx % memoryTypes.length],
           summary: `${template.summary} (variant ${Math.floor(i / NEAR_MISS_TEMPLATES.length)})`,
           details: template.details,
@@ -180,6 +182,8 @@ function generateDistractors(count: number, startIndex: number): DistractorDef[]
       distractors.push({
         tag: `D${String(idx).padStart(4, "0")}`,
         input: {
+          authority: "human",
+          sourceKind: "manual",
           type: memoryTypes[idx % memoryTypes.length],
           summary: `Distractor ${idx}: general knowledge about ${c1} and ${c2}`,
           details: `This is distractor memory ${idx} covering mixed topics.`,

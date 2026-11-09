@@ -112,10 +112,12 @@ export async function activateStartupMode(
     }
   }
 
+  // §6.1 / §6.4: only rows that opt into session_start are dumped at startup (before_tool-only pitfalls stay out).
   const startupCandidates = activeMemories
     .filter(
       (memory) =>
         memory.activationClass !== "baseline" &&
+        memory.lifecycleTriggers.includes("session_start") &&
         !selection.selectedIds.has(memory.id) &&
         (isBroadScopeRef(scopeRef) || matchesScope(memory.scopeGlob, scopeRef)),
     )

@@ -1,0 +1,60 @@
+# Regex budget calibration (manual). Runs scripts/regex-budget-calibration.mjs on every runner architecture the V5
+# time budget must hold on — x64 (ubuntu, windows, macos-15-intel) and arm64 (macos-latest) — natively and with V8's
+# regexp interpreter forced, and puts the tables into the job summary. Dispatch it when REGEX_BUDGET_RATIO, the
+# reference pattern or the fixtures change; the numbers belong in docs/redesign/phase-f-notes.md ("CI follow-up").
+name: Regex budget calibration
+
+on:
+  workflow_dispatch:
+  # A workflow can only be dispatched by hand once it exists on the default branch, so until then (and whenever the
+  # budget code or this calibration changes) a push of these files runs it.
+  push:
+    paths:
+      - scripts/regex-budget-calibration.mjs
+      - .github/workflows/calibrate.yml
+      - src/activation/signature.ts
+
+jobs:
+  calibrate:
+    name: calibrate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, macos-15-intel, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: npm ci
+        run: npm ci
+
+      - name: calibrate (native)
+        shell: bash
+        run: |
+          node scripts/regex-budget-calibration.mjs --repeat 3 | tee calibration-native.txt
+          {
+            echo "### Regex budget calibration — ${{ matrix.os }} (native)"
+            echo
+            echo '```'
+            cat calibration-native.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: calibrate (regexp interpreter forced)
+        if: always()
+        shell: bash
+        run: |
+          node --regexp-interpret-all scripts/regex-budget-calibration.mjs --repeat 2 | tee calibration-interpreted.txt
+          {
+            echo "### Regex budget calibration — ${{ matrix.os }} (--regexp-interpret-all)"
+            echo
+            echo '```'
+            cat calibration-interpreted.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

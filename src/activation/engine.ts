@@ -1,9 +1,6 @@
 import type { MemoryType } from "../db/schema/types";
-import {
-  MemoryRepository,
-  type ListMemoriesInput,
-  type MemoryRecord,
-} from "../memory";
+import type { ListMemoriesInput, MemoryRecord } from "../memory";
+import { trustMultiplier } from "../promotion/revalidate";
 import type { SummaryRepository } from "../retrieval/summary-repository";
 
 import type { AuditLogger } from "../audit/logger";
@@ -26,8 +23,10 @@ import {
   DEFAULT_ACTIVE_STATUSES,
   DEFAULT_ACTIVATION_LIMITS,
   type ActivationConflict,
+  type ActivationMode,
   type ActivationRequest,
   type ActivationResult,
+  type MemoryReader,
   type RankedMemory,
   type SuppressedMemory,
 } from "./types";
@@ -41,16 +40,9 @@ function calculateMemoryScore(memory: MemoryRecord): number {
     (Date.now() - Date.parse(freshnessReference)) / (1000 * 60 * 60 * 24)
   );
   const freshnessMultiplier = Math.max(0.75, 1 - ageDays * 0.01);
-  const trustMultiplier =
-    memory.promotionSource === "manual"
-      ? 1
-      : memory.validationCount === 0
-        ? 0.65
-        : memory.validationCount === 1
-          ? 0.8
-          : 0.95;
 
-  return base * freshnessMultiplier * trustMultiplier;
+  // §6.4: trust comes from authority (human → 1) and validation_count (auto → 0.65 / 0.8 / 0.95).
+  return base * freshnessMultiplier * trustMultiplier(memory.authority, memory.validationCount);
 }
 
 function getPayloadBytes(memory: MemoryRecord): number {
@@ -85,12 +77,12 @@ function buildConflictReason(conflict: ActivationConflict): string {
 }
 
 export class ActivationEngine {
-  readonly repository: MemoryRepository;
+  readonly repository: MemoryReader;
   private embeddingService: EmbeddingService | null;
   private auditLogger: AuditLogger | null;
   private summaryRepository: SummaryRepository | null;
 
-  constructor(repository: MemoryRepository, embeddingService?: EmbeddingService, auditLogger?: AuditLogger) {
+  constructor(repository: MemoryReader, embeddingService?: EmbeddingService, auditLogger?: AuditLogger) {
     this.repository = repository;
     this.embeddingService = embeddingService ?? null;
     this.auditLogger = auditLogger ?? null;
@@ -110,6 +102,7 @@ export class ActivationEngine {
     const prepared = this.prepareActivation(
       request,
       mode === "temporal" ? true : (request.includeSuperseded ?? false),
+      mode,
     );
 
     // Store mode in prepared for audit logging
@@ -152,6 +145,7 @@ export class ActivationEngine {
   private prepareActivation(
     request: ActivationRequest,
     includeSuperseded: boolean,
+    mode: ActivationMode = "default",
   ): PreparedActivation {
     const activationStart = Date.now();
     const scopeRef = normalizeScopeRef(request.scopeRef);
@@ -184,19 +178,24 @@ export class ActivationEngine {
       activeMemories.push(memory);
     }
 
+    const queryText = (request.queryTokens ?? []).join(" ").trim();
+
+    // §6.4: the BM25 index is only built when something will search it (query text, or a mode that
+    // retrieves through session summaries); the plain scope walk of default mode skips the cost.
     const sharedLexicalIndex = new LexicalIndex();
-    sharedLexicalIndex.rebuild(
-      activeMemories.map((memory) => ({
-        id: memory.id,
-        summary: memory.summary,
-        details: memory.details,
-      })),
-    );
+    if (queryText.length > 0 || mode !== "default") {
+      sharedLexicalIndex.rebuild(
+        activeMemories.map((memory) => ({
+          id: memory.id,
+          summary: memory.summary,
+          details: memory.details,
+        })),
+      );
+    }
 
     const maxMemories = request.maxMemories ?? DEFAULT_ACTIVATION_LIMITS.maxMemories;
     const maxPayloadBytes =
       request.maxPayloadBytes ?? DEFAULT_ACTIVATION_LIMITS.maxPayloadBytes;
-    const queryText = (request.queryTokens ?? []).join(" ").trim();
 
     return {
       activationStart,

@@ -30,6 +30,8 @@ export async function createTier2SeededFixture(
 
   for (const fixture of memories) {
     const memory = repository.create({
+      authority: "human",
+      sourceKind: "manual",
       type: fixture.type,
       summary: fixture.summary,
       details: fixture.details,

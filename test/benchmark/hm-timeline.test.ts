@@ -183,6 +183,8 @@ describe("HM-TimelineBench", () => {
 
     for (const memory of TIMELINE_MEMORIES) {
       const created = repository.create({
+        authority: "human",
+        sourceKind: "manual",
         type: memory.type,
         summary: memory.summary,
         details: memory.details,

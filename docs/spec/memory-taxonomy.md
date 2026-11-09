@@ -1,3 +1,6 @@
+<!-- v0.5-historical-banner -->
+> **Still current, with additions (v0.6).** The five types below are unchanged. v0.6 adds to every memory an `authority` (human / auto), an `enforcement` level (advise / confirm / soft_deny / deny), an optional `trigger_signature` (tool + command/path pattern for `before_tool`) and a `knowledge_kind` — see spec §4.1, §4.6 and §7 in [docs/redesign/spec-v0.6.md](../redesign/spec-v0.6.md). The type boundary rule the extractor follows (pitfall = signature-bearing action→outcome learned from a failure or correction; policy = cross-tool or signature-less standing rule) is in spec §5.5.
+
 # Memory Taxonomy
 
 This document defines the five memory types in the MVP memory system. Each type serves a distinct purpose in capturing and applying learned knowledge across sessions.

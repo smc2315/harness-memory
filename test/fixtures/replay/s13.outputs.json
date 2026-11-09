@@ -1,0 +1,62 @@
+{
+  "A/p131": {
+    "episode_summary": "The user asked to keep the rule that pnpm lint runs before every commit; pnpm lint passed.",
+    "nothing_to_learn": false,
+    "facts": [
+      {
+        "action": "create",
+        "target_memory_id": null,
+        "type": "policy",
+        "summary": "Run pnpm lint before every git commit in this repository.",
+        "details": "Lint must pass before a commit is made; pnpm is the package manager of this repository.",
+        "scope_glob": "**/*",
+        "relevant_tools": [
+          "bash"
+        ],
+        "trigger_signature": {
+          "tool": "bash",
+          "target": "command",
+          "pattern_kind": "cmd",
+          "pattern": "git commit"
+        },
+        "lifecycle_triggers": [
+          "before_tool"
+        ],
+        "confidence": 0.9,
+        "evidence_refs": [
+          "e13101"
+        ],
+        "knowledge_kind": "convention",
+        "rationale": "The user explicitly asked to keep this rule.",
+        "aliases": [
+          "커밋 전 린트",
+          "pnpm lint"
+        ]
+      },
+      {
+        "action": "create",
+        "target_memory_id": null,
+        "type": "architecture_constraint",
+        "summary": "This repository is linted through pnpm; npm has no lint script.",
+        "details": "pnpm lint completed successfully in this repository.",
+        "scope_glob": "**/*",
+        "relevant_tools": [
+          "bash"
+        ],
+        "trigger_signature": null,
+        "lifecycle_triggers": [
+          "before_model"
+        ],
+        "confidence": 0.8,
+        "evidence_refs": [
+          "e13102"
+        ],
+        "knowledge_kind": "convention",
+        "rationale": "Observed from the successful tool call only.",
+        "aliases": [
+          "lint"
+        ]
+      }
+    ]
+  }
+}

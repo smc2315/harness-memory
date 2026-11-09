@@ -1,0 +1,6 @@
+Sure! Here is what I learned from this episode:
+
+- The project uses pnpm, so `npm test` fails and `pnpm test` works.
+- There were no other durable facts.
+
+Let me know if you want this formatted differently.

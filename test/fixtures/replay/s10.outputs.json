@@ -1,0 +1,170 @@
+{
+  "A/p101": {
+    "episode_summary": "npm test failed; pnpm test passed.",
+    "nothing_to_learn": false,
+    "facts": [
+      {
+        "action": "propose_supersede",
+        "target_memory_id": "seed-human-npm-test",
+        "type": "pitfall",
+        "summary": "Run pnpm test instead of npm test; the npm scripts are missing in this repository.",
+        "details": "npm test exits 1 with a missing script while pnpm test runs the suite.",
+        "scope_glob": "**/*",
+        "relevant_tools": [
+          "bash"
+        ],
+        "trigger_signature": {
+          "tool": "bash",
+          "target": "command",
+          "pattern_kind": "cmd",
+          "pattern": "npm test"
+        },
+        "lifecycle_triggers": [
+          "before_tool"
+        ],
+        "confidence": 0.9,
+        "evidence_refs": [
+          "e10102",
+          "e10104"
+        ],
+        "knowledge_kind": "failure_resolution",
+        "rationale": "The human rule names the wrong package manager.",
+        "aliases": [
+          "pnpm test"
+        ]
+      }
+    ]
+  },
+  "B/p102": {
+    "episode_summary": "npm test failed; pnpm test passed.",
+    "nothing_to_learn": false,
+    "facts": [
+      {
+        "action": "propose_stale",
+        "target_memory_id": "seed-auto-convention",
+        "type": "pitfall",
+        "summary": "npm test no longer works here; the scripts moved to pnpm.",
+        "details": "Observed in this session: the npm script is gone.",
+        "scope_glob": "**/*",
+        "relevant_tools": [
+          "bash"
+        ],
+        "trigger_signature": {
+          "tool": "bash",
+          "target": "command",
+          "pattern_kind": "cmd",
+          "pattern": "npm test"
+        },
+        "lifecycle_triggers": [
+          "before_tool"
+        ],
+        "confidence": 0.8,
+        "evidence_refs": [
+          "e10202"
+        ],
+        "knowledge_kind": "convention",
+        "rationale": "The stored convention no longer holds.",
+        "aliases": []
+      }
+    ]
+  },
+  "C/p103": {
+    "episode_summary": "npm test failed; pnpm test passed.",
+    "nothing_to_learn": false,
+    "facts": [
+      {
+        "action": "propose_stale",
+        "target_memory_id": "seed-auto-convention",
+        "type": "pitfall",
+        "summary": "npm test no longer works here; the scripts moved to pnpm.",
+        "details": "Observed in this session: the npm script is gone.",
+        "scope_glob": "**/*",
+        "relevant_tools": [
+          "bash"
+        ],
+        "trigger_signature": {
+          "tool": "bash",
+          "target": "command",
+          "pattern_kind": "cmd",
+          "pattern": "npm test"
+        },
+        "lifecycle_triggers": [
+          "before_tool"
+        ],
+        "confidence": 0.8,
+        "evidence_refs": [
+          "e10302"
+        ],
+        "knowledge_kind": "convention",
+        "rationale": "The stored convention no longer holds.",
+        "aliases": []
+      }
+    ]
+  },
+  "D/p104": {
+    "episode_summary": "npm test failed; pnpm test passed.",
+    "nothing_to_learn": false,
+    "facts": [
+      {
+        "action": "propose_stale",
+        "target_memory_id": "seed-auto-convention-2",
+        "type": "pitfall",
+        "summary": "The lint convention is outdated; lint now runs through pnpm lint, not npm run lint.",
+        "details": "Observed in this session: the npm script is gone.",
+        "scope_glob": "**/*",
+        "relevant_tools": [
+          "bash"
+        ],
+        "trigger_signature": {
+          "tool": "bash",
+          "target": "command",
+          "pattern_kind": "cmd",
+          "pattern": "npm run lint"
+        },
+        "lifecycle_triggers": [
+          "before_tool"
+        ],
+        "confidence": 0.8,
+        "evidence_refs": [
+          "e10402"
+        ],
+        "knowledge_kind": "convention",
+        "rationale": "The stored convention no longer holds.",
+        "aliases": []
+      }
+    ]
+  },
+  "E/p105": {
+    "episode_summary": "npm test failed; pnpm test passed.",
+    "nothing_to_learn": false,
+    "facts": [
+      {
+        "action": "propose_stale",
+        "target_memory_id": "seed-auto-convention-2",
+        "type": "pitfall",
+        "summary": "The lint convention is outdated; lint now runs through pnpm lint, not npm run lint.",
+        "details": "Observed in this session: the npm script is gone.",
+        "scope_glob": "**/*",
+        "relevant_tools": [
+          "bash"
+        ],
+        "trigger_signature": {
+          "tool": "bash",
+          "target": "command",
+          "pattern_kind": "cmd",
+          "pattern": "npm run lint"
+        },
+        "lifecycle_triggers": [
+          "before_tool"
+        ],
+        "confidence": 0.8,
+        "evidence_refs": [
+          "e10502"
+        ],
+        "knowledge_kind": "convention",
+        "rationale": "The stored convention no longer holds.",
+        "aliases": []
+      }
+    ]
+  }
+}

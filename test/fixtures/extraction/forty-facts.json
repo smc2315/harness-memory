@@ -1,0 +1,1086 @@
+{
+  "episode_summary": "A runaway extractor produced forty facts for a two-event episode.",
+  "nothing_to_learn": false,
+  "facts": [
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Generated fact number 0: use pnpm test variant 0 instead of the npm script in this repository.",
+      "details": "Fact 0 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-0"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 0.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "workflow",
+      "summary": "Generated fact number 1: use pnpm test variant 1 instead of the npm script in this repository.",
+      "details": "Fact 1 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-1"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 1.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Generated fact number 2: use pnpm test variant 2 instead of the npm script in this repository.",
+      "details": "Fact 2 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-2"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 2.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "workflow",
+      "summary": "Generated fact number 3: use pnpm test variant 3 instead of the npm script in this repository.",
+      "details": "Fact 3 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-3"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 3.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Generated fact number 4: use pnpm test variant 4 instead of the npm script in this repository.",
+      "details": "Fact 4 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-4"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 4.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "workflow",
+      "summary": "Generated fact number 5: use pnpm test variant 5 instead of the npm script in this repository.",
+      "details": "Fact 5 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-5"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 5.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Generated fact number 6: use pnpm test variant 6 instead of the npm script in this repository.",
+      "details": "Fact 6 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-6"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 6.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "workflow",
+      "summary": "Generated fact number 7: use pnpm test variant 7 instead of the npm script in this repository.",
+      "details": "Fact 7 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-7"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 7.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Generated fact number 8: use pnpm test variant 8 instead of the npm script in this repository.",
+      "details": "Fact 8 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-8"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 8.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "workflow",
+      "summary": "Generated fact number 9: use pnpm test variant 9 instead of the npm script in this repository.",
+      "details": "Fact 9 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-9"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 9.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Generated fact number 10: use pnpm test variant 10 instead of the npm script in this repository.",
+      "details": "Fact 10 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-10"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 10.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "workflow",
+      "summary": "Generated fact number 11: use pnpm test variant 11 instead of the npm script in this repository.",
+      "details": "Fact 11 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-11"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 11.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Generated fact number 12: use pnpm test variant 12 instead of the npm script in this repository.",
+      "details": "Fact 12 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-12"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 12.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "workflow",
+      "summary": "Generated fact number 13: use pnpm test variant 13 instead of the npm script in this repository.",
+      "details": "Fact 13 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-13"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 13.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Generated fact number 14: use pnpm test variant 14 instead of the npm script in this repository.",
+      "details": "Fact 14 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-14"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 14.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "workflow",
+      "summary": "Generated fact number 15: use pnpm test variant 15 instead of the npm script in this repository.",
+      "details": "Fact 15 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-15"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 15.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Generated fact number 16: use pnpm test variant 16 instead of the npm script in this repository.",
+      "details": "Fact 16 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-16"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 16.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "workflow",
+      "summary": "Generated fact number 17: use pnpm test variant 17 instead of the npm script in this repository.",
+      "details": "Fact 17 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-17"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 17.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Generated fact number 18: use pnpm test variant 18 instead of the npm script in this repository.",
+      "details": "Fact 18 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-18"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 18.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "workflow",
+      "summary": "Generated fact number 19: use pnpm test variant 19 instead of the npm script in this repository.",
+      "details": "Fact 19 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-19"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 19.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Generated fact number 20: use pnpm test variant 20 instead of the npm script in this repository.",
+      "details": "Fact 20 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-20"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 20.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "workflow",
+      "summary": "Generated fact number 21: use pnpm test variant 21 instead of the npm script in this repository.",
+      "details": "Fact 21 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-21"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 21.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Generated fact number 22: use pnpm test variant 22 instead of the npm script in this repository.",
+      "details": "Fact 22 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-22"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 22.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "workflow",
+      "summary": "Generated fact number 23: use pnpm test variant 23 instead of the npm script in this repository.",
+      "details": "Fact 23 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-23"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 23.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Generated fact number 24: use pnpm test variant 24 instead of the npm script in this repository.",
+      "details": "Fact 24 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-24"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 24.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "workflow",
+      "summary": "Generated fact number 25: use pnpm test variant 25 instead of the npm script in this repository.",
+      "details": "Fact 25 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-25"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 25.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Generated fact number 26: use pnpm test variant 26 instead of the npm script in this repository.",
+      "details": "Fact 26 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-26"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 26.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "workflow",
+      "summary": "Generated fact number 27: use pnpm test variant 27 instead of the npm script in this repository.",
+      "details": "Fact 27 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-27"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 27.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Generated fact number 28: use pnpm test variant 28 instead of the npm script in this repository.",
+      "details": "Fact 28 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-28"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 28.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "workflow",
+      "summary": "Generated fact number 29: use pnpm test variant 29 instead of the npm script in this repository.",
+      "details": "Fact 29 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-29"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 29.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Generated fact number 30: use pnpm test variant 30 instead of the npm script in this repository.",
+      "details": "Fact 30 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-30"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 30.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "workflow",
+      "summary": "Generated fact number 31: use pnpm test variant 31 instead of the npm script in this repository.",
+      "details": "Fact 31 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-31"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 31.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Generated fact number 32: use pnpm test variant 32 instead of the npm script in this repository.",
+      "details": "Fact 32 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-32"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 32.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "workflow",
+      "summary": "Generated fact number 33: use pnpm test variant 33 instead of the npm script in this repository.",
+      "details": "Fact 33 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-33"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 33.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Generated fact number 34: use pnpm test variant 34 instead of the npm script in this repository.",
+      "details": "Fact 34 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-34"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 34.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "workflow",
+      "summary": "Generated fact number 35: use pnpm test variant 35 instead of the npm script in this repository.",
+      "details": "Fact 35 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-35"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 35.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Generated fact number 36: use pnpm test variant 36 instead of the npm script in this repository.",
+      "details": "Fact 36 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-36"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 36.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "workflow",
+      "summary": "Generated fact number 37: use pnpm test variant 37 instead of the npm script in this repository.",
+      "details": "Fact 37 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-37"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 37.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "pitfall",
+      "summary": "Generated fact number 38: use pnpm test variant 38 instead of the npm script in this repository.",
+      "details": "Fact 38 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-38"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 38.",
+      "aliases": []
+    },
+    {
+      "action": "create",
+      "target_memory_id": null,
+      "type": "workflow",
+      "summary": "Generated fact number 39: use pnpm test variant 39 instead of the npm script in this repository.",
+      "details": "Fact 39 of a runaway extractor output used to exercise the > 8 facts circuit breaker.",
+      "scope_glob": "**/*",
+      "relevant_tools": [
+        "bash"
+      ],
+      "trigger_signature": {
+        "tool": "bash",
+        "target": "command",
+        "pattern_kind": "cmd",
+        "pattern": "npm run variant-39"
+      },
+      "lifecycle_triggers": [
+        "before_tool"
+      ],
+      "confidence": 0.8,
+      "evidence_refs": [
+        "e2002"
+      ],
+      "knowledge_kind": "failure_resolution",
+      "rationale": "Runaway fact 39.",
+      "aliases": []
+    }
+  ]
+}

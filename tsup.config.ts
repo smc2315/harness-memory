@@ -1,56 +1,56 @@
 import { defineConfig } from "tsup";
 
-export default defineConfig({
-  entry: {
-    index: "src/index.ts",
-    "activation/index": "src/activation/index.ts",
-    "adapters/index": "src/adapters/index.ts",
-    "audit/index": "src/audit/index.ts",
-    "db/index": "src/db/index.ts",
-    "dream/index": "src/dream/index.ts",
-    "eval/index": "src/eval/index.ts",
-    "memory/index": "src/memory/index.ts",
-    "policy/index": "src/policy/index.ts",
-    "plugin/index": "src/plugin/index.ts",
-    "bin/harness-memory": "src/bin/harness-memory.ts",
-    "cli/adapter-test": "src/cli/adapter-test.ts",
-    "cli/dream-evidence-list": "src/cli/dream-evidence-list.ts",
-    "cli/dream-extract": "src/cli/dream-extract.ts",
-    "cli/dream-run": "src/cli/dream-run.ts",
-    "cli/dream-runs-list": "src/cli/dream-runs-list.ts",
-    "cli/dream-runs-show": "src/cli/dream-runs-show.ts",
-    "cli/eval-baseline": "src/cli/eval-baseline.ts",
-    "cli/eval-memory": "src/cli/eval-memory.ts",
-    "cli/fixtures-add-conflict": "src/cli/fixtures-add-conflict.ts",
-    "cli/fixtures-add-duplicate-memory": "src/cli/fixtures-add-duplicate-memory.ts",
-    "cli/fixtures-add-policy-rules": "src/cli/fixtures-add-policy-rules.ts",
-    "cli/inspect": "src/cli/inspect.ts",
-    "cli/init": "src/cli/init.ts",
-    "cli/install": "src/cli/install.ts",
-    "cli/memory-add": "src/cli/memory-add.ts",
-    "cli/memory-baseline": "src/cli/memory-baseline.ts",
-    "cli/memory-demote": "src/cli/memory-demote.ts",
-    "cli/memory-export": "src/cli/memory-export.ts",
-    "cli/memory-export-skill": "src/cli/memory-export-skill.ts",
-    "cli/memory-history": "src/cli/memory-history.ts",
-    "cli/memory-list": "src/cli/memory-list.ts",
-    "cli/memory-promote": "src/cli/memory-promote.ts",
-    "cli/memory-reject": "src/cli/memory-reject.ts",
-    "cli/memory-review": "src/cli/memory-review.ts",
-    "cli/memory-stats": "src/cli/memory-stats.ts",
-    "cli/memory-why": "src/cli/memory-why.ts",
-    "cli/migrate": "src/cli/migrate.ts",
-    "cli/policy-check": "src/cli/policy-check.ts",
-  },
-  format: ["esm"],
-  target: "node18",
-  platform: "node",
+/**
+ * Two bundles sets (plan §4 B3):
+ *  - library entries with .d.ts (package.json `exports`), and
+ *  - runtime entries without .d.ts: the hook launcher `dist/hook.js` (loads `./hook-bundle.js` through a
+ *    variable specifier, so it stays a separate file), the hook bundle, the detached worker, the embedding
+ *    helper and the `hm` binary. The hooks spawn `node dist/worker.js <root> <command>` and
+ *    `node dist/embed-helper.js <root>` as siblings of the hook bundle, so every runtime entry sits at the
+ *    dist root.
+ * sql.js and @xenova/transformers stay external (loaded lazily at runtime); minisearch/minimatch are
+ * bundled where statically imported and left to the lazy `import()`/createRequire paths in the hook.
+ */
+const shared = {
+  format: ["esm"] as const,
+  target: "node20" as const,
+  platform: "node" as const,
   bundle: true,
   splitting: false,
   sourcemap: true,
-  clean: true,
-  dts: true,
   shims: false,
   outDir: "dist",
-  external: ["sql.js", "@xenova/transformers", "@opencode-ai/sdk"],
-});
+  external: ["sql.js", "@xenova/transformers"],
+};
+
+export default defineConfig([
+  {
+    ...shared,
+    entry: {
+      index: "src/index.ts",
+      "core/index": "src/core/index.ts",
+      "activation/index": "src/activation/index.ts",
+      "adapters/index": "src/adapters/index.ts",
+      "audit/index": "src/audit/index.ts",
+      "db/index": "src/db/index.ts",
+      "dream/index": "src/dream/index.ts",
+      "eval/index": "src/eval/index.ts",
+      "memory/index": "src/memory/index.ts",
+      "policy/index": "src/policy/index.ts",
+    },
+    clean: true,
+    dts: true,
+  },
+  {
+    ...shared,
+    entry: {
+      hook: "src/hook-launch.ts",
+      "hook-bundle": "src/hook.ts",
+      worker: "src/worker.ts",
+      "embed-helper": "src/embed-helper.ts",
+      "bin/harness-memory": "src/bin/harness-memory.ts",
+    },
+    clean: false,
+    dts: false,
+  },
+]);

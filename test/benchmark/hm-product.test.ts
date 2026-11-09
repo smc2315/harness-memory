@@ -554,6 +554,8 @@ describe("HM-ProductBench: CLAUDE.md vs harness-memory", () => {
     // Seed all 30 rules as active memories
     for (const rule of PROJECT_RULES) {
       const memory = repository.create({
+        authority: "human",
+        sourceKind: "manual",
         type: rule.memoryType,
         summary: rule.summary,
         details: rule.details,

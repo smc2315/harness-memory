@@ -7,6 +7,8 @@
 
 import MiniSearch from "minisearch";
 
+import { codeAwareTokenize } from "./lexical-snapshot";
+
 export interface LexicalDocument {
   id: string;
   summary: string;
@@ -16,29 +18,6 @@ export interface LexicalDocument {
 export interface LexicalSearchResult {
   id: string;
   score: number;
-}
-
-/**
- * Splits text on whitespace/punctuation, then further splits camelCase,
- * snake_case, and kebab-case tokens into individual words.
- *
- * Examples:
- *   "getUserName" -> ["get", "user", "name"]
- *   "user_name" -> ["user", "name"]
- *   "my-component" -> ["my", "component"]
- */
-function codeAwareTokenize(text: string): string[] {
-  return text
-    .split(/[\s\p{P}]+/u)
-    .flatMap((word) => {
-      const expanded = word
-        .replace(/([a-z])([A-Z])/g, "$1 $2")
-        .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");
-
-      return expanded.split(/[_\-\s]+/);
-    })
-    .filter((token) => token.length > 0)
-    .map((token) => token.toLowerCase());
 }
 
 export class LexicalIndex {

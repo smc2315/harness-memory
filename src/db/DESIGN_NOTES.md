@@ -1,234 +1,129 @@
-# Task 4: SQLite Schema and Migration Design - Design Notes
+# Storage layer design notes
 
-## Overview
+The v0.5 notes (UUID text ids, content-hash dedup, `PRAGMA user_version`, lifecycle trigger CHECKs,
+evidence linking, policy-rule separation, index strategy) still describe migrations 001–016 and are kept
+at the end of this file. The v0.6 redesign (migrations 017–021, `store.ts`, `locks.ts`, `post-migrate.ts`)
+adds the decisions below. Spec references are to `docs/redesign/spec-v0.6.md`.
 
-This document captures the architectural decisions and design rationale for the SQLite schema and migration infrastructure for the Project Memory Layer MVP.
+## v0.6 decisions
 
-## Key Design Decisions
+### 1. One writer protocol, no resident database
 
-### 1. UUID Primary IDs via TEXT
+sql.js has no file locking and no shared connection: every process loads the whole file, changes it in
+memory and writes the whole file back. v0.5 let a long-lived plugin keep its copy and overwrite everyone
+else's writes (defect D1). v0.6 makes `Store.withWriteLock` the only way to write: lock → load → migrate →
+apply → save → snapshot, held for seconds, never around an LLM call. Hooks never open SQLite at all; they
+read `snapshot/active.v1.json`, which every writer rebuilds after its save (§9.2 step 6).
 
-**Decision**: All tables use `TEXT PRIMARY KEY` for UUID identifiers instead of auto-increment integers.
+### 2. Directory lock with heartbeat and takeover
 
-**Rationale**:
-- Deterministic, collision-free IDs without central sequence management
-- Supports distributed generation and offline-first scenarios
-- Aligns with MVP requirement for UUID primary IDs
-- Enables portable database exports and merges
-- No dependency on database-specific auto-increment behavior
+`mkdirSync` is atomic on every platform we support and needs no native module. The holder writes
+`owner.json` and refreshes `heartbeat_at` every 5 s on an unref'ed timer. A contender takes over when the
+heartbeat is older than 120 s (works across hosts and file shares) or when the owner is on the same host
+and `kill(pid, 0)` says it is gone (fast recovery from crashes). Waits are jittered between 25 and 250 ms
+so two contenders do not retry in lockstep; the deadline is `waitMs` (CLI 5 s, worker 30 s, hooks never
+wait). `release()` re-reads `owner.json` and only removes the directory if it is still ours, so a holder that
+was taken over cannot delete the new owner's lock.
 
-**Implementation**:
-- All primary keys are TEXT type
-- UUIDs generated externally (v4 or v5 recommended)
-- No database-level ID generation
+The takeover itself must never remove or rename the lock directory: two contenders that both saw the stale
+owner would `rmSync` each other's fresh directory and both believe they hold the lock (a silent lost write,
+the very defect the lock exists for), and a renamed-away directory lets a third contender `mkdir` the path
+while the previous holder still thinks it owns it. The takeover is therefore a compare-and-swap on
+`owner.json` inside the directory: `renameSync(owner.json → owner.json.stale-<pid>-<ms>-<n>)` claims the
+stale record (only one rename can win), the moved copy must equal the record the stale verdict was based
+on — heartbeat included, so a holder that woke up and refreshed is left alone and the copy is moved back —
+and the new owner publishes its own `owner.json` with an exclusive create (`wx`). The same exclusive create
+stamps a fresh `mkdir`; a contender whose directory or record disappears under it competes again instead
+of failing with ENOENT. Two more guards close the remaining sub-millisecond windows: the heartbeat never
+re-stamps an `owner.json` that carries another identity, and `Store.withWriteLock` calls
+`LockHandle.stillHeld()` right before the save (fencing) — a lost lock throws `LockBusyError` and nothing is
+written. Stale copies left by a kill mid-takeover live inside the lock directory and vanish with it.
 
-### 2. Content-Hash Deduplication
+### 3. Save is export → tmp → fsync → `.prev` → rename
 
-**Decision**: `memories` table enforces `UNIQUE` constraint on `content_hash` column.
+`db.export()` yields the complete database buffer. Writing it to `memory.sqlite.tmp-<pid>`, fsyncing, and
+renaming over the live file means a crash leaves either the old or the new file, never a torn one. The
+previous file is copied to `.prev` right before the rename, which is what `recoverFromPrev` restores when the
+main file fails the header or `quick_check`; the damaged file is kept as `.corrupt-<ts>` for `hm doctor`.
+Windows can refuse the rename while an antivirus or indexer holds the file (EPERM/EBUSY): five attempts
+20 ms apart, then a copy fallback with a warning. Orphan `*.tmp-<pid>` files older than ten minutes are removed
+at the start of every write (and by `worker dream`) from every directory whose writers use tmp + rename:
+next to the database, `snapshot/`, `queue/`, `state/` and `raw/` (hooks, worker import, idle sweep, notify
+and the provider cache all leave `<file>.tmp-<pid>` behind when killed between write and rename).
 
-**Rationale**:
-- Prevents duplicate memories with identical content
-- Deterministic dedup without semantic similarity or ML
-- Efficient database-level enforcement
-- Supports intentional supersession via `supersedes_memory_id`
-- Enables conflict detection at insertion time
+`export()` closes and reopens sql.js' internal connection: prepared statements die and connection PRAGMAs
+reset (`foreign_keys` back to OFF). The store re-enables foreign keys after saving and documents that
+callbacks must not keep statements across the save.
 
-**Implementation**:
-- SHA256 hash of memory content (summary + details)
-- UNIQUE constraint prevents duplicate inserts
-- Repeated promotion of same content returns existing memory or updates it
-- Audit trail preserved: old records remain queryable with status=stale/superseded
+### 4. Migrations run outside any transaction, with a backup
 
-### 3. Migration Versioning Strategy
+017 rebuilds `memories` (`DROP TABLE` + rename) and must run with `PRAGMA foreign_keys = OFF`, which SQLite
+ignores inside a transaction; with foreign keys on, the drop would cascade through `evidence` and the dream
+links. So `runMigrationsOnDb` applies files on an open connection with no surrounding transaction and relies
+on in-memory application plus the atomic save for atomicity; the file copy `memory.sqlite.bak-v<from>` taken
+before the first pending file is the rollback point (`hm db:rollback`). A database whose `user_version` is
+above what the build knows throws `DatabaseNewerThanCodeError` before anything is touched; readers still
+work and report `newerThanCode`.
 
-**Decision**: Use SQLite's built-in `PRAGMA user_version` for migration version tracking.
+### 5. Idempotent writes: `write_ops` and `db_generation`
 
-**Rationale**:
-- Matches the explicit MVP requirement from the plan
-- Avoids creating a non-MVP metadata table
-- Keeps migration state inside SQLite's native schema version field
-- Simple integer versioning is sufficient for the MVP
-- Easy to inspect from both CLI and external SQLite tooling
+Workers are retried (lease expiry, crashes, the same queue file processed twice), so every write names an
+operation id (`run id`, `decision:<proposal>:<at>`, `import:<sha>`, `dream:<started_at>`). The store refuses to
+apply the same id twice: a callback can ask `ctx.alreadyApplied(id)` and return a noop; if it does not, the
+store rolls its changes back and reports `alreadyApplied`. A noop without writes skips the save entirely
+(the file's bytes and mtime do not change), so retries are free. `meta.db_generation` increases exactly once
+per real write and is copied into the snapshot, which lets `doctor` compare the snapshot with the database.
 
-**Implementation**:
-- Migration runner reads current version via `PRAGMA user_version`
-- Migration runner sets version via `PRAGMA user_version = N`
-- All CREATE statements use `IF NOT EXISTS` for idempotency
-- Migrations only applied if current version < migration version
+### 6. Post-migrate data fix-ups are plain SQL
 
-### 4. Lifecycle Trigger Constraints
+`post-migrate.ts` runs once (guarded by `meta.semantic_key_backfill`) in the same writer session as the
+schema upgrade. It is the one place allowed to change `memories.status` without `transitionMemory`: the
+transition module lives above `src/db` and the store must not depend on it. The fix-ups are ordered so that
+DreamWorker template candidates are rejected before semantic keys are assigned; otherwise a template could
+own a key or trigger a spurious merge proposal. Collisions keep the oldest row's key because the oldest row is
+the one other rows' `supersedes_memory_id` and evidence most likely point at.
 
-**Decision**: Both `activation_logs` and `policy_rules` enforce CHECK constraints on trigger types.
+### 7. Hooks are injected
 
-**Rationale**:
-- Fail-fast validation at database level
-- Prevents invalid trigger values from being stored
-- Supported triggers: `session_start`, `before_model`, `before_tool`, `after_tool`
-- Aligns with MVP lifecycle model
+`StoreHooks` (`postMigrate`, `deriveRules`, `buildSnapshot`) are passed in by the composition root (worker
+entry, CLI). `src/db` therefore depends only on `src/core`; policy derivation (`src/policy/derive.ts`) and
+the snapshot builder (`src/db/snapshot.ts`) can import repositories and activation code freely without
+creating a cycle. `postMigrate` defaults to `runPostMigrate` because it lives in this directory and forgetting
+it would leave `semantic_key` NULL on every upgraded row; passing `null` disables it.
 
-**Implementation**:
-- CHECK constraints on trigger_kind and lifecycle_trigger columns
-- Enum-like validation without separate lookup table
-- Database prevents invalid states
+---
 
-### 5. Status Transition Model
+## v0.5 notes (migrations 001–016)
 
-**Decision**: Memories support four statuses: `candidate`, `active`, `stale`, `superseded`.
+### UUID primary ids via TEXT
 
-**Rationale**:
-- Supports memory lifecycle management
-- `candidate`: newly promoted, awaiting verification
-- `active`: verified and ready for activation
-- `stale`: no longer relevant, but kept for audit trail
-- `superseded`: replaced by newer memory, linked via `supersedes_memory_id`
-- Preserves history while supporting lifecycle management
+All tables use `TEXT PRIMARY KEY` for UUID identifiers: deterministic, collision-free ids without a central
+sequence, portable exports, no dependency on auto-increment behaviour. Memory ids are derived from the
+content hash (`createMemoryId`).
 
-**Implementation**:
-- `status` column with CHECK constraint
-- `supersedes_memory_id` foreign key for lineage tracking
-- Stale/superseded records remain queryable for audit trail
-- Activation engine filters by status
+### Content-hash deduplication
 
-### 6. Evidence Linking
+`memories.content_hash` (SHA-256 of summary + details) detects exact duplicates without semantic matching.
+007 added `identity_key` (type + content + scope + triggers); 017 narrows its uniqueness to live rows via the
+partial index `ux_memories_identity_live`, because a superseded row and its replacement share the key.
 
-**Decision**: `evidence` table links to `memories` via foreign key with CASCADE delete.
+### Migration versioning
 
-**Rationale**:
-- Enables audit trail of why memories were created/updated
-- Supports four source kinds: `session`, `task`, `file`, `manual_note`
-- CASCADE delete ensures referential integrity
-- Traceability without bloating memory records
+`PRAGMA user_version` tracks the applied migration level; files are named `NNN_description.sql` and applied
+when `NNN > user_version`. `CREATE … IF NOT EXISTS` keeps them idempotent.
 
-**Implementation**:
-- Foreign key with ON DELETE CASCADE
-- Separate table allows multiple evidence records per memory
-- Source_kind constrains evidence origin
-- Source_ref stores reference (file path, session ID, etc.)
-- Excerpt stores relevant excerpt from source
+### Lifecycle trigger constraints
 
-### 7. Policy Rule Separation
+`activation_logs.lifecycle_trigger` and `policy_rules.trigger_kind` are CHECK-constrained to
+`session_start | before_model | before_tool | after_tool`.
 
-**Decision**: `policy_rules` table separate from `memories` for enforceable rules.
+### Status model
 
-**Rationale**:
-- Keeps advisory memory distinct from enforcement
-- Optional `memory_id` link allows rules to reference memories
-- Severity levels: `info`, `warning` (no hard blocks in MVP)
-- Supports future hard-block enforcement without schema changes
-- Clear separation of concerns
+`candidate → active → stale | superseded`, plus `rejected` (004). v0.6 adds `status_reason`,
+`superseded_by_memory_id` and moves every transition behind `transitionMemory` (§4.7).
 
-**Implementation**:
-- Separate table with own lifecycle
-- Optional foreign key to memories
-- Unique rule_code for rule identity
-- Trigger-based activation (session_start, before_model, before_tool, after_tool)
+### Evidence, policy rules, indexes
 
-### 8. Indexing Strategy
-
-**Decision**: 11 indexes total across 4 tables for query optimization.
-
-**Rationale**:
-- Supports deterministic activation queries without full table scans
-- Primary indexes: scope_glob, status, lifecycle_trigger, session_id
-- Temporal indexes: created_at for audit queries
-- Balances query performance with write overhead
-
-**Implementation**:
-- `idx_memories_scope_glob`: For scope-based memory queries
-- `idx_memories_status`: For status filtering
-- `idx_memories_created_at`: For temporal queries
-- `idx_evidence_memory_id`: For memory lookups
-- `idx_evidence_created_at`: For temporal queries
-- `idx_policy_rules_scope_glob`: For scope-based rule queries
-- `idx_policy_rules_trigger_kind`: For trigger-based rule queries
-- `idx_policy_rules_memory_id`: For memory lookups
-- `idx_activation_logs_session_id`: For session lookups
-- `idx_activation_logs_created_at`: For temporal queries
-- `idx_activation_logs_lifecycle_trigger`: For trigger-based queries
-
-## Schema Compliance
-
-### MVP Requirements Met
-
-✅ **No vector storage tables**: Schema contains only memories, evidence, policy_rules, activation_logs
-✅ **No graph tables**: No graph-specific structures
-✅ **No speculative future entities**: Only MVP tables included
-✅ **Migration versioning**: `PRAGMA user_version` tracks applied migrations
-✅ **UUID primary IDs**: All tables use TEXT PRIMARY KEY
-✅ **Content-hash dedup**: UNIQUE constraint on memories.content_hash
-✅ **All data model fields**: Every field from the agreed data model is present
-✅ **Lifecycle triggers**: Properly constrained in activation_logs and policy_rules
-✅ **Memory status transitions**: candidate, active, stale, superseded supported
-✅ **Evidence source kinds**: session, task, file, manual_note supported
-✅ **Policy severity levels**: info, warning supported
-✅ **Confidence/importance ranges**: 0.0-1.0 validated with CHECK constraints
-✅ **Foreign key relationships**: CASCADE/SET NULL as appropriate
-
-## Idempotency
-
-All migrations are idempotent:
-- All CREATE statements use `IF NOT EXISTS`
-- Migration runner checks current version before applying
-- Running migrations multiple times produces the same result
-- Verified: Second run is a no-op
-
-## Activation Budget Support
-
-The schema supports the activation budget constraints:
-- Maximum 10 memories per activation
-- Maximum 8KB total payload per activation
-- Tracked in activation_logs for audit trail
-- Enforced at application level (not database level)
-
-## Future Extensibility
-
-The schema is designed for future migrations:
-1. New tables can be added in migration 002, 003, etc.
-2. Existing tables can be extended with new columns
-3. New indexes can be added without schema changes
-4. Migration versioning supports unlimited future migrations
-5. Backward compatibility maintained via IF NOT EXISTS clauses
-
-## Type Safety
-
-TypeScript interfaces in `src/db/schema/types.ts` provide:
-- Type-safe database operations
-- Enum types for constrained fields
-- Activation budget constants
-- Memory defaults
-- IDE autocomplete support
-
-## Performance Considerations
-
-1. **Scope Globbing**: Indexed for efficient scope-based queries
-2. **Status Filtering**: Indexed for quick active/stale/superseded filtering
-3. **Temporal Queries**: Indexed on created_at for audit trail queries
-4. **Session Lookups**: Indexed on session_id for activation log queries
-5. **Foreign Key Lookups**: Indexed on memory_id for evidence and policy rule queries
-
-## Audit Trail
-
-The schema preserves complete audit trail:
-- `created_at` and `updated_at` on all records
-- `last_verified_at` on memories for freshness tracking
-- `activation_logs` tracks all memory activations and suppressions
-- `evidence` links memories to their supporting sources
-- `supersedes_memory_id` tracks memory lineage
-
-## Constraints and Validation
-
-Database-level constraints ensure data integrity:
-- Type constraints on enum fields
-- Range constraints on confidence/importance (0.0-1.0)
-- Uniqueness constraints on content_hash and rule_code
-- Foreign key constraints with CASCADE/SET NULL
-- NOT NULL constraints on required fields
-
-## Migration Infrastructure
-
-The migration system provides:
-- `bun run db:migrate --db <path>`: Apply pending migrations
-- `bun run db:inspect --db <path>`: Inspect schema and data
-- Automatic database initialization
-- Version tracking and idempotency
-- Clear error messages and logging
+`evidence` links memories to their sources with `ON DELETE CASCADE`; `policy_rules` keeps enforceable rules
+separate from advisory memories (020 adds tool/target/signature matching and `enforcement`); indexes cover
+scope, status, timestamps and foreign keys so activation queries never scan whole tables.

@@ -3,11 +3,7 @@ export {
   type BaselineEvalOptions,
   type BaselineEvalSummary,
 } from "./baseline-runner";
-export {
-  isMemoryEvalScenarioSelector,
-  runMemoryEval,
-  type MemoryEvalOptions,
-  type MemoryEvalScenarioLog,
-  type MemoryEvalScenarioSelector,
-  type MemoryEvalSummary,
-} from "./memory-runner";
+
+export * from "./latency";
+export * from "./replay";
+export { checkExtractionEventIds, runPreflight, type PreflightCheck } from "./replay/preflight";

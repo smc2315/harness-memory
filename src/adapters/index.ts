@@ -1,17 +1,36 @@
-export { OpenCodeAdapter, type OpenCodeAdapterOptions } from "./opencode-adapter";
+// v0.6 host adapters (Phase B2): the hook core, hook process I/O and the Claude Code host mapping.
 export {
-  type AdapterAfterToolInput,
-  type AdapterAfterToolOutput,
-  type AdapterAfterToolResult,
-  type AdapterBeforeModelInput,
-  type AdapterBeforeModelRecord,
-  type AdapterBeforeModelResult,
-  type AdapterBeforeToolInput,
-  type AdapterBeforeToolResult,
-  type AdapterModelRef,
-  type AdapterSessionContext,
-  type AdapterSessionMetadata,
-  type AdapterSessionStartInput,
-  type AdapterToolEvidenceCapture,
-  type AdapterToolPolicyCheck,
-} from "./types";
+  createRuntime,
+  emptyResult,
+  IDLE_TURN_MS,
+  runHook,
+  spawnedByWorker,
+  summarizeHookResult,
+  type HookResult,
+  type HookRuntime,
+  type WorkerCommand,
+} from "./hook-core";
+export { appendHookLog, describeError, formatHookLogLine, readStdin, rotateLog, writeStdout, type AppendHookLogOptions, type ReadStdinOptions } from "./hook-io";
+export {
+  CLAUDE_CODE_EVENT_NAMES,
+  hookEventFromClaudeName,
+  isHookEvent,
+  normalizeClaudeCode,
+  normalizeClaudeCodeTool,
+  parseClaudeCodeStdin,
+  renderClaudeCode,
+  SILENT_EVENTS,
+} from "./hosts/claude-code";
+export {
+  consumeNotify,
+  createSessionState,
+  ensureHookDirectories,
+  isSessionState,
+  ledgerSize,
+  listStateFiles,
+  queueHasFiles,
+  readSessionState,
+  writeJsonAtomic,
+  writeQueueFile,
+  writeSessionState,
+} from "./session-state";

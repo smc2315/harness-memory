@@ -1,3 +1,6 @@
+<!-- v0.5-historical-banner -->
+> **Historical (v0.5).** This page describes the v0.5 dream cycle (append-only evidence rows → DreamWorker consolidation → template candidates), which v0.6 removed: there are no evidence rows per tool call and no synthesized candidates any more. In v0.6 the write path is ledger → episode → extraction → reconcile (spec §5), and `dream` only consolidates (TTL, expiry, proposals, merge, GC; spec §5.8). Current design: [docs/redesign/spec-v0.6.md](../redesign/spec-v0.6.md); migration: [docs/redesign/upgrade-from-0.5.md](../redesign/upgrade-from-0.5.md). Kept for reference, not updated.
+
 # Dream Cycle
 
 ## Purpose

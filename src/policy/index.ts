@@ -6,3 +6,5 @@ export {
   type PolicyRuleRecord,
   type PolicyWarning,
 } from "./types";
+// Derived rules (Phase B1): policy_rules rows rewritten from active policy memories by every writer.
+export * from "./derive";

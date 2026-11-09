@@ -1,3 +1,6 @@
+<!-- v0.5-historical-banner -->
+> **Historical (v0.5).** This is the contract of the OpenCode plugin/adapter that v0.6.0 removed (`src/plugin`, `src/adapters/opencode-adapter.ts`). v0.6.0 ships Claude Code hooks only; Codex follows in 0.6.1 and an OpenCode **V2** plugin (`Plugin.define`, `permission.assert`, context hook) in 0.6.2 — see spec §8.4. Current design: [docs/redesign/spec-v0.6.md](../redesign/spec-v0.6.md); migration: [docs/redesign/upgrade-from-0.5.md](../redesign/upgrade-from-0.5.md). Kept for reference, not updated.
+
 # OpenCode Adapter Contract
 
 ## Overview

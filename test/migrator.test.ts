@@ -1,48 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import initSqlJs, { type Database as SqlJsDatabase } from "sql.js";
+import type { Database as SqlJsDatabase } from "sql.js";
 
-import { getCurrentVersion, getMigrationFiles } from "../src/db/migrator";
-import { MemoryRepository } from "../src/memory";
-
-let sqlJsPromise: ReturnType<typeof initSqlJs> | null = null;
-
-function getSqlJs() {
-  if (sqlJsPromise === null) {
-    sqlJsPromise = initSqlJs();
-  }
-
-  return sqlJsPromise;
-}
-
-async function createDbAtVersion(targetVersion: number): Promise<SqlJsDatabase> {
-  const SQL = await getSqlJs();
-  const db = new SQL.Database();
-
-  for (const migration of getMigrationFiles()) {
-    if (migration.version > targetVersion) {
-      break;
-    }
-
-    db.exec(migration.sql);
-  }
-
-  db.run("PRAGMA foreign_keys = ON;");
-  db.run(`PRAGMA user_version = ${targetVersion};`);
-  return db;
-}
-
-async function migrateToLatest(db: SqlJsDatabase): Promise<void> {
-  const currentVersion = getCurrentVersion(db);
-
-  for (const migration of getMigrationFiles()) {
-    if (migration.version <= currentVersion) {
-      continue;
-    }
-
-    db.exec(migration.sql);
-    db.run(`PRAGMA user_version = ${migration.version};`);
-  }
-}
+import { TARGET_USER_VERSION } from "../src/core/paths";
+import { getCurrentVersion, getMigrationFiles, latestMigrationVersion, runMigrationsOnDb } from "../src/db/migrator";
+import { createTestDbAtVersion } from "./helpers/create-test-db";
 
 function readFirstValue(db: SqlJsDatabase, sql: string): unknown {
   const result = db.exec(sql);
@@ -66,7 +27,7 @@ describe("migrator safety harness", () => {
   let db: SqlJsDatabase;
 
   beforeEach(async () => {
-    db = await createDbAtVersion(0);
+    db = await createTestDbAtVersion(0);
   });
 
   afterEach(() => {
@@ -75,7 +36,7 @@ describe("migrator safety harness", () => {
 
   test("builds a v10 schema and survives upgrade to latest", async () => {
     db.close();
-    db = await createDbAtVersion(10);
+    db = await createTestDbAtVersion(10);
 
     db.run(
       `
@@ -317,24 +278,34 @@ describe("migrator safety harness", () => {
       `
     );
 
-    await migrateToLatest(db);
+    const report = runMigrationsOnDb(db);
+    expect(report.from).toBe(10);
+    expect(report.to).toBe(TARGET_USER_VERSION);
 
     expect(readFirstValue(db, "SELECT COUNT(*) FROM memories WHERE id = 'mem-v10-1';")).toBe(1);
     expect(readFirstValue(db, "SELECT COUNT(*) FROM evidence WHERE id = 'ev-v10-1';")).toBe(1);
     expect(readFirstValue(db, "SELECT COUNT(*) FROM policy_rules WHERE id = 'rule-v10-1';")).toBe(1);
     expect(readFirstValue(db, "SELECT COUNT(*) FROM activation_logs WHERE id = 'act-v10-1';")).toBe(1);
-    expect(readFirstValue(db, "SELECT COUNT(*) FROM dream_runs WHERE id = 'dream-run-v10-1';")).toBe(1);
-    expect(readFirstValue(db, "SELECT COUNT(*) FROM dream_evidence_events WHERE id = 'dee-v10-1';")).toBe(1);
+    // 021 archives the dream pipeline tables under legacy_* names; no rows are lost
+    expect(readFirstValue(db, "SELECT COUNT(*) FROM legacy_dream_runs WHERE id = 'dream-run-v10-1';")).toBe(1);
+    expect(readFirstValue(db, "SELECT COUNT(*) FROM legacy_dream_evidence_events WHERE id = 'dee-v10-1';")).toBe(1);
     expect(
       readFirstValue(
         db,
-        "SELECT COUNT(*) FROM dream_memory_evidence_links WHERE evidence_event_id = 'dee-v10-1' AND memory_id = 'mem-v10-1';"
+        "SELECT COUNT(*) FROM legacy_dream_memory_evidence_links WHERE evidence_event_id = 'dee-v10-1' AND memory_id = 'mem-v10-1';"
       )
     ).toBe(1);
     expect(readFirstValue(db, "SELECT COUNT(*) FROM audit_log WHERE id = 'audit-v10-1';")).toBe(1);
+    // 020 adds enforcement columns with defaults to pre-existing manual rules
+    expect(readFirstValue(db, "SELECT tool_pattern FROM policy_rules WHERE id = 'rule-v10-1';")).toBe("*");
+    expect(readFirstValue(db, "SELECT enforcement FROM policy_rules WHERE id = 'rule-v10-1';")).toBe("advise");
+    expect(readFirstValue(db, "SELECT derived_at IS NULL FROM policy_rules WHERE id = 'rule-v10-1';")).toBe(1);
+    // 017 authority CASE: an active row that was not auto-promoted belongs to a person
+    expect(readFirstValue(db, "SELECT authority FROM memories WHERE id = 'mem-v10-1';")).toBe("human");
+    expect(readFirstValue(db, "SELECT source_kind FROM memories WHERE id = 'mem-v10-1';")).toBe("manual");
+    expect(readFirstValue(db, "SELECT knowledge_kind FROM memories WHERE id = 'mem-v10-1';")).toBe("manual");
 
-    const latestVersion = getMigrationFiles()[getMigrationFiles().length - 1]?.version ?? 0;
-    expect(getCurrentVersion(db)).toBe(latestVersion);
+    expect(getCurrentVersion(db)).toBe(latestMigrationVersion());
 
     if (hasColumn(db, "memories", "relevant_tools_json")) {
       expect(
@@ -345,40 +316,46 @@ describe("migrator safety harness", () => {
       ).toBeNull();
     }
 
-    if (hasColumn(db, "dream_evidence_events", "salience_boost")) {
+    if (hasColumn(db, "legacy_dream_evidence_events", "salience_boost")) {
       expect(
         readFirstValue(
           db,
-          "SELECT salience_boost FROM dream_evidence_events WHERE id = 'dee-v10-1';"
+          "SELECT salience_boost FROM legacy_dream_evidence_events WHERE id = 'dee-v10-1';"
         )
       ).toBe(0);
     }
 
-    const repository = new MemoryRepository(db);
-    const created = repository.create({
-      type: "workflow",
-      summary: "Verify migrator harness CRUD after upgrade",
-      details: "Repository remains usable after schema transitions.",
-      scopeGlob: "test/**/*.ts",
-      lifecycleTriggers: ["before_model"],
-      status: "candidate",
-      createdAt: "2026-03-30T11:00:00.000Z",
-      updatedAt: "2026-03-30T11:00:00.000Z",
-    });
-
-    const loaded = repository.getById(created.id);
-    expect(loaded?.summary).toBe("Verify migrator harness CRUD after upgrade");
-
-    const updated = repository.update(created.id, {
-      status: "active",
-      updatedAt: "2026-03-30T11:05:00.000Z",
-    });
-    expect(updated?.status).toBe("active");
+    // the upgraded memories table accepts new rows and updates (authority / source_kind are mandatory)
+    db.run(
+      `
+      INSERT INTO memories (
+        id, content_hash, identity_key, type, summary, details, scope_glob, lifecycle_triggers,
+        confidence, importance, status, created_at, updated_at, authority, source_kind
+      )
+      VALUES (
+        'mem-after-upgrade', 'hash-after', 'identity-after', 'workflow',
+        'Verify migrator harness CRUD after upgrade', 'Table remains usable after schema transitions.',
+        'test/**/*.ts', '["before_model"]', 0.7, 0.5, 'candidate',
+        '2026-03-30T11:00:00.000Z', '2026-03-30T11:00:00.000Z', 'human', 'manual'
+      );
+      `
+    );
+    expect(readFirstValue(db, "SELECT summary FROM memories WHERE id = 'mem-after-upgrade';")).toBe(
+      "Verify migrator harness CRUD after upgrade"
+    );
+    db.run("UPDATE memories SET details = 'updated', updated_at = '2026-03-30T11:05:00.000Z' WHERE id = 'mem-after-upgrade';");
+    expect(readFirstValue(db, "SELECT details FROM memories WHERE id = 'mem-after-upgrade';")).toBe("updated");
+    expect(() =>
+      db.run(
+        `INSERT INTO memories (id, content_hash, type, summary, details, scope_glob, lifecycle_triggers, confidence, importance, created_at, updated_at, source_kind)
+         VALUES ('no-authority', 'h', 'policy', 's', 'd', '**/*', '["before_model"]', 0.5, 0.5, 'now', 'now', 'manual');`
+      )
+    ).toThrow(/NOT NULL constraint failed: memories.authority/);
   });
 
   test("new nullable columns are present and readable after upgrade", async () => {
     db.close();
-    db = await createDbAtVersion(10);
+    db = await createTestDbAtVersion(10);
 
     db.run(
       `
@@ -507,53 +484,74 @@ describe("migrator safety harness", () => {
       `
     );
 
-    await migrateToLatest(db);
+    runMigrationsOnDb(db);
 
-    const latestVersion = getMigrationFiles()[getMigrationFiles().length - 1]?.version ?? 0;
-
-    if (latestVersion >= 11) {
-      expect(hasColumn(db, "memories", "relevant_tools_json")).toBe(true);
-      expect(
-        readFirstValue(
-          db,
-          "SELECT relevant_tools_json FROM memories WHERE id = 'mem-v10-2';"
-        )
-      ).toBeNull();
-    } else {
-      expect(hasColumn(db, "memories", "relevant_tools_json")).toBe(false);
+    expect(hasColumn(db, "memories", "relevant_tools_json")).toBe(true);
+    expect(readFirstValue(db, "SELECT relevant_tools_json FROM memories WHERE id = 'mem-v10-2';")).toBeNull();
+    for (const column of [
+      "semantic_key",
+      "trigger_signature_json",
+      "signature_key",
+      "knowledge_kind",
+      "failure_classes_json",
+      "status_reason",
+      "superseded_by_memory_id",
+      "source_ref",
+      "revalidate_after",
+      "last_fired_at",
+      "open_proposal_id",
+      "authority",
+      "enforcement",
+      "source_kind",
+      "evidence_score",
+      "evidence_count",
+      "distinct_session_count",
+      "fire_count",
+      "override_count",
+      "contested",
+      "needs_scope",
+      "import_unconfirmed",
+      "aliases_json",
+    ]) {
+      expect(hasColumn(db, "memories", column), column).toBe(true);
     }
+    expect(readFirstValue(db, "SELECT semantic_key FROM memories WHERE id = 'mem-v10-2';")).toBeNull();
+    expect(readFirstValue(db, "SELECT signature_key FROM memories WHERE id = 'mem-v10-2';")).toBe("");
+    expect(readFirstValue(db, "SELECT aliases_json FROM memories WHERE id = 'mem-v10-2';")).toBe("[]");
+    // a candidate was never approved by anyone, so it is an auto row with no knowledge_kind
+    expect(readFirstValue(db, "SELECT authority FROM memories WHERE id = 'mem-v10-2';")).toBe("auto");
+    expect(readFirstValue(db, "SELECT knowledge_kind IS NULL FROM memories WHERE id = 'mem-v10-2';")).toBe(1);
 
-    if (latestVersion >= 12) {
-      expect(hasColumn(db, "dream_evidence_events", "salience_boost")).toBe(true);
-      expect(
-        readFirstValue(
-          db,
-          "SELECT salience_boost FROM dream_evidence_events WHERE id = 'dee-v10-2';"
-        )
-      ).toBe(0);
-    } else {
-      expect(hasColumn(db, "dream_evidence_events", "salience_boost")).toBe(false);
-    }
+    expect(hasColumn(db, "legacy_dream_evidence_events", "salience_boost")).toBe(true);
+    expect(readFirstValue(db, "SELECT salience_boost FROM legacy_dream_evidence_events WHERE id = 'dee-v10-2';")).toBe(0);
+    // 021 marks unconsumed legacy evidence as discarded instead of re-extracting it
+    expect(readFirstValue(db, "SELECT status FROM legacy_dream_evidence_events WHERE id = 'dee-v10-2';")).toBe("discarded");
+    expect(readFirstValue(db, "SELECT discarded_at IS NOT NULL FROM legacy_dream_evidence_events WHERE id = 'dee-v10-2';")).toBe(1);
   });
 
   test("full migration from empty database produces correct schema", async () => {
-    db.close();
-    db = await createDbAtVersion(0);
-
-    for (const migration of getMigrationFiles()) {
-      db.exec(migration.sql);
-      db.run(`PRAGMA user_version = ${migration.version};`);
-    }
+    const report = runMigrationsOnDb(db);
+    expect(report.from).toBe(0);
+    expect(report.applied.length).toBe(getMigrationFiles().length);
 
     const expectedTables = [
       "memories",
       "evidence",
       "policy_rules",
       "activation_logs",
-      "dream_runs",
-      "dream_evidence_events",
-      "dream_memory_evidence_links",
+      "legacy_dream_runs",
+      "legacy_dream_evidence_events",
+      "legacy_dream_memory_evidence_links",
       "audit_log",
+      "session_summaries",
+      "episodes",
+      "extraction_runs",
+      "write_ops",
+      "meta",
+      "proposals",
+      "proposal_support",
+      "memory_provenance",
+      "memory_transitions",
     ];
 
     for (const tableName of expectedTables) {
@@ -561,11 +559,38 @@ describe("migrator safety harness", () => {
         readFirstValue(
           db,
           `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '${tableName}';`
-        )
+        ),
+        tableName
       ).toBe(1);
+    }
+    for (const droppedOrRenamed of ["dream_runs", "dream_evidence_events", "dream_memory_evidence_links", "topic_summaries"]) {
+      expect(
+        readFirstValue(db, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '${droppedOrRenamed}';`),
+        droppedOrRenamed
+      ).toBe(0);
     }
 
     expect(getCurrentVersion(db)).toBe(getMigrationFiles().length);
+    expect(getCurrentVersion(db)).toBe(TARGET_USER_VERSION);
+    expect(readFirstValue(db, "PRAGMA integrity_check;")).toBe("ok");
+    expect(db.exec("PRAGMA foreign_key_check;")).toEqual([]);
+  });
+
+  test("022 adds the recall summary columns and index to episodes; re-running applies nothing", async () => {
+    db.close();
+    db = await createTestDbAtVersion(21);
+    expect(hasColumn(db, "episodes", "summary")).toBe(false);
+    expect(hasColumn(db, "episodes", "summary_kind")).toBe(false);
+
+    const report = runMigrationsOnDb(db);
+    expect(report).toEqual({ from: 21, to: 22, applied: ["022_episode_summaries.sql"] });
+    expect(getCurrentVersion(db)).toBe(TARGET_USER_VERSION);
+    expect(hasColumn(db, "episodes", "summary")).toBe(true);
+    expect(hasColumn(db, "episodes", "summary_kind")).toBe(true);
+    expect(readFirstValue(db, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_episodes_recall';")).toBe(1);
+    expect(readFirstValue(db, "PRAGMA integrity_check;")).toBe("ok");
+
+    expect(runMigrationsOnDb(db)).toEqual({ from: 22, to: 22, applied: [] });
   });
 
   test("migrations are idempotent in ordering", async () => {
@@ -575,5 +600,6 @@ describe("migrator safety harness", () => {
 
     expect(versions).toEqual(sortedVersions);
     expect(new Set(versions).size).toBe(versions.length);
+    expect(versions).toEqual(Array.from({ length: migrations.length }, (_, index) => index + 1));
   });
 });

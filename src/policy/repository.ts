@@ -1,6 +1,15 @@
 import type { Database as SqlJsDatabase } from "sql.js";
 
 import type { LifecycleTrigger, PolicySeverity } from "../db/schema/types";
+import {
+  ENFORCEMENTS,
+  LIFECYCLE_TRIGGERS,
+  PATTERN_KINDS,
+  SIGNATURE_TARGETS,
+  type Enforcement,
+  type PatternKind,
+  type SignatureTarget,
+} from "../core/vocabulary";
 import type { PolicyRuleRecord } from "./types";
 
 type SqlParameter = string | number | null;
@@ -16,6 +25,12 @@ const POLICY_RULE_SELECT_COLUMNS = [
   "message",
   "created_at",
   "updated_at",
+  "tool_pattern",
+  "target_kind",
+  "pattern_kind",
+  "arg_pattern",
+  "enforcement",
+  "derived_at",
 ].join(", ");
 
 const POLICY_SEVERITIES = new Set<PolicySeverity>(["info", "warning"]);
@@ -33,7 +48,7 @@ function expectString(value: unknown, column: string): string {
 }
 
 function expectNullableString(value: unknown, column: string): string | null {
-  if (value === null) {
+  if (value === null || value === undefined) {
     return null;
   }
 
@@ -52,18 +67,26 @@ function expectPolicySeverity(value: unknown): PolicySeverity {
 
 function expectLifecycleTrigger(value: unknown): LifecycleTrigger {
   const trigger = expectString(value, "trigger_kind");
-  const validTriggers: readonly LifecycleTrigger[] = [
-    "session_start",
-    "before_model",
-    "before_tool",
-    "after_tool",
-  ];
 
-  if (!validTriggers.includes(trigger as LifecycleTrigger)) {
+  if (!LIFECYCLE_TRIGGERS.includes(trigger as LifecycleTrigger)) {
     throw new Error(`Invalid lifecycle trigger: ${trigger}`);
   }
 
   return trigger as LifecycleTrigger;
+}
+
+function expectEnum<T extends string>(value: unknown, allowed: readonly T[], column: string, fallback: T): T {
+  if (value === null || value === undefined) return fallback;
+  const text = expectString(value, column);
+  if (!(allowed as readonly string[]).includes(text)) {
+    throw new Error(`Invalid ${column}: ${text}`);
+  }
+  return text as T;
+}
+
+function expectNullableEnum<T extends string>(value: unknown, allowed: readonly T[], column: string): T | null {
+  if (value === null || value === undefined) return null;
+  return expectEnum(value, allowed, column, allowed[0]!);
 }
 
 export class PolicyRuleRepository {
@@ -79,29 +102,16 @@ export class PolicyRuleRepository {
    */
   list(triggerKind?: LifecycleTrigger): PolicyRuleRecord[] {
     const params: SqlParameters = {};
-    const where: string[] = [];
+    const where: string[] = [
+      "(memory_id IS NULL OR EXISTS (SELECT 1 FROM memories m WHERE m.id = policy_rules.memory_id AND m.status = 'active'))",
+    ];
 
     if (triggerKind !== undefined) {
       where.push("trigger_kind = $triggerKind");
       params.$triggerKind = triggerKind;
     }
 
-    const clauses = [
-      `SELECT ${POLICY_RULE_SELECT_COLUMNS} FROM policy_rules`,
-      where.length > 0 ? `WHERE ${where.join(" AND ")}` : "",
-      "ORDER BY created_at ASC, id ASC",
-    ].filter((clause) => clause.length > 0);
-
-    const baseSql = clauses.join(" ");
-    const sql = baseSql.includes("WHERE")
-      ? baseSql.replace(
-          "WHERE",
-          "WHERE (memory_id IS NULL OR EXISTS (SELECT 1 FROM memories m WHERE m.id = policy_rules.memory_id AND m.status = 'active')) AND"
-        )
-      : `${baseSql.replace(
-          `SELECT ${POLICY_RULE_SELECT_COLUMNS} FROM policy_rules`,
-          `SELECT ${POLICY_RULE_SELECT_COLUMNS} FROM policy_rules WHERE (memory_id IS NULL OR EXISTS (SELECT 1 FROM memories m WHERE m.id = policy_rules.memory_id AND m.status = 'active'))`
-        )}`;
+    const sql = `SELECT ${POLICY_RULE_SELECT_COLUMNS} FROM policy_rules WHERE ${where.join(" AND ")} ORDER BY created_at ASC, id ASC`;
 
     return this.selectMany(sql, params);
   }
@@ -171,6 +181,12 @@ export class PolicyRuleRepository {
       message: expectString(row[6], "message"),
       createdAt: expectString(row[7], "created_at"),
       updatedAt: expectString(row[8], "updated_at"),
+      toolPattern: typeof row[9] === "string" && row[9].length > 0 ? row[9] : "*",
+      targetKind: expectEnum<SignatureTarget>(row[10], SIGNATURE_TARGETS, "target_kind", "any"),
+      patternKind: expectNullableEnum<PatternKind>(row[11], PATTERN_KINDS, "pattern_kind"),
+      argPattern: expectNullableString(row[12], "arg_pattern"),
+      enforcement: expectEnum<Enforcement>(row[13], ENFORCEMENTS, "enforcement", "advise"),
+      derivedAt: expectNullableString(row[14], "derived_at"),
     };
   }
 }

@@ -1,3 +1,6 @@
+<!-- v0.5-historical-banner -->
+> **Written for v0.5.** The wedge (trigger-aware memory at the tool boundary) and the "where markdown is enough" boundary still hold. v0.6 changed the rest: Claude Code hooks first (Codex 0.6.1, OpenCode 0.6.2); positioning as complementary to claude-mem ("claude-mem remembers what happened; harness-memory stops the agent before it repeats a known mistake"); human judgment inverted — pitfalls and workflows learned from one correction or failure→resolution activate on their own (`authority = auto`, TTL), and review is reserved for policies, global rows and demotions of human rows; dense retrieval is an optional idle-exit helper, not a non-goal. See §1 of [docs/redesign/spec-v0.6.md](../redesign/spec-v0.6.md) and the README.
+
 # Final Positioning
 
 ## First User
