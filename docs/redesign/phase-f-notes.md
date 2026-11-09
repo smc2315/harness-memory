@@ -326,3 +326,13 @@ documents spell it.
 tsc 0; the targeted suites first (install 22, settings 11, process 2), then the full Windows suite, `npm run package:verify`
 and CI on the pushed commit; the tarball attached to the pre-release is packed from the tagged commit and installed once
 more from its release URL on Windows and WSL before the release is announced as usable.
+
+How it ended (2026-11-09): commits 4327554 (code) and 1bb155e (docs); Windows 81 files / 1166 tests, `package:verify` ok;
+WSL Ubuntu 22.04 / Node 24 full suite 1165 of 1166 — the one failure is the load-sensitive recall-cost median
+(`test/recall-hook.test.ts`, 12.7 ms against its 10 ms local line under the suite's parallelism, 2.3 ms alone); CI run
+42542574009 green on every job for 1bb155e. Tag `v0.6.0-rc.1` → GitHub pre-release with `harness-memory-0.6.0-rc.1.tgz`
+(86 files, 3.3 MB; sha256 09cf8e683f5fe3263ff304b08364053c4cd5f50dc77cba817d35ca93b2f37981, the downloaded asset verified
+byte-identical). Installed from the release URL into fresh prefixes on Windows 11 / Node 24.14.0 and WSL / Node 24.14.0,
+and from the same tarball with Node 20.20.2: `hm --version`, `hm install --host claude --skip-probe` (`v22 (created)`),
+`hm doctor --self-test`, a `deny` on Bash `npm test` through `dist/hook.js` and `{}` on `pnpm test`, `hm uninstall --purge`.
+`npm publish --tag next` remains the author's step.
