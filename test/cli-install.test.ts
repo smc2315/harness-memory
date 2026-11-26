@@ -3,7 +3,8 @@
  * .git/info/exclude (plain checkout, worktree pointer, unresolvable pointer), `.harness-memory/.gitignore`,
  * install-manifest.json, config.json, migrated database + snapshot, the real hook self-test against a fake
  * dist/hook.js, --user scope, --with-embeddings via the npm seam (and the shell-free npm spawn plan), shell
- * form for an old host, probe guidance; uninstall strips exactly our entries, --purge keeps the backups.
+ * form for an old host, probe guidance, the 0.6.0-rc.1 `autonomy_level` migration (INV-1) and its version
+ * predicate; uninstall strips exactly our entries, --purge keeps the backups.
  */
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -11,13 +12,14 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
-import { bundledNpmCli, planNpmSpawn, type InstallReport } from "../src/cli/commands/install";
+import { bundledNpmCli, isPreFullAutonomyVersion, planNpmSpawn, type InstallReport } from "../src/cli/commands/install";
 import type { UninstallReport } from "../src/cli/commands/uninstall";
 import { canonicalDirectory, projectSlug } from "../src/cli/lib/auto-memory";
 import { probeGuidance } from "../src/cli/lib/diagnostics";
 import type { InstallManifest } from "../src/cli/lib/manifest";
 import { GIT_EXCLUDE_LINE, STATE_GITIGNORE_CONTENT, stableExecPath } from "../src/cli/lib/paths";
 import { listHarnessHooks } from "../src/cli/lib/settings";
+import { DEFAULT_CONFIG, loadConfig } from "../src/core/config";
 import { TARGET_USER_VERSION } from "../src/core/paths";
 import type { ProbeResult } from "../src/core/vocabulary";
 import { getMeta } from "../src/db/meta";
@@ -49,6 +51,58 @@ async function readUserVersion(file: string): Promise<{ version: number; install
     db.close();
   }
 }
+
+/**
+ * What 0.6.0-rc.1's `hm install` left in config.json: its whole DEFAULT_CONFIG of the day (`autonomy_level` standard, none
+ * of rc.2's keys), here with one value changed by hand afterwards (`retention.candidate_days` 45 → 60).
+ */
+const RC1_CONFIG: Record<string, unknown> = {
+  schema: "config.v1",
+  autonomy_level: "standard",
+  before_tool: { max_items: 3, max_bytes: 2048, auto_enforcement: "advise", hard_policy: "confirm", auto_escalation: { enabled: true, sessions: 2 } },
+  before_model: { max_items: 5, max_bytes: 3072, min_score: 0.35, dense: "helper", dense_timeout_ms: 80, recall: { max_items: 2, max_bytes: 1024, min_score: 0.5 } },
+  session_start: { max_items: 5, max_bytes: 3072 },
+  after_tool: { max_items: 2, max_bytes: 1024 },
+  extraction: { provider: "auto", model: null, max_runs_per_day: 40, max_auto_activations_per_day: 10, max_auto_activations_per_episode: 3, timeout_ms: 120000, probe_timeout_ms: 20000, lease_seconds: 180 },
+  embeddings: { enabled: false, model: "Xenova/multilingual-e5-small", idle_exit_minutes: 15, cache_dir: null },
+  dream: { interval_hours: 6 },
+  recall: { enabled: false, keep_episodes: 300 },
+  retention: { ledger_days: 14, raw_hours: 24, audit_days: 30, candidate_days: 60, proposal_days: 30 },
+  log: { debug: false, max_bytes: 5242880, rotations: 3 },
+};
+
+/**
+ * A project an earlier install left behind: `config` as config.json and, unless `version` is null, an install manifest
+ * stamped with that version (`files: []` is enough for `isInstallManifest`). Returns the config text written.
+ */
+function seedPreviousInstall(target: CliProject, version: string | null, config: Record<string, unknown>): string {
+  mkdirSync(target.paths.dir, { recursive: true });
+  const text = `${JSON.stringify(config, null, 2)}\n`;
+  writeFileSync(target.paths.config, text, "utf8");
+  if (version !== null) {
+    const manifest: InstallManifest = {
+      schema: "install-manifest.v1",
+      version,
+      installed_at: "2026-11-09T12:00:00.000Z",
+      host: "claude",
+      scope: "project",
+      root: target.root,
+      node: stableExecPath(),
+      hook_script: target.hookScript,
+      hook_form: "exec",
+      shell: null,
+      settings_file: join(target.root, ".claude", "settings.local.json"),
+      events: [],
+      claude_version: null,
+      git_exclude: null,
+      files: [],
+    };
+    writeFileSync(target.paths.manifest, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  }
+  return text;
+}
+
+const INSTALL_ARGS = ["install", "--host", "claude", "--skip-probe", "--skip-self-test"] as const;
 
 describe("hm install --host claude", () => {
   test("registers exec-form hooks, migrates, builds the snapshot, excludes the settings file and passes the self-test", async () => {
@@ -89,6 +143,8 @@ describe("hm install --host claude", () => {
     expect(existsSync(project.paths.snapshotActive)).toBe(true);
     expect(existsSync(project.paths.snapshotLexical)).toBe(true);
     expect(readJson(project.paths.config).schema).toBe("config.v1");
+    // A fresh install gets rc.2's default level and has nothing to migrate.
+    expect(report.config).toEqual({ path: project.paths.config, created: true, embeddings_enabled: false, autonomy_level: "full", autonomy_level_migrated_from: null });
     const db = await readUserVersion(project.paths.db);
     expect(db.version).toBe(TARGET_USER_VERSION);
     expect(db.installed).toMatch(/^\d+\.\d+\.\d+/);
@@ -247,6 +303,70 @@ describe("hm install --host claude", () => {
     expect(readFileSync(join(project.root, ".git", "info", "exclude"), "utf8")).not.toContain(GIT_EXCLUDE_LINE);
   });
 
+  test("turns a 0.6.0-rc.1 install's default autonomy_level standard into full, keeps every other key, and says so once", async () => {
+    const before = seedPreviousInstall(project, "0.6.0-rc.1", RC1_CONFIG);
+    const result = await runHm(project, [...INSTALL_ARGS, "--json"]);
+    expect(result.stderr).toBe("");
+    expect(result.code).toBe(0);
+    const report = result.json<InstallReport>();
+    expect(report.config).toEqual({ path: project.paths.config, created: false, embeddings_enabled: false, autonomy_level: "full", autonomy_level_migrated_from: "standard" });
+    const config = loadConfig(project.paths.config);
+    expect(config.autonomy_level).toBe("full");
+    expect(config.retention.candidate_days).toBe(60);
+    // rc.2's keys are still absent from the file and come from the defaults, as for every rc.1 config.
+    expect(config.dream.full_sweep_per_run).toBe(DEFAULT_CONFIG.dream.full_sweep_per_run);
+    // Exactly one value changed: not the key order, not the formatting, not the hand-set retention.
+    expect(readFileSync(project.paths.config, "utf8")).toBe(before.replace('"autonomy_level": "standard"', '"autonomy_level": "full"'));
+    // The manifest now names this build, which is not one the migration applies to: a re-run has nothing to do.
+    const manifest = readJson<InstallManifest>(project.paths.manifest);
+    expect(manifest.version).toBe(report.version);
+    expect(manifest.version).not.toBe("0.6.0-rc.1");
+    expect(isPreFullAutonomyVersion(manifest.version)).toBe(false);
+
+    // The text report names the migration and the way back (seeded again: the first run rewrote both files).
+    seedPreviousInstall(project, "0.6.0-rc.1", RC1_CONFIG);
+    const text = await runHm(project, [...INSTALL_ARGS]);
+    expect(text.code).toBe(0);
+    const configLine = text.stdout.split("\n").find((line) => line.trim().startsWith("config")) ?? "";
+    expect(configLine.trim()).toBe(
+      `config      ${project.paths.config}; embeddings off; autonomy_level full (a pre-rc.2 install (0.6.0-rc.1) wrote "standard" — set "autonomy_level": "standard" in config.json to keep the review gate)`
+    );
+
+    // Now full under a current manifest: nothing to migrate, nothing to say.
+    const again = await runHm(project, [...INSTALL_ARGS, "--json"]);
+    expect(again.code).toBe(0);
+    expect(again.json<InstallReport>().config).toMatchObject({ autonomy_level: "full", autonomy_level_migrated_from: null });
+    expect(readFileSync(project.paths.config, "utf8")).toBe(before.replace('"autonomy_level": "standard"', '"autonomy_level": "full"'));
+  });
+
+  test("keeps autonomy_level standard when no manifest exists: this project was never installed by rc.1, so the value was chosen", async () => {
+    const before = seedPreviousInstall(project, null, RC1_CONFIG);
+    const result = await runHm(project, [...INSTALL_ARGS, "--json"]);
+    expect(result.code).toBe(0);
+    expect(result.json<InstallReport>().config).toEqual({ path: project.paths.config, created: false, embeddings_enabled: false, autonomy_level: "standard", autonomy_level_migrated_from: null });
+    expect(readFileSync(project.paths.config, "utf8")).toBe(before);
+    const text = await runHm(project, [...INSTALL_ARGS]);
+    const configLine = text.stdout.split("\n").find((line) => line.trim().startsWith("config")) ?? "";
+    expect(configLine.trim()).toBe(`config      ${project.paths.config}; embeddings off; autonomy_level standard`);
+  });
+
+  test("keeps autonomy_level standard under a manifest from 0.6.0-rc.2: set after full became the default", async () => {
+    const before = seedPreviousInstall(project, "0.6.0-rc.2", RC1_CONFIG);
+    const result = await runHm(project, [...INSTALL_ARGS, "--json"]);
+    expect(result.code).toBe(0);
+    expect(result.json<InstallReport>().config).toMatchObject({ created: false, autonomy_level: "standard", autonomy_level_migrated_from: null });
+    expect(readFileSync(project.paths.config, "utf8")).toBe(before);
+  });
+
+  test("keeps any value other than standard under an rc.1 manifest: rc.1 never wrote shadow by default", async () => {
+    const before = seedPreviousInstall(project, "0.6.0-rc.1", { ...RC1_CONFIG, autonomy_level: "shadow" });
+    const result = await runHm(project, [...INSTALL_ARGS, "--json"]);
+    expect(result.code).toBe(0);
+    expect(result.json<InstallReport>().config).toMatchObject({ created: false, autonomy_level: "shadow", autonomy_level_migrated_from: null });
+    expect(readFileSync(project.paths.config, "utf8")).toBe(before);
+    expect(loadConfig(project.paths.config).autonomy_level).toBe("shadow");
+  });
+
   test("renders a brand-new database as created, not as migrated from v0", async () => {
     const result = await runHm(project, ["install", "--host", "claude", "--skip-probe", "--skip-self-test"]);
     expect(result.code).toBe(0);
@@ -373,6 +493,22 @@ describe("hm install --host claude", () => {
     const report = result.json<InstallReport>();
     expect(report.ok).toBe(false);
     expect(existsSync(project.paths.manifest)).toBe(true);
+  });
+});
+
+describe("isPreFullAutonomyVersion", () => {
+  test("is true for every 0.6.0 pre-release before rc.2 (the builds that wrote autonomy_level standard as the default)", () => {
+    for (const version of ["0.6.0-rc.1", "0.6.0-rc.0", "0.6.0-rc", "0.6.0-dev.3", "0.6.0-alpha", "0.6.0-beta.11", "0.6.0-rc.1+build.7", " 0.6.0-rc.1\n"]) {
+      expect(isPreFullAutonomyVersion(version), JSON.stringify(version)).toBe(true);
+    }
+  });
+
+  test("is false for the release, rc.2 and later pre-releases, every other version and garbage", () => {
+    const versions = ["0.6.0", "0.6.0-rc.2", "0.6.0-rc.10", "0.6.0-rc.2+sha.abc", "0.6.0-rc.2.1", "0.6.1", "0.6.1-rc.1", "0.7.0", "0.5.1", "0.5.1-rc.1", "1.0.0", "", "0.6.0-", "0.6.0-rc..1", "v0.6.0-rc.1", "rc.1", "garbage"];
+    for (const version of versions) expect(isPreFullAutonomyVersion(version), JSON.stringify(version)).toBe(false);
+    // The digit-group comparison of lib/settings.ts is the wrong tool here: it has no notion of a pre-release.
+    expect(isPreFullAutonomyVersion("0.6.0-rc.2")).toBe(false);
+    expect(isPreFullAutonomyVersion("0.6.0-dev.3")).toBe(true);
   });
 });
 

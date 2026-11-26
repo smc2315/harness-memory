@@ -1,5 +1,6 @@
 /**
- * s01 — a correction-only turn (§13.2 (a), (j), (k) activation; (d) worker-level idempotency).
+ * s01 — a correction-only turn (§13.2 (a), (j), (k) activation; (d) worker-level idempotency). Since 0.6.0-rc.2 a bare
+ * correction cue (no corrected previous turn with tool calls) weighs 1, and under the default `full` level evidence 1 activates.
  * Hooks: SessionStart → UserPromptSubmit (Korean + English correction) → Stop. Worker: the recorded
  * pitfall activates as auto / advise (A′: auto rules are born at `before_tool.auto_enforcement` = advise and
  * climb to soft_deny only on a second session's reinforce, see s11) without any AuthorityViolationError.
@@ -21,7 +22,7 @@ export const s01 = defineScenario({
     run.checkTurn(turn);
     const descriptor = turn.descriptor;
     if (descriptor === null) return;
-    run.equal("(j) a correction-only turn carries evidence_weight 2", descriptor.evidence_weight, 2);
+    run.equal("(j) a bare correction cue carries evidence_weight 1 (rc.2 §5)", descriptor.evidence_weight, 1);
     run.equal("(j) flags = {correction: 1}", descriptor.flags, { correction: 1 });
     run.equal("stop asked for a worker extract", turn.calls.find((call) => call.event === "stop")?.spawned, ["extract"]);
     const promptLine = turn.producedLines.find((line) => line.kind === "prompt");
@@ -42,7 +43,7 @@ export const s01 = defineScenario({
     run.equal("(a) authority auto", memory.authority, "auto");
     run.equal("(a) enforcement advise (A′: born at before_tool.auto_enforcement, not soft_deny)", memory.enforcement, "advise");
     run.equal("(a) type pitfall with the canonical cmd key", [memory.type, memory.signatureKey], ["pitfall", "bash|command|cmd|npm test"]);
-    run.equal("(a) evidence_score 2 / evidence_count 1 / validation_count 0", [memory.evidenceScore, memory.evidenceCount, memory.validationCount], [2, 1, 0]);
+    run.equal("(a) evidence_score 1 / evidence_count 1 / validation_count 0", [memory.evidenceScore, memory.evidenceCount, memory.validationCount], [1, 1, 0]);
     run.equal("(a) TTL 30 d for a correction row", memory.ttlExpiresAt, isoPlus(extractAt, { days: 30 }));
     run.equal("(a) aliases indexed", memory.aliases, ["pnpm test", "테스트 실행"]);
 

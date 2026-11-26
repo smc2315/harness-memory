@@ -4,6 +4,7 @@ import type { Database as SqlJsDatabase } from "sql.js";
 import { sessionKey } from "../src/core/paths";
 import {
   EpisodeRepository,
+  ExtractionRunRepository,
   episodeRecordToDescriptor,
   isCorrectionEpisode,
 } from "../src/db/repositories";
@@ -191,6 +192,52 @@ describe("EpisodeRepository", () => {
     expect(episodes.releaseExpiredLeases(isoPlus(now, { hours: 1, seconds: 60 }))).toBe(1);
     expect(episodes.getById(c.id)?.status).toBe("queued");
     expect(episodes.getById(c.id)?.leaseUntil).toBeNull();
+  });
+
+  test("countDecisionOnlyExtractedSince counts evidence-0 session episodes with a run started since the given time, once each, never one back in queued or one skipped", () => {
+    const runs = new ExtractionRunRepository(db);
+    const start = (episodeId: string, startedAt: string) =>
+      runs.start({ id: `run:${episodeId}`, episodeId, provider: "replay", extractorVersion: "test", promptSha256: "0".repeat(64), inputChars: 10, startedAt });
+
+    const decisionToday = insertEpisode(db, { evidence_weight: 0, flags: { decision: 1 } });
+    start(decisionToday.id, isoPlus(T0, { hours: 3 }));
+    runs.finish(`run:${decisionToday.id}`, { status: "ok", finishedAt: isoPlus(T0, { hours: 3, minutes: 1 }) });
+    episodes.markExtracted(decisionToday.id, `run:${decisionToday.id}`);
+    // A failed attempt counts like max_runs_per_day counts it; a retry reuses the run id (no double count).
+    const decisionFailedToday = insertEpisode(db, { evidence_weight: 0, flags: { decision: 1 } });
+    start(decisionFailedToday.id, isoPlus(T0, { hours: 5 }));
+    runs.finish(`run:${decisionFailedToday.id}`, { status: "timeout", finishedAt: isoPlus(T0, { hours: 5, minutes: 2 }), error: "killed" });
+    episodes.markFailed(decisionFailedToday.id, "timeout: killed", { retryAt: isoPlus(T0, { hours: 7 }) });
+    start(decisionFailedToday.id, isoPlus(T0, { hours: 7 }));
+    const decisionYesterday = insertEpisode(db, { evidence_weight: 0, flags: { decision: 1 } });
+    start(decisionYesterday.id, isoPlus(T0, { hours: -2 }));
+    episodes.markExtracted(decisionYesterday.id, `run:${decisionYesterday.id}`);
+    const correctionToday = insertEpisode(db, { evidence_weight: 2, flags: { correction: 1 } });
+    start(correctionToday.id, isoPlus(T0, { hours: 3 }));
+    episodes.markExtracted(correctionToday.id, `run:${correctionToday.id}`);
+    const importToday = insertEpisode(db, { host: "import", evidence_weight: 0, close_reason: "import", ledger_ref: "import:CLAUDE.md#L1" });
+    start(importToday.id, isoPlus(T0, { hours: 3 }));
+    episodes.markExtracted(importToday.id, `run:${importToday.id}`);
+    insertEpisode(db, { evidence_weight: 0, flags: { decision: 1 } }); // queued, never reached the extractor
+    // A provider outage writes the run row with the probe status and requeues the episode (recordExtractionFailure,
+    // providerUnavailable): still `queued`, so the ghost run must not consume the day's budget (D1).
+    const requeuedToday = insertEpisode(db, { evidence_weight: 0, flags: { decision: 1 } });
+    start(requeuedToday.id, isoPlus(T0, { hours: 6 }));
+    runs.finish(`run:${requeuedToday.id}`, { status: "not_logged_in", finishedAt: isoPlus(T0, { hours: 6 }), error: "probe: not_logged_in" });
+    expect(episodes.getById(requeuedToday.id)?.status).toBe("queued");
+    // Requeued by that outage, then leased once the day's cap was reached: markSkipped(decision_cap) happens at lease
+    // time, before any provider call, so the skipped episode's run row is still the outage's ghost. Counting it would
+    // hold a decision_only_per_day slot for the rest of the day for an episode the provider never saw.
+    const skippedToday = insertEpisode(db, { evidence_weight: 0, flags: { decision: 1 } });
+    start(skippedToday.id, isoPlus(T0, { hours: 6 }));
+    runs.finish(`run:${skippedToday.id}`, { status: "not_logged_in", finishedAt: isoPlus(T0, { hours: 6 }), error: "probe: not_logged_in" });
+    episodes.markSkipped(skippedToday.id, "decision_cap");
+    expect(episodes.getById(skippedToday.id)).toMatchObject({ status: "skipped", skipReason: "decision_cap" });
+
+    expect(episodes.countDecisionOnlyExtractedSince(T0)).toBe(2);
+    expect(episodes.countDecisionOnlyExtractedSince(isoPlus(T0, { hours: 4 }))).toBe(1);
+    expect(episodes.countDecisionOnlyExtractedSince(isoPlus(T0, { days: -1 }))).toBe(3);
+    expect(episodes.countDecisionOnlyExtractedSince(isoPlus(T0, { days: 1 }))).toBe(0);
   });
 
   test("listForSession returns the session's episodes oldest first", () => {

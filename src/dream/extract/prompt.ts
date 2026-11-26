@@ -201,9 +201,14 @@ Types:
 - decision: an explicit decision ("we'll use X", "switch to Y").
 Boundary rules:
 - Knowledge that must surface right before a tool call gets a trigger_signature and lifecycle_triggers that include before_tool. The signature tool must be a tool used in this episode. pattern_kind: cmd for commands (at least 2 tokens, e.g. "npm test", or "pm test" for any manager), glob for paths (e.g. "**/.env*"), substring (at least 8 chars) or regex (simple, no nested quantifiers).
+- The trigger_signature pattern is the token that was wrong (a bad path segment, column, argument name, URL scheme, document id, flag), never the name of the command, table, host or tool that the fix also uses; when the mistake has no token of its own, omit the signature and use before_model.
+- A call made through an MCP tool uses tool mcp:<server>/<tool>; a call made through a CLI wrapper in bash (for example a Python client script) uses tool bash with the subcommand in the pattern.
+- trigger_signature.side_effect: "write" when the matched call creates, modifies, deletes or transitions data in a shared system (a push, a POST/PUT/DELETE, an UPDATE, a create/update/transition tool), else "read".
 - before_tool without a signature is allowed only for policy and pitfall. decision and architecture_constraint use session_start and/or before_model.
+- A code-review finding — a bug still to be fixed, a fix direction, line numbers — is architecture_constraint or decision, not pitfall; a pitfall needs an action the agent took and the consequence it caused.
 - scope_glob is the narrowest glob that is true (e.g. "src/db/**"). A command signature carries its own precision: when the command pattern names no path, use scope_glob "**/*". Without a signature, scope_glob must cover files touched in this episode; "**/*" without a signature is only for decision and architecture_constraint.
 - knowledge_kind: correction (the user corrected the agent), failure_resolution (a tool failed and a later call fixed it), convention (an observed repository convention), decision.
+- horizon: "task" for the current task's state (what is deferred, what ships in which order, one document's wording), "durable" for what will still be true in a month.
 - Same claim as an existing memory → action "reinforce" with its target_memory_id. Existing memory is wrong or outdated → "propose_supersede" (with the replacement as this fact) or "propose_stale"; you can never edit or delete memories.
 - confidence = P(true AND lasting AND right scope). Omit facts below 0.6.
 - Write summary and details in a normalized imperative voice ("Use pnpm test; npm test fails because ..."). Never use "from now on", "always do", "remember to" or other instruction-like phrasing, and do not copy the user's prompt verbatim.
@@ -212,7 +217,7 @@ Boundary rules:
 - nothing_to_learn: true with an empty facts array when the episode teaches nothing durable (routine read-only work, generic knowledge).
 
 # Output
-Return only JSON matching the provided schema: {"episode_summary": string (≤ 400 chars), "nothing_to_learn": boolean, "facts": [{"action", "target_memory_id", "type", "summary" (12–160 chars), "details" (≤ 1200), "scope_glob", "relevant_tools", "trigger_signature" | null, "lifecycle_triggers", "confidence", "evidence_refs": ["e<n>"], "knowledge_kind", "rationale" (≤ 300), "aliases"}]}. No prose outside the JSON.`;
+Return only JSON matching the provided schema: {"episode_summary": string (≤ 400 chars), "nothing_to_learn": boolean, "facts": [{"action", "target_memory_id", "type", "summary" (12–160 chars), "details" (≤ 1200), "scope_glob", "relevant_tools", "trigger_signature": {"tool", "target", "pattern_kind", "pattern", "side_effect"} | null, "lifecycle_triggers", "confidence", "evidence_refs": ["e<n>"], "knowledge_kind", "rationale" (≤ 300), "aliases", "horizon"}]}. No prose outside the JSON.`;
 
 function render(
   descriptor: EpisodeDescriptor,

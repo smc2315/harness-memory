@@ -355,6 +355,35 @@ describe("evaluateAutoDemotion", () => {
     expect(proposals.getById(opened.proposalId!)?.status).toBe("open");
   });
 
+  test("an auto-rule supersede gives a task-horizon replacement the 7-day ceiling and a durable correction its 30 days", () => {
+    const activate = (horizon: "durable" | "task", ids: { origin: string; s1: string; s2: string }) => {
+      const target = activeAuto(`Auto row replaced by a ${horizon} correction`, { id: ids.origin });
+      const replacement = memories.create(autoMemory({ supersedesMemoryId: target.id, knowledgeKind: "correction", horizon }));
+      insertEpisode(db, { id: ids.s1, session_id: "s1" });
+      insertEpisode(db, { id: ids.s2, session_id: "s2" });
+      const opened = openOrSupportProposal(db, { kind: "supersede", targetMemoryId: target.id, candidateMemoryId: replacement.id, rationale: "r", confidence: 0.8, createdBy: "extractor", now: T0, support: support(ids.s1, "s1") });
+      openOrSupportProposal(db, { kind: "supersede", targetMemoryId: target.id, candidateMemoryId: replacement.id, rationale: "r", confidence: 0.8, createdBy: "extractor", now: T0, support: support(ids.s2, "s2") });
+      const result = evaluateAutoDemotion(db, { proposalId: opened.proposalId!, now: T0 });
+      expect(result).toMatchObject({ applied: true, reason: "accepted" });
+      expect(result.decision?.effects).toEqual(["target:superseded", "replacement:active"]);
+      expect(memories.getById(target.id)).toMatchObject({ status: "superseded", supersededByMemoryId: replacement.id });
+      return memories.getById(replacement.id)!;
+    };
+
+    // design §2: a `task` row never gets more than TASK_HORIZON_TTL_DAYS from any activation path, this one included
+    // (decideTier, the dream sweep, computeRevalidation and extendTtlOnFire already stop at 7 days).
+    const task = activate("task", { origin: "ep-o7", s1: "ep-s7", s2: "ep-s8" });
+    expect(task).toMatchObject({ status: "active", authority: "auto", horizon: "task", knowledgeKind: "correction" });
+    expect(task.ttlExpiresAt).toBe(isoPlus(T0, { days: 7 }));
+    expect(task.revalidateAfter).toBe(isoPlus(T0, { hours: 84 }));
+
+    // A durable correction keeps baseTtlDays: CORRECTION_TTL_DAYS, revalidate at the midpoint.
+    const durable = activate("durable", { origin: "ep-o8", s1: "ep-s9", s2: "ep-s10" });
+    expect(durable).toMatchObject({ status: "active", authority: "auto", horizon: "durable", knowledgeKind: "correction" });
+    expect(durable.ttlExpiresAt).toBe(isoPlus(T0, { days: 30 }));
+    expect(durable.revalidateAfter).toBe(isoPlus(T0, { days: 15 }));
+  });
+
   test("human targets and policy rows are never demoted automatically", () => {
     const human = memories.create(humanMemory());
     const opened = openOrSupportProposal(db, { kind: "stale", targetMemoryId: human.id, rationale: "r", confidence: 0.8, createdBy: "extractor", now: T0, support: support("ep-h1", "s1") });

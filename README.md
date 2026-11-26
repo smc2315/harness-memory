@@ -7,7 +7,7 @@
 
 It is complementary to [claude-mem](https://github.com/thedotmack/claude-mem): claude-mem remembers what happened; harness-memory stops the agent at the moment it is about to repeat a known mistake. No account, no telemetry, no daemon, no LLM call per tool call — the hot path reads one precomputed JSON file.
 
-> **0.6.0-rc.1 — Claude Code only.** Codex hooks arrive in 0.6.1 and OpenCode (V2 plugin) in 0.6.2. v0.5 was an OpenCode plugin; read [Upgrading from 0.5](#upgrading-from-05) before installing 0.6 over an existing `.harness-memory/`. Not on npm yet: install the pre-release tarball, see [Install](#install).
+> **0.6.0-rc.2 — Claude Code only.** Codex hooks arrive in 0.6.1 and OpenCode (V2 plugin) in 0.6.2. v0.5 was an OpenCode plugin; read [Upgrading from 0.5](#upgrading-from-05) before installing 0.6 over an existing `.harness-memory/`. Not on npm yet: install the pre-release tarball, see [Install](#install).
 
 - [How it works in one turn](#how-it-works-in-one-turn)
 - [Requirements](#requirements)
@@ -62,13 +62,13 @@ Three ideas carry the design:
 
 ### Install the release candidate
 
-0.6.0-rc.1 is not on npm yet: `npm install -g harness-memory` still installs **0.5.1, the OpenCode plugin**, which has no `hm` binary. Install the tarball attached to the GitHub pre-release instead:
+0.6.0-rc.2 is not on npm yet: `npm install -g harness-memory` still installs **0.5.1, the OpenCode plugin**, which has no `hm` binary. Install the tarball attached to the GitHub pre-release instead:
 
 ```bash
 node --version                      # ≥ 20; with nvm, the version you will keep (nvm alias default <v>)
 npm uninstall -g harness-memory     # removes a leftover 0.5.1; harmless when nothing is installed
-npm install -g https://github.com/smc2315/harness-memory/releases/download/v0.6.0-rc.1/harness-memory-0.6.0-rc.1.tgz
-hm --version                        # 0.6.0-rc.1
+npm install -g https://github.com/smc2315/harness-memory/releases/download/v0.6.0-rc.2/harness-memory-0.6.0-rc.2.tgz
+hm --version                        # 0.6.0-rc.2
 cd <your project>
 hm install --host claude            # from a plain terminal, not from a shell inside a Claude Code session
 hm status
@@ -79,19 +79,19 @@ hm status
 - **Per project instead of global:** `npm install -D <same URL>`, then `npx hm install --host claude`; the hooks then point at `node_modules/harness-memory/dist/hook.js`. Not `npx harness-memory …` while npm's `latest` is 0.5.1 (that runs the old plugin's `install`), and not from git (`github:smc2315/harness-memory#redesign/v0.6` has no `dist/`; the build runs only in `prepack`).
 - **Later:** `npm install -g harness-memory@next` once the rc is published under the `next` tag, plain `harness-memory` once 0.6.0 is `latest`. After any update run `hm install --host claude` again in each project: it migrates the database (backup first), replaces the hook entries, re-probes and re-runs the self-test. A global install keeps its hook path, so nothing breaks in between.
 - **Learning needs the `claude` CLI logged in from a terminal:** `claude auth login` (older CLIs: `claude`, then `/login`). The desktop app's login does not count, and the desktop app alone puts no `claude` on your PATH — install the CLI; without it `hm install` reports `provider none found` and still succeeds. Enforcement of imported and hand-added rules works without the login; `probe not_logged_in` / `queue N (waiting: not_logged_in)` are expected until then, and `hm install --host claude` re-probes at once afterwards.
-- **Moving to another machine:** nothing to copy. `.harness-memory/` is per project and git-ignored, so a fresh clone starts empty; to carry memories, copy that project's `memory.sqlite` (and `config.json`) with Claude Code closed and run `hm install --host claude` there. Never copy `.claude/settings.local.json` or `install-manifest.json`: they hold the other machine's node and hook paths. Korean step-by-step checklist: [docs/setup-new-machine.ko.md](docs/setup-new-machine.ko.md).
+- **Moving to another machine:** nothing to copy. `.harness-memory/` is per project and git-ignored, so a fresh clone starts empty; to carry memories, copy that project's `memory.sqlite` (and `config.json`) with Claude Code closed and run `hm install --host claude` there — and if that `config.json` came from 0.6.0-rc.1, delete its `"autonomy_level": "standard"` line (rc.1 wrote it as the default; without an install manifest on the new machine `hm install` keeps it). Never copy `.claude/settings.local.json` or `install-manifest.json`: they hold the other machine's node and hook paths. Korean step-by-step checklist: [docs/setup-new-machine.ko.md](docs/setup-new-machine.ko.md).
 
 Abridged output of `hm install --host claude` on a new project:
 
 ```text
-harness-memory 0.6.0-rc.1 installed for Claude Code
+harness-memory 0.6.0-rc.2 installed for Claude Code
   project     C:\src\my-app
   hooks       9 events → C:\src\my-app\.claude\settings.local.json (exec form)
   node        C:\Program Files\nodejs\node.exe  (claude 2.1.172)
   hook script C:\Users\me\AppData\Roaming\npm\node_modules\harness-memory\dist\hook.js
-  database    C:\src\my-app\.harness-memory\memory.sqlite v22 (created)
+  database    C:\src\my-app\.harness-memory\memory.sqlite v23 (created)
   snapshot    built (active 0, candidates 0)
-  config      C:\src\my-app\.harness-memory\config.json (created); embeddings off
+  config      C:\src\my-app\.harness-memory\config.json (created); embeddings off; autonomy_level full
   git         .claude/settings.local.json added to C:\src\my-app\.git\info\exclude
   git         C:\src\my-app\.harness-memory\.gitignore written (nothing under .harness-memory/ is ever committed)
   provider    claude — probe not_logged_in (Not logged in · Please run /login); the hooks enforce rules without the login — …; learning from sessions … starts after `claude auth login` …
@@ -100,7 +100,7 @@ harness-memory 0.6.0-rc.1 installed for Claude Code
 Open Claude Code in this project; `hm status` shows what the hooks learn.
 ```
 
-A project that already has a v0.5 database shows `v22 (migrated from v9, backup …\memory.sqlite.bak-v9)` instead; read [Upgrading from 0.5](#upgrading-from-05) first.
+A project that already has a v0.5 database shows `v23 (migrated from v9, backup …\memory.sqlite.bak-v9)` instead; read [Upgrading from 0.5](#upgrading-from-05) first.
 
 No restart is needed: Claude Code's file watcher picks up the new hook entries (if `hm doctor` → `hooks.calls` still says `never` after your first prompt, start a new session). Open the project in Claude Code, work normally, and watch `hm status`. If the project has a `CLAUDE.md` or `AGENTS.md`, the install output also suggests `hm import --from CLAUDE.md`, which turns its bullets into human memories after a confirmation table.
 
@@ -202,10 +202,10 @@ Regexes are used **only** to set flags — they never produce memory text (the v
 `Stop`, `PreCompact` and `SessionEnd` close the open segment (`[turn_start_offset, EOF)`, ≤ 4 MB) into `queue/<episode_id>.json`: scope refs, tools used, failure signatures with their resolutions, flags, which memories fired and whether the agent **overrode** or **heeded** a `soft_deny`, and
 
 ```text
-evidence_weight = correction 2 + remember 3 + (resolution 2 | unresolved failure 1 per failure)   (cap 10)
+evidence_weight = correction 2 (1 for a bare cue: no corrected tool turn) + remember 3 + (resolution 2 | unresolved failure 1 per failure)   (cap 10)
 ```
 
-Only episodes with `evidence_weight ≥ 1` or a decision marker go to the LLM; read-only turns are skipped as `no_signal`. The next `UserPromptSubmit` closes a turn the host never finished (`interrupted`); the `SessionStart` hook and `hm dream` sweep turns idle for more than an hour (`idle`). Episode ids are deterministic (`host:session:turn_key:segment`), so re-closing the same segment is a no-op and a turn compacted mid-way yields two episodes.
+Only episodes with `evidence_weight ≥ 1` or a decision marker go to the LLM; read-only turns are skipped as `no_signal`, and so is an `interrupted` close with at most two ledger lines (the prompt plus one event). A correction cue weighs 2 only when the turn corrects a previous turn that ran tools (`correction_for` plus a tool line), otherwise 1. Episodes eligible through the decision marker alone are extracted at most `extraction.decision_only_per_day` = 5 times a day (`decision_cap`; a provider outage that requeues them does not count). The next `UserPromptSubmit` closes a turn the host never finished (`interrupted`); the `SessionStart` hook and `hm dream` sweep turns idle for more than an hour (`idle`). Episode ids are deterministic (`host:session:turn_key:segment`), so re-closing the same segment is a no-op and a turn compacted mid-way yields two episodes.
 
 ### 3. Extraction — a detached worker and your own CLI
 
@@ -231,9 +231,9 @@ Each fact passes a deterministic validator before it touches the database: schem
 
 ### 5. Reconcile — one transaction, then the snapshot
 
-Under `locks/db.lock` (held for seconds, never around the LLM call) the worker applies the facts fact-by-fact (`SAVEPOINT` each): `create` becomes a new row with `authority = 'auto'`, `status = 'candidate'`, `source_ref = 'episode:<id>'`; an identical or near-identical live row (`semantic_key`, or Jaccard ≥ 0.6 on the normalized summary) is **reinforced** instead; `propose_*` opens or supports a **proposal**. Every fact records `memory_provenance` (episode, cited line, confidence); derived counters (`evidence_count`, `evidence_score` = Σ episode weights, `distinct_session_count`, auto `confidence`) are recomputed immediately, then `decideTier` decides `active` or `candidate` (see [auto tier](#auto-tier--when-a-memory-activates-on-its-own)). The run id is written to `write_ops`, so replaying the same run is a no-op; `policy_rules` are re-derived from active policy memories; `db_generation` increments; the database is saved atomically (`.tmp-<pid>` → fsync → `.prev` → rename) and `snapshot/*.v1.*` is rebuilt. A corrupted main file is recovered from `.prev`.
+Under `locks/db.lock` (held for seconds, never around the LLM call) the worker applies the facts fact-by-fact (`SAVEPOINT` each): `create` becomes a new row with `authority = 'auto'`, `status = 'candidate'`, `source_ref = 'episode:<id>'`; an identical or near-identical live row is **reinforced** instead — same `semantic_key`; Jaccard ≥ 0.6 on the normalized summary; an equal, narrower or wider signature key of the same tool, target, kind and negation (`npm test` ~ `npm test --coverage`, not `npm test:e2e`); ≥ 2 shared aliases; or a shared error-code token backed by overlapping wording (Jaccard ≥ 0.2) or one shared alias. Aliases and error codes never fuse two facts whose signatures name different mistakes, and a signature-bearing fact never joins a signature-less neighbour: when type, text, scope and triggers are identical (the identity key), an auto row without a signature adopts the fact's signature instead (`adopted=signature`; its precision stays unknown, so it never climbs the ladder; not while an `activate_*` proposal on that row is open or was rejected — a remember turn adopts regardless, the user's words being the approval), a human row only gets the reinforce (`collapsed=identity_key`); `propose_*` opens or supports a **proposal**. Every fact records `memory_provenance` (episode, cited line, confidence); derived counters (`evidence_count`, `evidence_score` = Σ episode weights, `distinct_session_count`, auto `confidence`) are recomputed immediately, then `decideTier` decides `active` or `candidate` (see [auto tier](#auto-tier--when-a-memory-activates-on-its-own)). The run id is written to `write_ops`, so replaying the same run is a no-op; `policy_rules` are re-derived from active policy memories; `db_generation` increments; the database is saved atomically (`.tmp-<pid>` → fsync → `.prev` → rename) and `snapshot/*.v1.*` is rebuilt. A corrupted main file is recovered from `.prev`.
 
-**Consolidation** (`worker dream`; spawned at `SessionEnd` when the last run is older than `dream.interval_hours` = 6, or `hm dream`) never invents memories: TTL expiry (correction/failure-derived rows get a `revalidate` proposal first), auto candidates older than 45 d → `rejected`, proposals past 30 d → `expired`, TTL extension for rows that fired recently, **override downgrade** (an auto row overridden ≥ 3 times with `evidence_score < 3` drops to `advise`), `merge` proposals for auto near-duplicates, embedding backfill, the idle-turn sweep and garbage collection (ledger segments 14 d, `raw/` 24 h, tmp files 10 min, audit log 30 d).
+**Consolidation** (`worker dream`; spawned at `SessionEnd` when the last run is older than `dream.interval_hours` = 6, or `hm dream`) never invents memories: the `full` sweep (under `autonomy_level: full`: waiting auto candidates are re-evaluated oldest first and up to `dream.full_sweep_per_run` = 50 of those that pass are activated per run, their `activate_*` proposals closed `expired(full_autonomy)`; a row whose `activate_*` proposal you rejected is never swept), TTL expiry (correction/failure-derived rows get a `revalidate` proposal first), auto candidates older than 45 d → `rejected`, proposals past 30 d → `expired`, TTL extension for rows that fired recently, **override downgrade** (an auto row overridden ≥ 3 times with `evidence_score < 3` drops to `advise`), `merge` proposals for auto near-duplicates, embedding backfill, the idle-turn sweep and garbage collection (ledger segments 14 d, `raw/` 24 h, tmp files 10 min, audit log 30 d).
 
 ### `.harness-memory/` layout — what to back up
 
@@ -275,34 +275,35 @@ Under `locks/db.lock` (held for seconds, never around the LLM call) the worker a
 |---|---|---|
 | hard `policy` with a signature; a **confirmed** import rule with `never` / `must not` / `always` / `do not` / `절대` / `반드시` / `항상` and a signature | human | `confirm` (`before_tool.hard_policy`) |
 | soft policy, policy without a signature, `hm import --yes` rows (`import_unconfirmed = 1`), other imports | human | `advise` |
-| auto `pitfall` with a specific signature and `knowledge_kind ∈ {correction, failure_resolution}` | auto | `advise` (`before_tool.auto_enforcement`); climbs to `soft_deny` when a second session reinforces it (`before_tool.auto_escalation`, default `{ enabled: true, sessions: 2 }`; `autonomy_level: shadow` never climbs; a row downgraded by overrides climbs again only after a new session reinforces it). Shown in `hm memory:history` as `active (enforcement) by auto_rule` |
+| auto `pitfall` or `policy` whose signature is **mistake-exact** (it matched no legitimate call in its source episode), whose matched call **writes** to a shared system, learned from a correction or a failure → resolution pair with evidence ≥ 2 (`horizon` not `task`) | auto | `soft_deny` (`before_tool.auto_enforcement_silent_write`; `advise` turns the rule off). The one case the dogfood data supported: a mistake that succeeds silently and that advise-with-the-result cannot prevent |
+| auto `pitfall` with a specific signature and `knowledge_kind ∈ {correction, failure_resolution}` | auto | `advise` (`before_tool.auto_enforcement`); climbs to `soft_deny` when a second session reinforces it **and** its signature is mistake-exact (`before_tool.auto_escalation`, default `{ enabled: true, sessions: 2 }`; a 4-hour block of a resumed session counts as a session; `autonomy_level: shadow` never climbs; a row downgraded by overrides climbs again only after a new session reinforces it). Shown in `hm memory:history` as `active (enforcement) by auto_rule` |
 | a rule from a turn with an explicit remember request (`remember this`, `기억해`, `from now on` + a rule) whose fact cites that prompt line | human (`status_reason remember`, active at once, at most 2 per turn) | policy with a signature → `confirm` (`before_tool.hard_policy`); pitfall with a signature → `soft_deny`; everything else → `advise`. Named at `SessionStart` for 24 h with its undo (`hm memory:demote <id>`); the automatic path never touches it afterwards |
 | every other auto row (`pitfall` without signature, `workflow`, `decision`, `architecture_constraint`) | auto | `advise` |
 
 ### Auto tier — when a memory activates on its own
 
-`decideTier` runs for every created or reinforced auto candidate, right after its counters are recomputed:
+`decideTier` runs for every created or reinforced auto candidate, right after its counters are recomputed. Under the default `autonomy_level: full` (0.6.0-rc.2) it activates at `advise` everything the mechanics can bound: `decision` and `architecture_constraint` rows with `confidence ≥ 0.7` (no episode evidence needed — the decision marker is the evidence; `extraction.max_auto_knowledge_activations_per_day` = 10), repo-wide rows and policies (at `advise`, never `confirm` / `deny`), and `pitfall` / `workflow` rows with `evidence_score ≥ 1`; nothing opens a proposal, and a `dream` run re-evaluates the waiting candidates oldest first and activates up to `dream.full_sweep_per_run` = 50 of those that pass per run (a row that fails costs nothing; a row whose `activate_*` proposal you rejected is never swept), so the backlog drains by itself. A rule still needs a reachable trigger (a signature or `relevant_tools`), an informational row a lifecycle trigger. Rows below the confidence bar stay candidates until reinforcement lifts them or `retention.candidate_days` expires them. Under `standard` (the 0.6.0-rc.1 behaviour) the rules are:
 
 - **active** when all hold: `type ∈ {pitfall, workflow}`, a valid repository-relative scope, a trigger signature or `relevant_tools`, a trigger a hook can reach, `confidence ≥ 0.7`, `evidence_score ≥ 2`, the scanner is clean, the row is not a replacement row of an open proposal, the caps are not hit (`extraction.max_auto_activations_per_episode` = 3, `max_auto_activations_per_day` = 10) and `autonomy_level = standard`. The row gets `ttl_expires_at = now + 30 d` for correction / failure-resolution knowledge (7 d for conventions), `revalidate_after` at half that, `validation_count = evidence_count − 1`.
-- **candidate** otherwise — with a reason (`evidence`, `cap`, `confidence`, `type`, `replacement`, `autonomy`, …) and, for `policy`, an `activate_policy` proposal; for a signature-less global row, an `activate_global` proposal. `decision` and `architecture_constraint` always wait for you.
+- **candidate** otherwise — with a reason (`evidence`, `cap`, `confidence`, `type`, `replacement`, `autonomy`, `knowledge_cap`, …) and, under `standard`, for `policy` an `activate_policy` proposal; for a signature-less global row an `activate_global` proposal; `decision` and `architecture_constraint` wait for you. Under `full` none of these three wait.
 
-"Enough evidence" is a **weight sum, not an episode count**: one correction (2) or one failure → resolution pair (2) activates immediately. The cost side is the TTL, the 0.65 trust multiplier at first activation, the 2-session rule for demotion, V10 specificity, the override downgrade and the daily cap. Reinforcement never shrinks a TTL (`ttl = max(existing, now + max(7·2^validations, base))`, capped at 90 d); a fired memory is extended by 14 d.
+"Enough evidence" is a **weight sum, not an episode count**: one correction of a previous tool turn (2) or one failure → resolution pair (2) activates immediately under `standard`; a bare correction cue (1) activates only under `full`. The cost side is the TTL, the 0.65 trust multiplier at first activation, the 2-session rule for demotion, V10 specificity, the override downgrade and the daily cap. Reinforcement never shrinks a TTL (`ttl = max(existing, now + max(7·2^validations, base))`, capped at 90 d); a fired memory is extended by 14 d. A `task`-horizon row keeps its 7-day ceiling through both.
 
 ### Proposals and review
 
-Eight proposal kinds: `supersede`, `stale`, `activate_policy`, `activate_global`, `fix_scope` (from the v0.5 migration), `fix_signature`, `revalidate`, `merge`. One open proposal per (kind, target, candidate); repeated claims only raise `support_count` / `support_sessions`. The extractor's `propose_stale` / `propose_supersede` against a **human** row only opens a proposal and marks the row `contested`; against an **auto** active row it is applied automatically only with support from ≥ 2 sessions, at least one of which carries a human signal (a correction or *remember*) or a deterministic observation — an agent cannot erase your correction in two of its own turns. Rejecting a proposal suppresses the same claim for 30 days; proposals expire after 30 days (`fix_scope`: 90).
+Eight proposal kinds: `supersede`, `stale`, `activate_policy`, `activate_global`, `fix_scope` (from the v0.5 migration), `fix_signature`, `revalidate`, `merge`. One open proposal per (kind, target, candidate); repeated claims only raise `support_count` / `support_sessions`. The extractor's `propose_stale` / `propose_supersede` against a **human** row only opens a proposal and marks the row `contested`; against an **auto** active row it is applied automatically only with support from ≥ 2 sessions, at least one of which carries a human signal (a correction or *remember*) or a deterministic observation — an agent cannot erase your correction in two of its own turns. Rejecting a proposal suppresses the same claim for 30 days; proposals expire after 30 days (`fix_scope`: 90). Under `full`, a candidate whose `activate_policy` / `activate_global` proposal you rejected is never activated by the automatic path — neither on a reinforce nor by the `dream` sweep; it meets the 45-day candidate expiry instead.
 
-Review is exception handling, with a budget (≤ 3 items per active day is the dogfood gate): `hm review` walks proposals on human memories → `revalidate` → policy candidates → global candidates → `fix_scope` / `fix_signature` → `merge` → unconfirmed imports → human candidates, with keys `a`ccept, `r`eject, `s`kip, `t`race, `p`romote. Accepting a `supersede` makes the replacement row `human`; accepting `activate_*` promotes the row as `hm memory:promote` would. The `SessionStart` hook shows a one-line `systemMessage` digest once a day (`harness-memory: N proposal(s) open, M expiring within 7 days — run hm review`). No review text ever reaches the model's context.
+Under `autonomy_level: full` review is optional: no `activate_*` proposal is opened, `supersede` / `revalidate` resolve on their own (the two-session rule, expiry) and the daily `SessionStart` digest is not shown — the first dogfood run showed that a queue nobody opens is a leak, not a safety valve. Under `standard`, review is exception handling, with a budget (≤ 3 items per active day is the dogfood gate): `hm review` walks proposals on human memories → `revalidate` → policy candidates → global candidates → `fix_scope` / `fix_signature` → `merge` → unconfirmed imports → human candidates, with keys `a`ccept, `r`eject, `s`kip, `t`race, `p`romote. Accepting a `supersede` makes the replacement row `human`; accepting `activate_*` promotes the row as `hm memory:promote` would. The `SessionStart` hook shows a one-line `systemMessage` digest once a day (`harness-memory: N proposal(s) open, M expiring within 7 days — run hm review`). No review text ever reaches the model's context.
 
 ### `autonomy_level`
 
-`standard` (default) — the table above. `shadow` — decisions are only logged to `audit_log` (`auto_activation_shadow`); nothing activates. `off` — `decideTier` never activates anything.
+`full` (default since 0.6.0-rc.2) — zero-touch: everything that passes the scanner and the confidence bar, has a reachable trigger (a signature or `relevant_tools`; a lifecycle trigger for informational types) and, for rules, evidence ≥ 1 activates at `advise` under the caps above (with the default `before_tool.auto_enforcement: advise`); `soft_deny` is born only for mistake-exact silent writes and climbs only for mistake-exact signatures; no proposal waits for you. A project installed by 0.6.0-rc.1 carries `"autonomy_level": "standard"` in its `config.json` (rc.1 wrote its default out); `hm install --host claude` rewrites that one value to `full` when the install manifest says the previous install was rc.1, and prints it. `standard` — the 0.6.0-rc.1 review gate: policies, repo-wide rows and informational types wait in `hm review`. `shadow` — decisions are only logged to `audit_log` (`auto_activation_shadow`); nothing activates. `off` — `decideTier` never activates anything. Set it in `.harness-memory/config.json`; the worker applies it on its next run.
 
 ## What gets injected, when
 
 | trigger | Claude Code hook | what | budget |
 |---|---|---|---|
-| `session_start` | `SessionStart` | active rows with `session_start` in their triggers and type baseline / `decision` / `architecture_constraint` / `workflow`; plus the daily digest `systemMessage` | 5 items / 3 KB |
+| `session_start` | `SessionStart` | active rows with `session_start` in their triggers and type baseline / `decision` / `architecture_constraint` / `workflow`; plus the daily digest `systemMessage` unless `autonomy_level` is `full` | 5 items / 3 KB |
 | `before_model` | `UserPromptSubmit` (once per user turn) | baseline rows always; other rows when their scope intersects path tokens in the prompt (or the last touched file) **and** BM25 over summary / details / aliases ≥ `before_model.min_score` — or, with the embedding helper, cosine ≥ 0.80; then, when `recall.enabled` is on, up to `before_model.recall.max_items` summaries of past episodes from other sessions (`[harness-memory] RECALL <date>: …`, BM25 over `snapshot/recall.v1.json` ≥ `before_model.recall.min_score`, plain context, never enforced) | 5 items / 3 KB (+ 2 items / 1 KB recall) |
 | `before_tool` | `PreToolUse` | the ladder above | 3 items / 2 KB |
 | `after_tool` | `PostToolUseFailure` | `failure_index[failure_class]` hints (e.g. memories about `enoent` on this tool) as `additionalContext` | 2 items / 1 KB |
@@ -330,10 +331,11 @@ hm install --host claude --with-embeddings   # npm install @xenova/transformers 
 
 | key | default | meaning |
 |---|---|---|
-| `autonomy_level` | `standard` | `off` / `shadow` / `standard` (see above) |
+| `autonomy_level` | `full` | `off` / `shadow` / `standard` / `full` (see above) |
 | `before_tool.max_items` / `max_bytes` | 3 / 2048 | injection budget at `PreToolUse` |
 | `before_tool.auto_enforcement` | `advise` | where correction / failure-derived auto pitfalls with a signature are born (`advise` or `soft_deny`) |
-| `before_tool.auto_escalation.enabled` / `sessions` | true / 2 | the autonomy ladder: an auto `advise` pitfall becomes `soft_deny` once its evidence spans this many sessions |
+| `before_tool.auto_enforcement_silent_write` | `soft_deny` | where an auto pitfall / policy with a mistake-exact, write-side signature (correction or failure-derived, evidence ≥ 2) is born; `advise` turns the rule off |
+| `before_tool.auto_escalation.enabled` / `sessions` | true / 2 | the autonomy ladder: an auto `advise` pitfall with a mistake-exact signature becomes `soft_deny` once its evidence spans this many sessions (4-hour blocks of one session count) |
 | `before_tool.hard_policy` | `confirm` | default for hard human policies with a signature (`confirm`, `advise`, `deny`) |
 | `before_model.max_items` / `max_bytes` | 5 / 3072 | injection budget at `UserPromptSubmit` |
 | `before_model.min_score` | 0.35 | normalized BM25 threshold (`s / (s + 1)`) for non-baseline rows |
@@ -346,9 +348,12 @@ hm install --host claude --with-embeddings   # npm install @xenova/transformers 
 | `extraction.provider` | `auto` | `auto`, `claude`, `codex`, `replay` (`HARNESS_MEMORY_PROVIDER` overrides) |
 | `extraction.model` | `null` | `--model` for the headless CLI. `null` makes the claude provider pass the `sonnet` alias (your interactive default in `~/.claude/settings.json` may be a gateway id the headless first-party call cannot reach) and lets codex use its own default |
 | `extraction.max_runs_per_day` | 40 | LLM calls per day; correction episodes are exempt |
+| `extraction.max_auto_knowledge_activations_per_day` | 10 | `full`: daily cap on `decision` / `architecture_constraint` rows activated at advise |
+| `extraction.decision_only_per_day` | 5 | episodes eligible only through the decision marker (no correction, failure or remember) extracted per day; the rest skip with `decision_cap` |
 | `extraction.max_auto_activations_per_day` / `_per_episode` | 10 / 3 | auto activation caps |
 | `extraction.timeout_ms` / `probe_timeout_ms` / `lease_seconds` | 120000 / 20000 / 180 | provider wall clock, probe wall clock, episode lease |
 | `embeddings.enabled` / `model` / `idle_exit_minutes` / `cache_dir` | false / `Xenova/multilingual-e5-small` / 15 / `null` (= `~/.harness-memory/models`) | embedding helper |
+| `dream.full_sweep_per_run` | 50 | `full`: auto candidates activated by `decideTier` per `dream` run (waiting candidates are re-evaluated oldest first until this many have activated; a row that does not pass costs nothing) — the backlog drain |
 | `dream.interval_hours` | 6 | consolidation cadence (checked at `SessionEnd`) |
 | `retention.ledger_days` / `raw_hours` / `audit_days` / `candidate_days` / `proposal_days` | 14 / 24 / 30 / 45 / 30 | garbage collection and expiry |
 | `log.debug` / `max_bytes` / `rotations` | false / 5 MiB / 3 | hooks.log verbosity and rotation |
@@ -398,7 +403,7 @@ Exit codes: `0` ok · `1` error · `2` usage error, unknown command, or a comman
 | **Pipeline** | |
 | `hm queue [list\|show <id>\|retry <id>\|drop <id>]` | Inspect or edit the extraction queue (`queued`, `leased`, `failed`, `dead` episodes). |
 | `hm extract [--now] [--provider <name>] [--dry-run]` | Run the extraction worker in the foreground; `--dry-run` renders the prompts without calling the provider. |
-| `hm dream` | Run consolidation now (TTL, expiry, override downgrade, merge proposals, embedding backfill, GC). |
+| `hm dream` | Run consolidation now (the `full` sweep under `autonomy_level: full`, TTL, expiry, override downgrade, merge proposals, embedding backfill, GC). |
 | `hm trace <session_key>` | Ledger timeline of a session: prompts, fired memories, tool calls, failures and resolutions. |
 | `hm recall <query> [--limit <n>] [--since <iso>]` | Search past episodes by their summaries — what `before_model` recalls when `recall.enabled` is on: prints date, session (`<host>-<key>`, usable with `hm trace`), kind (`extracted` = the extractor's summary, `derived` = the worker's deterministic one) and summary, newest-relevant first. Reads `snapshot/recall.v1.json` when it is fresh, else the database (and says which). `--since` filters on `closed_at`; the command applies no score threshold. With recall disabled it says so and exits 0. |
 | **Import** | |
@@ -457,7 +462,7 @@ Names and flags are taken from the dispatcher (`src/cli/registry.ts` and the com
 
 v0.5 was an OpenCode plugin with a different write path (conversation buffer → evidence rows → dream consolidation → human-reviewed promotion). v0.6 keeps your `memory.sqlite` and the five types / four triggers, and rebuilds everything around it:
 
-- `hm install --host claude` migrates `user_version` 9 / 10 / 16 → **22** (migrations 017–022), after copying the file to `memory.sqlite.bak-v<N>`. No memory row is deleted. Every row gets an `authority`: `candidate` rows and auto-promoted rows become `auto`, every other row `human`; v0.5 LLM rows with scope `**/*` and only `before_model` get `needs_scope = 1` and a `fix_scope` proposal (90 d) in `hm review`; the v0.5 dream tables are renamed `legacy_*` (read by `hm memory:history` for one release), template candidates are rejected, duplicate live rows get `merge` proposals.
+- `hm install --host claude` migrates `user_version` 9 / 10 / 16 → **23** (migrations 017–023), after copying the file to `memory.sqlite.bak-v<N>`. No memory row is deleted. Every row gets an `authority`: `candidate` rows and auto-promoted rows become `auto`, every other row `human`; v0.5 LLM rows with scope `**/*` and only `before_model` get `needs_scope = 1` and a `fix_scope` proposal (90 d) in `hm review`; the v0.5 dream tables are renamed `legacy_*` (read by `hm memory:history` for one release), template candidates are rejected, duplicate live rows get `merge` proposals.
 - OpenCode is **not supported by 0.6.0** (V2 plugin in 0.6.2; Codex hooks in 0.6.1). Remove the v0.5 plugin entry from `opencode.json` (and `.opencode/package.json`, `.opencode/commands/harness-memory-*.md`) yourself; `hm uninstall --purge` removes the legacy `.conversation-buffer.json` / `.dream-extract-state.json` files.
 - `hm db:rollback` restores the pre-migration backup; the next writer migrates forward again, so `hm uninstall` first when you mean to go back to 0.5.
 

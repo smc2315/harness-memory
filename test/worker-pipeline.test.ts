@@ -418,6 +418,111 @@ describe("worker extract", () => {
     expect(result.loops).toBe(1);
   });
 
+  test("decision-marker-only episodes are extracted at most extraction.decision_only_per_day times a day (decision_cap); correction episodes are unaffected", async () => {
+    config = mergeConfig(config, { extraction: { decision_only_per_day: 1 } });
+    const decisionTurn = (turn: string, seq: number, ts: string): LedgerLine[] => [
+      promptLine("which test runner should the packages use?", { seq, turn_key: turn, ts }),
+      assistantLine("We'll use vitest for all packages.", { seq: seq + 1, turn_key: turn, ts }),
+    ];
+    // Three decision-only turns close before the correction (older closed_at → leased first within the plain rows).
+    const decisions = ["d1", "d2", "d3"].map((turn, index) => {
+      clockNow = `2026-11-08T14:0${String(index)}:00.000Z`;
+      return queueEpisode(decisionTurn(turn, 9200 + index * 10, clockNow), {}, `k-${turn}`);
+    });
+    clockNow = NOW;
+    const correction = queueEpisode(s01, {}, "k-corr");
+    for (const descriptor of decisions) {
+      expect(descriptor.flags).toEqual({ decision: 1 });
+      expect(descriptor.evidence_weight).toBe(0);
+    }
+    expect(correction.evidence_weight).toBe(1);
+
+    const answers: Record<string, ReturnType<typeof outputFixture>> = { [correction.id]: outputFixture([factFixture({ evidence_refs: ["e1"] })]) };
+    for (const descriptor of decisions) answers[descriptor.id] = outputFixture([], "The runner decision was recorded.");
+    const provider = createReplayProvider({ answers });
+    const result = await worker({ provider });
+    expect(result.exitCode).toBe(0);
+    expect(result.errors).toEqual([]);
+    // Lease 1 (correction first, then the two oldest decisions): the first decision-only episode uses the day's budget,
+    // the second is skipped in the same lease; lease 2 finds the third over the cap through the run started meanwhile.
+    expect(result.processed.map((item) => item.episodeId)).toEqual([correction.id, decisions[0]!.id]);
+    expect(result.processed.map((item) => item.status)).toEqual(["ok", "ok"]);
+    expect(result.skipped.sort()).toEqual([decisions[1]!.id, decisions[2]!.id].sort());
+    expect(result.waiting).toBeNull();
+    const store = composeStore({ paths, config, logger: silentWorkerLogger, clock });
+    await store.read((db) => {
+      const episodes = new EpisodeRepository(db);
+      expect(episodes.getById(correction.id)).toMatchObject({ status: "extracted" });
+      expect(episodes.getById(decisions[0]!.id)).toMatchObject({ status: "extracted" });
+      for (const skipped of [decisions[1]!, decisions[2]!]) {
+        // Skipped like no_signal: status skipped, the reason recorded, the derived recall summary kept.
+        expect(episodes.getById(skipped.id)).toMatchObject({ status: "skipped", skipReason: "decision_cap", summaryKind: "derived" });
+      }
+      expect(episodes.countDecisionOnlyExtractedSince("2026-11-08T00:00:00.000Z")).toBe(1);
+      expect(new ExtractionRunRepository(db).listForEpisode(decisions[1]!.id)).toEqual([]);
+    });
+
+    // With the budget gone for the day (cap 0), a new correction is still extracted while a new decision turn is capped.
+    config = mergeConfig(config, { extraction: { decision_only_per_day: 0 } });
+    clockNow = "2026-11-08T16:00:00.000Z";
+    const lateDecision = queueEpisode(decisionTurn("d4", 9300, clockNow), {}, "k-d4");
+    const lateCorrection = queueEpisode(s01, {}, "k-corr-2");
+    const later = await worker({
+      provider: createReplayProvider({ answers: { [lateCorrection.id]: outputFixture([factFixture({ evidence_refs: ["e1"] })]), [lateDecision.id]: outputFixture([], "never asked") } }),
+    });
+    expect(later.processed.map((item) => item.episodeId)).toEqual([lateCorrection.id]);
+    expect(later.skipped).toEqual([lateDecision.id]);
+    await store.read((db) => expect(new EpisodeRepository(db).getById(lateDecision.id)).toMatchObject({ status: "skipped", skipReason: "decision_cap" }));
+
+    // The next UTC day the budget is fresh.
+    config = mergeConfig(config, { extraction: { decision_only_per_day: 1 } });
+    clockNow = "2026-11-09T09:00:00.000Z";
+    const tomorrow = queueEpisode(decisionTurn("d5", 9400, clockNow), {}, "k-d5");
+    const nextDay = await worker({ provider: createReplayProvider({ answers: { [tomorrow.id]: outputFixture([], "Decided again.") } }) });
+    expect(nextDay.processed.map((item) => item.episodeId)).toEqual([tomorrow.id]);
+    expect(nextDay.skipped).toEqual([]);
+  });
+
+  test("a provider outage does not consume the decision_only_per_day budget: requeued decision-only episodes are extracted once the provider is back (D1)", async () => {
+    config = mergeConfig(config, { extraction: { decision_only_per_day: 3 } });
+    const decisionTurn = (turn: string, seq: number, ts: string): LedgerLine[] => [
+      promptLine("which test runner should the packages use?", { seq, turn_key: turn, ts }),
+      assistantLine("We'll use vitest for all packages.", { seq: seq + 1, turn_key: turn, ts }),
+    ];
+    const decisions = ["d1", "d2", "d3"].map((turn, index) => {
+      clockNow = `2026-11-08T14:0${String(index)}:00.000Z`;
+      return queueEpisode(decisionTurn(turn, 9200 + index * 10, clockNow), {}, `k-${turn}`);
+    });
+    clockNow = NOW;
+
+    // The provider is down: each leased episode gets a run row with the probe status and goes back to `queued`.
+    const outage = await worker({ provider: fakeProvider({ probe: "not_logged_in" }) });
+    expect(outage.processed.map((item) => item.status)).toEqual(["not_logged_in", "not_logged_in", "not_logged_in"]);
+    expect(outage.skipped).toEqual([]);
+    const store = composeStore({ paths, config, logger: silentWorkerLogger, clock });
+    await store.read((db) => {
+      const episodes = new EpisodeRepository(db);
+      for (const descriptor of decisions) expect(episodes.getById(descriptor.id)).toMatchObject({ status: "queued", attemptCount: 0 });
+      expect(new ExtractionRunRepository(db).getById(extractionRunId(decisions[0]!.id))?.status).toBe("not_logged_in");
+      // Ghost runs of requeued episodes never reached the provider: the day's budget is untouched.
+      expect(episodes.countDecisionOnlyExtractedSince("2026-11-08T00:00:00.000Z")).toBe(0);
+    });
+
+    // Eleven minutes later the provider is back: all three fit the budget of three, none is skipped as decision_cap.
+    clockNow = "2026-11-08T15:11:00.000Z";
+    const answers: Record<string, ReturnType<typeof outputFixture>> = {};
+    for (const descriptor of decisions) answers[descriptor.id] = outputFixture([], "The runner decision was recorded.");
+    const recovered = await worker({ provider: createReplayProvider({ answers }) });
+    expect(recovered.processed.map((item) => item.episodeId).sort()).toEqual(decisions.map((descriptor) => descriptor.id).sort());
+    expect(recovered.processed.map((item) => item.status)).toEqual(["ok", "ok", "ok"]);
+    expect(recovered.skipped).toEqual([]);
+    await store.read((db) => {
+      const episodes = new EpisodeRepository(db);
+      for (const descriptor of decisions) expect(episodes.getById(descriptor.id)).toMatchObject({ status: "extracted" });
+      expect(episodes.countDecisionOnlyExtractedSince("2026-11-08T00:00:00.000Z")).toBe(3);
+    });
+  });
+
   test("a provider_error probe (an API error such as a missing model) waits like the other provider failures and keeps the message", async () => {
     const descriptor = queueEpisode(s01);
     const detail = "api 404: There's an issue with the selected model (anthropic.claude-opus-5[1m]).";
@@ -673,6 +778,9 @@ describe("worker reindex and dream", () => {
     expect(result.processed).toHaveLength(1);
     expect(result.dream).not.toBeNull();
     expect(result.dream?.errors).toEqual([]);
+    // rc.2: the full sweep ran (default level is full) and found no candidate left to drain after the extraction.
+    expect(result.dream?.sweptActivated).toEqual([]);
+    expect(result.dream?.sweptProposalsClosed).toEqual([]);
     expect(result.snapshotBuilt).toBe(true);
     const store = composeStore({ paths, config, logger: silentWorkerLogger, clock });
     await store.read((db) => {

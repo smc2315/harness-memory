@@ -475,7 +475,9 @@ async function handleSessionStart(input: NormalizedHookInput, runtime: HookRunti
   result.delivery = startup.items.length > 0 ? "with_result" : "none";
   result.detail.suppressed = startup.suppressed;
 
-  const digest = buildDigestMessage(loaded.snapshot.counts, ctx.state?.last_digest_date, ctx.now);
+  // 0.6.0-rc.2 (design §1): under `autonomy_level: "full"` nothing waits on `hm review`, so the proposal digest is not
+  // shown; the remember notice below and the `last_digest_date` throttle behave as before.
+  const digest = runtime.config.autonomy_level === "full" ? null : buildDigestMessage(loaded.snapshot.counts, ctx.state?.last_digest_date, ctx.now);
   // A′ remember-as-human: rules born active from the user's own request in the last 24 h are named with their
   // one-command undo, read from the snapshot (status_reason / created_at), under the same once-per-session-day throttle.
   const today = ctx.now.slice(0, 10);

@@ -1,6 +1,6 @@
 {
   "name": "harness-memory",
-  "version": "0.6.0-rc.1",
+  "version": "0.6.0-rc.2",
   "description": "Trigger-aware project memory for Claude Code: policies and pitfalls learned from your own corrections and failures, enforced at the tool boundary through hooks. Local-first, no account, no daemon.",
   "license": "MIT",
   "type": "module",

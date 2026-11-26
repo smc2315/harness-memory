@@ -3,6 +3,10 @@
  * sets (correction_for union → import rule → tool-less correction/remember episodes) and the
  * run-level circuit breaker (non-JSON, > 8 facts, > 50 % hallucinated refs → `suspect`).
  *
+ * 0.6.0-rc.2 (design §2): every accepted fact also carries `signature_precision` (the compiled signature tested
+ * against the episode's `tool_ok` lines the way the hooks would), `side_effect` and `horizon` (extractor fields
+ * normalized to their defaults). The reconciler stores the three in their own columns (migration 023).
+ *
  * Pure: no database. The worker supplies the existing memory ids and, for `correction_for`
  * episodes, the corrected episode's scope_refs / tools.
  */
@@ -27,7 +31,7 @@ import {
   type RejectionCode,
 } from "../../core/extraction-types";
 import { normalizeScopeGlob, normalizeSummary, semanticKey } from "../../core/ids";
-import type { LedgerLine, ToolFailLine } from "../../core/ledger-types";
+import type { LedgerLine, ToolFailLine, ToolOkLine } from "../../core/ledger-types";
 import type { CompiledSignature } from "../../core/snapshot-types";
 import {
   CANONICAL_TOOL_FAMILIES,
@@ -36,7 +40,10 @@ import {
   isGlobalScope,
   toolFamily,
   type CanonicalToolFamily,
+  type Horizon,
   type LifecycleTrigger,
+  type SideEffect,
+  type SignaturePrecision,
   type TriggerSignature,
 } from "../../core/vocabulary";
 import { citesRememberPrompt } from "../../promotion/remember";
@@ -53,7 +60,19 @@ export interface CorrectionForEpisode {
 export interface ValidateExtractionInput {
   output: ExtractionOutput;
   descriptor: EpisodeDescriptor;
+  /** Citable event id → rendered line (V2, V12, remember citations, the hallucinated-refs breaker). */
   seqMap: ReadonlyMap<string, LedgerLine>;
+  /**
+   * Event id → line for EVERY line of the episode, those the prompt dropped for the character cap included
+   * (`eventIdMap(lines)`); used only by `signaturePrecision`, so a sibling `tool_ok` the render dropped still makes
+   * the signature a noun and the fresh and the raw-cache path label the same output alike. Defaults to `seqMap`.
+   */
+  precisionLines?: ReadonlyMap<string, LedgerLine>;
+  /**
+   * Tool lines of the corrected episode when `descriptor.correction_for` is set — the prompt's non-citable context.
+   * `signaturePrecision` counts the distinct `tool_ok` calls the signature hits among them (rule 2).
+   */
+  contextLines?: readonly LedgerLine[] | null;
   existingMemoryIds: ReadonlySet<string>;
   scanner?: Scanner;
   nowIso: string;
@@ -76,6 +95,24 @@ export interface ValidatedFact extends ExtractionFact {
   normalizedScope: string;
   /** e.g. `signature_dropped`, `tool_not_hooked`, `no_target_create` */
   relabels: string[];
+  /**
+   * 0.6.0-rc.2 (design §2): is `compiledSignature` the mistaken token (`mistake_exact`) or the name of an operation
+   * (`noun`)? Judged over every `tool_ok` line of the episode — lines the prompt dropped for the character cap included
+   * — and never over `tool_fail` lines, by three rules (`signaturePrecision`):
+   *   1. a hit on a `tool_ok` line the fact does not cite, or on a cited line that resolved a failure, → `noun`; in a
+   *      correction_for (union-mode) episode every hit on the episode's own `tool_ok` lines counts, cited or not, because
+   *      the correcting turn's calls are the fix, not the mistake;
+   *   2. when the corrected turn's tool lines are known, hits on two or more distinct calls among its `tool_ok` lines →
+   *      `noun` (the pattern covers the mistake and a sibling; one call, however often repeated, does not);
+   *   3. otherwise `mistake_exact`, the vacuous case (no `tool_ok` line anywhere, a correction-only turn) included.
+   * `null` when the fact ends without a signature (none, or V10 dropped it). Only `mistake_exact` rows may be born at
+   * or climb to soft_deny (§3).
+   */
+  signature_precision: SignaturePrecision | null;
+  /** 0.6.0-rc.2: `trigger_signature.side_effect` of the signature the fact ends with, `read` when absent or without a signature. */
+  side_effect: SideEffect;
+  /** 0.6.0-rc.2: the extractor's `horizon`, `durable` when absent (`task` = 7-day TTL, never above advise). */
+  horizon: Horizon;
 }
 
 export type SuspectReason = "not_json" | "schema" | "too_many_facts" | "hallucinated_refs";
@@ -97,6 +134,10 @@ type ScopeMode =
 interface FactContext {
   descriptor: EpisodeDescriptor;
   seqMap: ReadonlyMap<string, LedgerLine>;
+  /** Every event id of the episode → line (dropped lines included); `signaturePrecision` only. */
+  precisionLines: ReadonlyMap<string, LedgerLine>;
+  /** The corrected turn's tool lines (correction_for episodes), else null; `signaturePrecision` only. */
+  contextLines: readonly LedgerLine[] | null;
   existingMemoryIds: ReadonlySet<string>;
   scanner: Scanner;
   mode: ScopeMode;
@@ -278,6 +319,80 @@ function resolutionConflict(compiled: CompiledSignature, refs: readonly string[]
   return null;
 }
 
+export interface SignaturePrecisionOptions {
+  /**
+   * True for a correction_for episode (scope mode `union`): the correcting turn's own `tool_ok` calls are the fix the
+   * user asked for, not the mistake, so the cited-non-resolving exemption of rule 1 does not apply to them.
+   */
+  union?: boolean;
+  /**
+   * Tool lines of the corrected (previous) turn, the prompt's non-citable context; rule 2 counts their distinct hits
+   * (subagent lines excepted).
+   */
+  contextLines?: readonly LedgerLine[] | null;
+}
+
+/** A line a subagent produced — the same predicate `eventIdMap` (prompt.ts) drops such lines by. */
+function fromSubagent(line: LedgerLine): boolean {
+  return typeof line.agent_id === "string" && line.agent_id.length > 0;
+}
+
+/**
+ * Does the signature fire on this line the way the hooks would? The signature's tool glob must cover the line's tool,
+ * then the input digest or, when present, the first scope ref must match (the two checks of `classifyFiredOutcome`).
+ */
+function signatureHits(compiled: CompiledSignature, line: ToolOkLine): boolean {
+  if (!toolGlobMatches(compiled.tool, line.tool)) return false;
+  if (line.input_digest.length > 0 && matchSignature(compiled, line.input_digest, line.shell_dialect)) return true;
+  const scopeRef = line.scope_refs[0];
+  return scopeRef !== undefined && scopeRef.length > 0 && matchSignature(compiled, scopeRef, line.shell_dialect);
+}
+
+/**
+ * Signature precision (design §2): is the compiled signature the mistaken token (`mistake_exact`) or the name of an
+ * operation — a host, a table, a tool — that the episode also performed legitimately (`noun`)? Only `tool_ok` lines
+ * are tested, wherever they come from: the mistaken call failing is what the signature exists for. Three rules:
+ *
+ *   1. The episode's own lines (`lines`: event id → ledger line, EVERY line of the episode including those the prompt
+ *      dropped for the character cap, so a cached and a fresh run judge the same output alike). A hit on a line the
+ *      fact does not cite, or on a cited line that resolved a failure (`resolution_of` set), → `noun`. A cited,
+ *      non-resolving line is the mistake the fact describes and is exempt — except in a correction_for episode
+ *      (`options.union`), where the correcting turn's own `tool_ok` calls are the fix the user asked for, not the
+ *      mistake: there any hit → `noun`.
+ *   2. The corrected turn (`options.contextLines`, the previous turn's tool lines, never citable). Hits on two or more
+ *      DISTINCT calls — distinct input digests, or first scope refs for lines without a digest — → `noun`: an
+ *      operation-level pattern (`git push`) covers the mistake and a sibling, while an exact token (`git push upstream`)
+ *      matches only the mistaken call however often it was repeated. One hit or none leaves rule 1's verdict. Lines a
+ *      subagent produced (`agent_id` set) are skipped: subagent calls are ignored on both sides, as the citable map
+ *      (`eventIdMap`) ignores them — the same kind of line is never a sibling here while invisible to rule 1.
+ *   3. Otherwise `mistake_exact` — including the vacuous case where no `tool_ok` line exists anywhere (a prompt-only
+ *      correction without a corrected turn), the design's letter that the replay scenarios s01 / s11 rely on.
+ *
+ * V12 stays the separate, rejecting case (the signature matches the resolving command of a *different* program).
+ */
+export function signaturePrecision(
+  compiled: CompiledSignature,
+  evidenceRefs: readonly string[],
+  lines: ReadonlyMap<string, LedgerLine>,
+  options: SignaturePrecisionOptions = {}
+): SignaturePrecision {
+  const cited = new Set(evidenceRefs);
+  const union = options.union === true;
+  for (const [ref, line] of lines) {
+    if (line.kind !== "tool_ok") continue;
+    if (!union && cited.has(ref) && line.resolution_of === null) continue;
+    if (signatureHits(compiled, line)) return "noun";
+  }
+  const context = options.contextLines ?? [];
+  const distinctHits = new Set<string>();
+  for (const line of context) {
+    if (line.kind !== "tool_ok" || fromSubagent(line) || !signatureHits(compiled, line)) continue;
+    distinctHits.add(line.input_digest.length > 0 ? line.input_digest : (line.scope_refs[0] ?? ""));
+    if (distinctHits.size >= 2) return "noun";
+  }
+  return "mistake_exact";
+}
+
 function validateFact(original: ExtractionFact, ordinal: number, ctx: FactContext): FactResult {
   const relabels: string[] = [];
   let fact: ExtractionFact = {
@@ -394,6 +509,18 @@ function validateFact(original: ExtractionFact, ordinal: number, ctx: FactContex
   const normalizedScope = compiled !== null && !commandSignatureNamesPath(compiled) ? GLOBAL_SCOPE : scope.normalized;
   const key = semanticKey(fact.type, normalizedScope, compiled?.signature_key ?? "", fact.summary);
 
+  // 0.6.0-rc.2 (design §2) — precision of the signature the fact ends with (null once V10 dropped it), and the
+  // extractor's optional side_effect / horizon normalized to their defaults. The stored trigger_signature object is
+  // left as it arrived (side_effect may stay on it); the reconciler writes the three into their own columns.
+  // Precision is judged over every line of the episode (`precisionLines`, dropped lines included) plus, for a
+  // correction_for episode, the corrected turn's tool lines — not over the citable `seqMap` the checks above use.
+  const precision =
+    compiled === null
+      ? null
+      : signaturePrecision(compiled, fact.evidence_refs, ctx.precisionLines, { union: ctx.mode.kind === "union", contextLines: ctx.contextLines });
+  const sideEffect: SideEffect = signature?.side_effect ?? "read";
+  const horizon: Horizon = fact.horizon ?? "durable";
+
   return {
     ok: true,
     fact: {
@@ -406,6 +533,9 @@ function validateFact(original: ExtractionFact, ordinal: number, ctx: FactContex
       semanticKey: key,
       normalizedScope,
       relabels,
+      signature_precision: precision,
+      side_effect: sideEffect,
+      horizon,
     },
   };
 }
@@ -447,6 +577,8 @@ export function validateExtraction(input: ValidateExtractionInput): ValidationRe
   const ctx: FactContext = {
     descriptor: input.descriptor,
     seqMap: input.seqMap,
+    precisionLines: input.precisionLines ?? input.seqMap,
+    contextLines: input.contextLines ?? null,
     existingMemoryIds: input.existingMemoryIds,
     scanner: input.scanner ?? defaultScanner,
     mode: resolveMode(input.descriptor, input.correctionForEpisode),

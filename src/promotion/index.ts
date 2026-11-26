@@ -6,9 +6,14 @@
 export {
   ACTIVATION_MIN_CONFIDENCE,
   ACTIVATION_MIN_EVIDENCE,
+  FULL_ACTIVATION_MIN_EVIDENCE,
+  KNOWLEDGE_TTL_DAYS,
+  SILENT_WRITE_MIN_EVIDENCE,
+  TASK_TTL_DAYS,
   decideTier,
   enforcementDefault,
   isReachableTrigger,
+  tierTtlDays,
   type DecideTierInput,
   type DecideTierMemory,
   type EnforcementDefaultInput,
@@ -29,6 +34,7 @@ export {
 export {
   CORRECTION_TTL_DAYS,
   FIRE_TTL_EXTENSION_DAYS,
+  TASK_HORIZON_TTL_DAYS,
   TTL_BASE_DAYS,
   TTL_MAX_DAYS,
   baseTtlDays,

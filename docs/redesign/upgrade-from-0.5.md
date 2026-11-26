@@ -12,8 +12,15 @@ For anyone with an existing `.harness-memory/memory.sqlite` written by 0.3–0.5
 | Candidates | `DreamWorker` template candidates + LLM candidates, all `**/*` + `before_model` | validated facts with scope, triggers and a trigger signature; no templates |
 | Promotion | 5-gate auto-promoter + `memory:review` | `authority` (human / auto), `decideTier`, proposals, `hm review` |
 | `before_tool` | scope glob only; warnings arrived with the tool result | tool + argument signature; `permissionDecision ask / deny` before execution |
-| Database | `user_version` 9–16 | `user_version` 22 (migrations 017–022), backups `memory.sqlite.bak-v<N>` |
+| Database | `user_version` 9–16 | `user_version` 23 (migrations 017–023), backups `memory.sqlite.bak-v<N>` |
 | Embeddings | installed by default | optional (`hm install --with-embeddings`), idle-exit helper |
+
+## Upgrading from 0.6.0-rc.1 to 0.6.0-rc.2
+
+- The default `autonomy_level` is `full`. rc.1's `hm install` wrote `"autonomy_level": "standard"` into every `.harness-memory/config.json`, so the new default alone changes nothing for an existing project: run `hm install --host claude` (the upgrade step below) — when the install manifest says the previous install was rc.1 and the file still says `standard`, it rewrites that one value to `full` and prints it on the `config` line. From then on waiting candidates are activated at `advise` by the next `dream` runs (oldest first, up to `dream.full_sweep_per_run` = 50 activations per run), their `activate_*` proposals close as `expired(full_autonomy)`, and the daily review digest disappears. To keep the review gate, set `"autonomy_level": "standard"` again after the install; a project with no manifest (a hand-written config, or a `config.json` copied from another machine) is never rewritten — delete the `standard` line there yourself.
+- A proposal you rejected under rc.1 keeps its meaning: a candidate whose `activate_policy` / `activate_global` proposal you rejected is never activated by the automatic path; it meets the 45-day candidate expiry instead.
+- Migration 023 adds `signature_precision`, `side_effect`, `horizon` to `memories` (backup `memory.sqlite.bak-v22`). Existing rows keep NULL, which the new `soft_deny` rule and the ladder read as "not mistake-exact": with the default `before_tool.auto_enforcement: advise`, nothing you already have becomes blocking.
+- `EXTRACTOR_VERSION` is 2026.11.v2; episodes already extracted are not re-run.
 
 ## Before you upgrade
 
@@ -24,11 +31,11 @@ For anyone with an existing `.harness-memory/memory.sqlite` written by 0.3–0.5
 ## Upgrade steps (Claude Code)
 
 ```bash
-# 0.6.0-rc.1 is a GitHub pre-release, not on npm yet: plain `npm install -g harness-memory` still installs 0.5.1
-npm install -g https://github.com/smc2315/harness-memory/releases/download/v0.6.0-rc.1/harness-memory-0.6.0-rc.1.tgz
+# 0.6.0-rc.2 is a GitHub pre-release, not on npm yet: plain `npm install -g harness-memory` still installs 0.5.1
+npm install -g https://github.com/smc2315/harness-memory/releases/download/v0.6.0-rc.2/harness-memory-0.6.0-rc.2.tgz
 #   (once published: npm install -g harness-memory@next; or update the project devDependency the same way)
 cd <project>
-hm install --host claude                   # migrates memory.sqlite → v22 (backup first), builds the snapshot, registers 9 hooks
+hm install --host claude                   # migrates memory.sqlite → v23 (backup first), builds the snapshot, registers 9 hooks
 hm doctor                                  # every check OK / WARN / FAIL
 hm review                                  # fix_scope proposals for legacy rows, merge proposals for duplicates
 ```
@@ -45,7 +52,7 @@ Optional but recommended: `hm import --from CLAUDE.md`. v0.5's `install` importe
 
 ## What the migrations do
 
-All six files run on a fresh connection without a surrounding transaction (017 and 021 toggle `PRAGMA foreign_keys`); atomicity comes from applying them in memory and saving via tmp + rename. `PRAGMA user_version` is set after each file; a database already at 22 is untouched, and a database newer than 22 makes the CLI refuse with "upgrade harness-memory".
+All seven files run on a fresh connection without a surrounding transaction (017 and 021 toggle `PRAGMA foreign_keys`); atomicity comes from applying them in memory and saving via tmp + rename. `PRAGMA user_version` is set after each file; a database already at 23 is untouched, and a database newer than 23 makes the CLI refuse with "upgrade harness-memory".
 
 | # | file | effect |
 |---|---|---|
@@ -55,6 +62,7 @@ All six files run on a fresh connection without a surrounding transaction (017 a
 | 020 | `020_policy_rules_v2.sql` | Adds `tool_pattern`, `target_kind`, `pattern_kind`, `arg_pattern`, `enforcement`, `derived_at` to `policy_rules`. Rules with `derived_at` set are rewritten from active policy memories on every commit; your manual rules (`derived_at IS NULL`) are preserved. |
 | 021 | `021_legacy_archive.sql` | Renames `dream_evidence_events`, `dream_runs`, `dream_memory_evidence_links` to `legacy_*`; marks unconsumed legacy evidence `discarded` (it is **not** re-extracted — those blobs have no tool set or scope refs, and re-extraction would burn a day of LLM budget for nothing); drops the never-populated `topic_summaries`. The `evidence` table stays for manual notes. |
 | 022 | `022_episode_summaries.sql` | Adds `summary` (one line, ≤ 400 chars) and `summary_kind` (`extracted` = the extractor's `episode_summary`, `derived` = the worker's deterministic summary built from the descriptor and ledger lines) to `episodes` for the recall layer (`recall.enabled`, off by default). No backfill: episodes closed before the upgrade keep `NULL` and are invisible to `hm recall` until re-queued. |
+| 023 | `023_signature_precision.sql` | Adds `signature_precision` (`mistake_exact` / `noun`), `side_effect` (`read` / `write`) and `horizon` (`durable` / `task`) to `memories` for the full-autonomy rules (`docs/redesign/full-autonomy-0.6.0-rc.2.md`). All NULL for existing rows: a NULL precision counts as `noun`, so no pre-023 row can be born at or escalated to `soft_deny` by the new rule without a re-extraction. |
 
 **Post-migrate** (same lock session, idempotent through `meta.semantic_key_backfill`): (1) v0.5 `DreamWorker` template candidates — `status = 'candidate'` rows linked from `legacy_dream_memory_evidence_links` — are `rejected` with `status_reason = migration` and a `memory_transitions` row; (2) every live row gets a `semantic_key` (`sha256(type | scope | signature | normalized summary)`); when two live rows collide, the oldest keeps the key and a `merge` proposal (30 days) is opened for the pair.
 
@@ -97,8 +105,8 @@ On the author's real v0.5 databases: v9 (13 memories, 142 evidence rows, 75 lega
 
 `hm uninstall --purge` keeps the `memory.sqlite.bak-v<N>` files for the same reason.
 
-## Known gaps in 0.6.0-rc.1
+## Known gaps (0.6.0-rc.2)
 
-- Live `claude -p` extraction has run in two synthetic sessions only (six calls on the `sonnet` alias; see docs/redesign/phase-e-notes.md); the replay provider covers the tests and the dogfood weeks have not started. The first live probe failed with `api 404` because the interactive default model was a gateway id — the claude provider now passes `--model sonnet` unless `extraction.model` is set, and such failures show as `probe provider_error` with the API message. Report any probe result other than `ok` / `not_logged_in` with `hm doctor --json`.
+- Live `claude -p` extraction has run in two synthetic sessions only (six calls on the `sonnet` alias; see docs/redesign/phase-e-notes.md); the replay provider covers the tests; the first dogfood run (17 days, one Java/Spring project, Claude Code on WSL) is summarised in CHANGELOG.md and docs/redesign/full-autonomy-0.6.0-rc.2.md. The first live probe failed with `api 404` because the interactive default model was a gateway id — the claude provider now passes `--model sonnet` unless `extraction.model` is set, and such failures show as `probe provider_error` with the API message. Report any probe result other than `ok` / `not_logged_in` with `hm doctor --json`.
 - Exec-form hooks are written when `claude --version` ≥ 2.1.139 or unknown; the minimum is inferred from release mirrors. If Claude Code reports hook errors on every call, re-run `hm install --host claude --hook-form shell`.
 - `fix_scope` proposals carry their payload (scope, triggers, signature) in the proposal rationale; the interactive editor for it is part of `hm review` (Phase C).

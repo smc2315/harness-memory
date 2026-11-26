@@ -15,7 +15,7 @@ import type { LedgerLine } from "../../src/core/ledger-types";
 import { getDbGeneration, hasWriteOp, insertWriteOp, setDbGeneration } from "../../src/db/meta";
 import { EpisodeRepository } from "../../src/db/repositories/episodes";
 import { buildEpisodeDescriptor, type BuildEpisodeInput } from "../../src/dream/episode";
-import { buildExtractionPrompt, type PromptMemory } from "../../src/dream/extract/prompt";
+import { buildExtractionPrompt, eventIdMap, type PromptMemory } from "../../src/dream/extract/prompt";
 import { validateRawExtraction } from "../../src/dream/extract/validate";
 import type { OffsetLedgerLine } from "../../src/dream/ledger";
 import { reconcileRun, type ReconcileWriteOp } from "../../src/dream/reconcile";
@@ -108,10 +108,14 @@ export function applyRun(db: SqlJsDatabase, options: ApplyRunOptions): ApplyRunR
   const runId = extractionRunId(options.descriptor.id);
   const repository = new MemoryRepository(db, { clock: () => now });
   const existingMemoryIds = new Set(repository.list({ status: LIVE_STATUSES }).map((memory) => memory.id));
+  // As the worker does: precision is judged over every line of the episode (dropped lines included) and, for a
+  // correction_for episode, over the corrected turn's tool lines.
   const validated = validateRawExtraction({
     raw,
     descriptor: options.descriptor,
     seqMap: built.seqMap,
+    precisionLines: eventIdMap(options.lines),
+    contextLines: options.contextLines ?? null,
     existingMemoryIds,
     nowIso: now,
     correctionForEpisode: correctionFor === null ? null : { scope_refs: correctionFor.scopeRefs, tools: correctionFor.tools },

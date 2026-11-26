@@ -2,7 +2,8 @@
  * `hm install --host claude [--user] [--with-embeddings]` (spec §8.7, §11; m0-facts #1, #3, #10, #15–#17).
  *
  *  1 `.harness-memory/` directories, its `.gitignore` (`*`: ledgers and the database are never committed)
- *    + `config.json` defaults (`--with-embeddings` → npm install in the package root + enabled)
+ *    + `config.json` defaults (`--with-embeddings` → npm install in the package root + enabled; a 0.6.0-rc.1
+ *    install's `"autonomy_level": "standard"` becomes `"full"`, see `autonomyLevelMigration`)
  *  2 migrate (backup first) + `meta.installed_version` + snapshot build, under the store's lock
  *  3 hooks into `.claude/settings.local.json` (`--user`: `~/.claude/settings.json`), exec form
  *    `{command: <node>, args: [<dist/hook.js>, <event>], timeout}` per §8.2, idempotent merge
@@ -19,7 +20,7 @@ import { dirname, join, resolve } from "node:path";
 import { DEFAULT_CONFIG, loadConfig, mergeConfig, type HarnessConfig } from "../../core/config";
 import { EXIT_CODES } from "../../core/errors";
 import { stateDirectories, type HarnessPaths } from "../../core/paths";
-import type { ProbeResult } from "../../core/vocabulary";
+import type { AutonomyLevel, ProbeResult } from "../../core/vocabulary";
 import { META_KEYS, MetaRepository } from "../../db/repositories/meta";
 import type { Store } from "../../db/store";
 import { normalizeProbe, selectProvider, writeProbeCache, type ExtractionProvider } from "../../dream/extract/providers";
@@ -79,7 +80,12 @@ export interface InstallReport {
   claude_version: string | null;
   events: string[];
   replaced_entries: number;
-  config: { path: string; created: boolean; embeddings_enabled: boolean };
+  /**
+   * `autonomy_level` is the effective level after this run; `autonomy_level_migrated_from` names the value a pre-rc.2
+   * install's default (0.6.0-rc.1's) left in the file when this run replaced it with `full` (`autonomyLevelMigration`),
+   * null otherwise.
+   */
+  config: { path: string; created: boolean; embeddings_enabled: boolean; autonomy_level: AutonomyLevel; autonomy_level_migrated_from: "standard" | null };
   embeddings: { requested: boolean; installed: boolean; output: string | null };
   database: { path: string; user_version: number; migrated_from: number | null; backup: string | null; snapshot_built: boolean };
   snapshot_counts: { active: number; candidates: number; unreachable: number } | null;
@@ -137,15 +143,19 @@ function defaultRunNpm(args: readonly string[], cwd: string): NpmRunResult {
   }
 }
 
+/** The parsed `config.json` when it holds a JSON object; null when the file is missing, malformed or not an object. */
+function readConfigRecord(file: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Writes defaults when missing; merges `patch` into the existing file otherwise (unknown keys are kept). */
 export function ensureConfigFile(paths: HarnessPaths, patch: Record<string, unknown> | null): { created: boolean; config: HarnessConfig } {
-  let existing: Record<string, unknown> | null = null;
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(paths.config, "utf8"));
-    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) existing = parsed as Record<string, unknown>;
-  } catch {
-    existing = null;
-  }
+  const existing = readConfigRecord(paths.config);
   const created = existing === null;
   const next: Record<string, unknown> = existing ?? structuredClone(DEFAULT_CONFIG as unknown as Record<string, unknown>);
   if (patch !== null) {
@@ -159,6 +169,58 @@ export function ensureConfigFile(paths: HarnessPaths, patch: Record<string, unkn
     writeFileSync(paths.config, `${JSON.stringify(next, null, 2)}\n`, "utf8");
   }
   return { created, config: mergeConfig(DEFAULT_CONFIG, next) };
+}
+
+/** The pre-release that made `full` the default: every 0.6.0 pre-release sorting before it wrote `standard` instead. */
+const FULL_AUTONOMY_PRERELEASE = ["rc", "2"] as const;
+
+/**
+ * Semver §11.4 for pre-release identifier lists: numeric identifiers compare numerically and sort before alphanumeric
+ * ones, alphanumeric ones compare in ASCII order, and when every shared identifier is equal the shorter list sorts first.
+ */
+function comparePrereleaseIdentifiers(left: readonly string[], right: readonly string[]): number {
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const a = left[index];
+    const b = right[index];
+    if (a === undefined || b === undefined) return a === undefined ? -1 : 1;
+    const aNumeric = /^\d+$/.test(a);
+    const bNumeric = /^\d+$/.test(b);
+    if (aNumeric !== bNumeric) return aNumeric ? -1 : 1;
+    if (aNumeric) {
+      const delta = Number(a) - Number(b);
+      if (delta !== 0) return delta < 0 ? -1 : 1;
+    } else if (a !== b) {
+      return a < b ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+/**
+ * True for the builds whose `hm install` wrote `"autonomy_level": "standard"` into a fresh config.json as the default:
+ * every 0.6.0 pre-release before rc.2 (`0.6.0-rc.1`, the one that shipped; also `0.6.0-rc.0`, `0.6.0-dev.3`, `0.6.0-alpha`).
+ * False for the release (`0.6.0`), rc.2 and later pre-releases (`0.6.0-rc.10`), every other core (`0.5.1`, `0.6.1`, `1.0.0`)
+ * and anything that is not a version — the safe side, since a false negative only leaves a file alone. Build metadata
+ * (`+…`) is ignored. `compareVersions` (lib/settings.ts) cannot stand in: it reads digit groups only, so there `0.6.0`
+ * sorts before `0.6.0-rc.2` and `0.6.0-dev.3` after it.
+ */
+export function isPreFullAutonomyVersion(version: string): boolean {
+  const match = /^0\.6\.0-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)(?:\+[0-9A-Za-z.-]+)?$/.exec(version.trim());
+  if (match === null) return false;
+  return comparePrereleaseIdentifiers(match[1]!.split("."), FULL_AUTONOMY_PRERELEASE) < 0;
+}
+
+/**
+ * INV-1: 0.6.0-rc.1's install wrote the whole DEFAULT_CONFIG of its day — `"autonomy_level": "standard"` included — into
+ * a fresh config.json, and an explicit value beats rc.2's new default `full` (`mergeConfig` → `pickEnum`), so no project
+ * installed by rc.1 would ever see the headline change. The previous install manifest's `version` is the discriminator:
+ * a `standard` in a project installed by a pre-rc.2 build is that default and becomes `full`; a project without a manifest
+ * (never installed by rc.1) or installed by rc.2 or later chose `standard` deliberately and keeps it, as does every other
+ * value. Returns the level being replaced, or null when the file is to stay as it is.
+ */
+export function autonomyLevelMigration(configFile: string, previous: InstallManifest | null): "standard" | null {
+  if (previous === null || !isPreFullAutonomyVersion(previous.version)) return null;
+  return readConfigRecord(configFile)?.autonomy_level === "standard" ? "standard" : null;
 }
 
 /**
@@ -268,7 +330,12 @@ export function renderInstallReport(report: InstallReport): string[] {
   lines.push(`  database    ${db.path} v${String(db.user_version)}${migrated}`);
   const counts = report.snapshot_counts;
   lines.push(`  snapshot    ${db.snapshot_built ? "built" : "not rebuilt"}${counts === null ? "" : ` (active ${String(counts.active)}, candidates ${String(counts.candidates)}${counts.unreachable > 0 ? `, unreachable ${String(counts.unreachable)}` : ""})`}`);
-  lines.push(`  config      ${report.config.path}${report.config.created ? " (created)" : ""}; embeddings ${report.config.embeddings_enabled ? "enabled" : "off"}`);
+  const migratedLevel = report.config.autonomy_level_migrated_from;
+  lines.push(
+    `  config      ${report.config.path}${report.config.created ? " (created)" : ""}; embeddings ${report.config.embeddings_enabled ? "enabled" : "off"}; autonomy_level ${report.config.autonomy_level}${
+      migratedLevel === null ? "" : ` (a pre-rc.2 install (0.6.0-rc.1) wrote "${migratedLevel}" — set "autonomy_level": "${migratedLevel}" in config.json to keep the review gate)`
+    }`
+  );
   if (report.git_exclude !== null) {
     lines.push(`  git         ${GIT_EXCLUDE_LINE} ${report.git_exclude.added ? "added to" : "already in"} ${report.git_exclude.path}`);
   }
@@ -323,6 +390,10 @@ export async function runInstall(ctx: CommandContext): Promise<number> {
     );
   }
 
+  // What the last install left behind (null on a first install): the version that wrote config.json's defaults, and
+  // what that run created, so a re-run's manifest keeps the record uninstall needs. Read before anything is rewritten.
+  const previous = readManifest(ctx.paths.manifest);
+
   // 1 directories (+ .gitignore) + config
   for (const dir of stateDirectories(ctx.paths)) mkdirSync(dir, { recursive: true });
   const gitIgnore = ensureStateGitignore(ctx.paths);
@@ -344,6 +415,8 @@ export async function runInstall(ctx: CommandContext): Promise<number> {
       else warnings.push(`npm install @xenova/transformers failed; embeddings stay disabled (${npm.output.split("\n").slice(-1)[0] ?? "no output"})`);
     }
   }
+  const autonomyMigratedFrom = autonomyLevelMigration(ctx.paths.config, previous);
+  if (autonomyMigratedFrom !== null) configPatch = { ...(configPatch ?? {}), autonomy_level: "full" satisfies AutonomyLevel };
   const configFile = ensureConfigFile(ctx.paths, configPatch);
   const config = loadConfig(ctx.paths.config);
 
@@ -363,7 +436,6 @@ export async function runInstall(ctx: CommandContext): Promise<number> {
   }
   const settingsFile = userScope ? userSettingsFile(ctx.env) : projectSettingsFile(ctx.paths.root);
   const current = readSettingsFile(settingsFile);
-  const previous = readManifest(ctx.paths.manifest);
   const merged = mergeHarnessHooks(current.settings, spec);
   writeSettingsFile(settingsFile, merged.settings);
   if (ctx.platform === "win32" && gitBash === null) warnings.push("Git Bash not found: Claude Code will use its PowerShell tool; pitfalls learned under bash still fire (canonical tool `bash`)");
@@ -437,7 +509,13 @@ export async function runInstall(ctx: CommandContext): Promise<number> {
     claude_version: claudeVersion,
     events: manifest.events,
     replaced_entries: merged.replaced,
-    config: { path: ctx.paths.config, created: configFile.created, embeddings_enabled: config.embeddings.enabled },
+    config: {
+      path: ctx.paths.config,
+      created: configFile.created,
+      embeddings_enabled: config.embeddings.enabled,
+      autonomy_level: config.autonomy_level,
+      autonomy_level_migrated_from: autonomyMigratedFrom,
+    },
     embeddings,
     database: { path: ctx.paths.db, user_version: database.userVersion, migrated_from: database.migratedFrom, backup: database.backup, snapshot_built: database.snapshotBuilt },
     snapshot_counts:

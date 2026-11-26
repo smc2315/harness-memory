@@ -1,21 +1,24 @@
 import { describe, expect, test } from "vitest";
 
 import type { EpisodeDescriptor } from "../src/core/episode-types";
-import type { ExtractionFact } from "../src/core/extraction-types";
+import { EXTRACTION_SCHEMA, type ExtractionFact } from "../src/core/extraction-types";
 import { semanticKey } from "../src/core/ids";
 import type { LedgerLine } from "../src/core/ledger-types";
+import { HORIZONS, SIDE_EFFECTS, type TriggerSignature } from "../src/core/vocabulary";
 import { buildEpisodeDescriptor } from "../src/dream/episode";
+import { buildExtractionPrompt, eventIdMap, type PromptMemory } from "../src/dream/extract/prompt";
 import { parseExtractionOutput } from "../src/dream/extract/schema";
 import {
   isRestatement,
   isSelfReference,
+  signaturePrecision,
   textCitesCommand,
   validateExtraction,
   validateRawExtraction,
   type ValidateExtractionInput,
 } from "../src/dream/extract/validate";
 import type { OffsetLedgerLine } from "../src/dream/ledger";
-import { loadExtractionFixture, loadLedgerFixture, promptLine, seqMapOf, toolFailLine, toolOkLine } from "./helpers/ledger-fixture";
+import { assistantLine, loadExtractionFixture, loadLedgerFixture, promptLine, seqMapOf, toolFailLine, toolOkLine } from "./helpers/ledger-fixture";
 
 const NOW = "2026-11-08T23:30:00.000Z";
 
@@ -100,6 +103,10 @@ describe("fixtures", () => {
     expect(accepted.lifecycle_triggers).toEqual(["before_tool"]);
     expect(accepted.aliases).toEqual(["pnpm test", "test runner", "테스트 실행"]);
     expect(result.output?.episode_summary).toContain("pnpm test ran the suite");
+    // 0.6.0-rc.2 §2: the pinned `npm test` hits neither `ls` nor the resolving `pnpm test`; no side_effect / horizon emitted.
+    expect(accepted.signature_precision).toBe("mistake_exact");
+    expect(accepted.side_effect).toBe("read");
+    expect(accepted.horizon).toBe("durable");
   });
 
   test("garbage-not-json.txt is a suspect run (not_json) with nothing applied", () => {
@@ -378,6 +385,409 @@ describe("validator table (§5.6)", () => {
   test("relevant_tools are normalized to canonical families", () => {
     const result = run([fact({ relevant_tools: ["Bash", "mcp:github/x", "bash"] as never })]);
     expect(result.accepted[0]?.relevant_tools).toEqual(["bash", "mcp"]);
+  });
+});
+
+describe("signature precision, side_effect and horizon (0.6.0-rc.2 §2)", () => {
+  const cmd = (pattern: string, side_effect?: TriggerSignature["side_effect"]): TriggerSignature => ({
+    tool: "bash",
+    target: "command",
+    pattern_kind: "cmd",
+    pattern,
+    ...(side_effect === undefined ? {} : { side_effect }),
+  });
+
+  // Two pushes in one turn; only the second is cited, so the pattern also covers a legitimate call.
+  const pushLines: LedgerLine[] = [
+    promptLine("deploy the service", { seq: 5001, turn_key: "p50" }),
+    toolOkLine("git push origin main", { seq: 5002, turn_key: "p50", program_token: "git push" }),
+    toolOkLine("git push origin release", { seq: 5003, turn_key: "p50", program_token: "git push" }),
+    assistantLine("Pushed both branches.", { seq: 5004, turn_key: "p50" }),
+  ];
+  const pushFact = (overrides: Partial<ExtractionFact> = {}) =>
+    fact({
+      summary: "Push release builds from the release branch only; main is deployed by CI.",
+      details: "A push to main triggers the production deploy.",
+      trigger_signature: cmd("git push origin"),
+      evidence_refs: ["e5003"],
+      knowledge_kind: "correction",
+      aliases: ["push"],
+      ...overrides,
+    });
+
+  // The same command fails, is fixed by an environment step and succeeds: the pattern names the operation.
+  const sameCommandLines: LedgerLine[] = [
+    promptLine("run the tests", { seq: 3001, turn_key: "p3" }),
+    toolFailLine("npm test", "Error: Cannot find module 'vitest'", { seq: 3002, turn_key: "p3", program_token: "pm test", failure_class: "exit_1" }),
+    toolOkLine("npm install", { seq: 3003, turn_key: "p3", program_token: "pm install" }),
+    toolOkLine("npm test", { seq: 3004, turn_key: "p3", program_token: "pm test", resolution_of: "bash|exit_1|pm test" }),
+  ];
+
+  // A silent mistake (pushed to the wrong remote), corrected by the user; the pattern names the wrong token only.
+  const wrongRemoteLines: LedgerLine[] = [
+    promptLine("아니, upstream 말고 origin 으로 push 해", { seq: 5101, turn_key: "p51", correction: 1 }),
+    toolOkLine("git push upstream main", { seq: 5102, turn_key: "p51", program_token: "git push" }),
+    toolOkLine("git push origin main", { seq: 5103, turn_key: "p51", program_token: "git push" }),
+    assistantLine("Pushed to origin.", { seq: 5104, turn_key: "p51" }),
+  ];
+  const wrongRemoteFact = (overrides: Partial<ExtractionFact> = {}) =>
+    fact({
+      summary: "Push to origin; upstream is the read-only mirror and a push there is silently ignored by CI.",
+      details: "The upstream remote is a mirror.",
+      trigger_signature: cmd("git push upstream", "write"),
+      evidence_refs: ["e5101", "e5102"],
+      knowledge_kind: "correction",
+      aliases: ["push", "remote"],
+      ...overrides,
+    });
+
+  test("noun: the signature also hits a tool_ok line the fact does not cite", () => {
+    const result = run([pushFact()], descriptorFor(pushLines), seqMapOf(pushLines));
+    expect(result.accepted).toHaveLength(1);
+    expect(result.accepted[0]?.signature_precision).toBe("noun");
+    // Citing both pushes makes every hit a cited, non-resolving line: nothing left to prove the pattern is a noun.
+    const both = run([pushFact({ evidence_refs: ["e5002", "e5003"] })], descriptorFor(pushLines), seqMapOf(pushLines));
+    expect(both.accepted[0]?.signature_precision).toBe("mistake_exact");
+  });
+
+  test("noun: the signature hits a cited tool_ok line that resolved a failure (same program, so V12 does not reject)", () => {
+    const result = run(
+      [fact({ summary: "Run npm install before npm test after pulling; a missing module fails the suite.", evidence_refs: ["e3002", "e3004"] })],
+      descriptorFor(sameCommandLines),
+      seqMapOf(sameCommandLines)
+    );
+    expect(result.accepted).toHaveLength(1);
+    expect(result.accepted[0]?.relabels).toEqual([]);
+    expect(result.accepted[0]?.signature_precision).toBe("noun");
+  });
+
+  test("mistake_exact: the only hit is the cited mistaken tool_ok; side_effect and horizon pass through", () => {
+    const result = run([wrongRemoteFact({ horizon: "task" })], descriptorFor(wrongRemoteLines), seqMapOf(wrongRemoteLines));
+    expect(result.accepted).toHaveLength(1);
+    const accepted = result.accepted[0]!;
+    expect(accepted.signature_precision).toBe("mistake_exact");
+    expect(accepted.side_effect).toBe("write");
+    expect(accepted.horizon).toBe("task");
+    // The stored signature object is untouched beyond tool normalization: side_effect stays on it.
+    expect(accepted.trigger_signature).toEqual({ ...cmd("git push upstream", "write"), tool: "bash" });
+    expect(accepted.compiledSignature?.signature_key).toBe("bash|command|cmd|git push upstream");
+    // Widening the pattern to the operation turns the same fact into a noun (the corrected push matches too).
+    const widened = run([wrongRemoteFact({ trigger_signature: cmd("git push", "write") })], descriptorFor(wrongRemoteLines), seqMapOf(wrongRemoteLines));
+    expect(widened.accepted[0]?.signature_precision).toBe("noun");
+  });
+
+  test("mistake_exact when nothing hits; tool_fail lines never make a signature noun", () => {
+    expect(run([fact()]).accepted[0]?.signature_precision).toBe("mistake_exact");
+    const withUncitedFailure: LedgerLine[] = [
+      ...scopedLines,
+      toolFailLine("npm test", "Exit code 1\nnpm ERR! Missing script: \"test\"", { seq: 2010, turn_key: "p2", program_token: "pm test", failure_class: "exit_1" }),
+    ];
+    const result = run([fact()], descriptorFor(withUncitedFailure), seqMapOf(withUncitedFailure));
+    expect(result.accepted).toHaveLength(1);
+    expect(result.accepted[0]?.signature_precision).toBe("mistake_exact");
+  });
+
+  test("the hooks' pre-checks apply: the tool glob must cover the line and the first scope ref is a target too", () => {
+    const envLines: LedgerLine[] = [
+      promptLine("put the new setting into the env file", { seq: 5201, turn_key: "p52" }),
+      toolOkLine(".env", { seq: 5202, turn_key: "p52", tool: "read", shell_dialect: null, scope_refs: [".env"] }),
+      toolOkLine("(3 lines)", { seq: 5203, turn_key: "p52", tool: "edit", shell_dialect: null, scope_refs: [".env"] }),
+      toolOkLine("(1 line)", { seq: 5204, turn_key: "p52", tool: "edit", shell_dialect: null, scope_refs: ["src/config.ts"] }),
+    ];
+    const envFact = (refs: string[]) =>
+      fact({
+        summary: "Edit .env.example for new settings; .env is gitignored and the change never reaches the team.",
+        details: "The real env file is local only.",
+        trigger_signature: { tool: "edit", target: "path", pattern_kind: "glob", pattern: "**/.env" },
+        evidence_refs: refs,
+        knowledge_kind: "correction",
+        aliases: ["env file"],
+      });
+    const descriptor = descriptorFor(envLines);
+    const seqMap = seqMapOf(envLines);
+    // The cited edit of .env is the mistake; the read of .env is a hit on the path but `edit` does not cover `read`.
+    const cited = run([envFact(["e5203"])], descriptor, seqMap);
+    expect(cited.accepted).toHaveLength(1);
+    expect(cited.accepted[0]?.signature_precision).toBe("mistake_exact");
+    // Not citing the edit leaves an uncited edit of .env: matched through scope_refs[0], the input digest says nothing.
+    const uncited = run([envFact(["e5201"])], descriptor, seqMap);
+    expect(uncited.accepted[0]?.signature_precision).toBe("noun");
+    // A glob covering every tool does see the read.
+    const anyTool = run([{ ...envFact(["e5203"]), trigger_signature: { tool: "*", target: "path", pattern_kind: "glob", pattern: "**/.env" } }], descriptor, seqMap);
+    expect(anyTool.accepted[0]?.signature_precision).toBe("noun");
+  });
+
+  test("signaturePrecision is exported for callers that hold a compiled signature", () => {
+    const compiled = run([fact()]).accepted[0]!.compiledSignature!;
+    expect(signaturePrecision(compiled, ["e2002", "e2004"], scopedSeqMap)).toBe("mistake_exact");
+    expect(signaturePrecision(compiled, [], seqMapOf(sameCommandLines))).toBe("noun");
+    expect(signaturePrecision(compiled, ["e3004"], seqMapOf(sameCommandLines))).toBe("noun");
+    expect(signaturePrecision(compiled, ["e3004"], seqMapOf(sameCommandLines.filter((line) => line.seq !== 3004)))).toBe("mistake_exact");
+  });
+
+  test("null precision and read/durable defaults without a signature, including one V10 dropped", () => {
+    const noSig = run([fact({ trigger_signature: null, lifecycle_triggers: ["before_model"], scope_glob: "src/**" })]);
+    expect(noSig.accepted[0]).toMatchObject({ signature_precision: null, side_effect: "read", horizon: "durable" });
+    const dropped = run([fact({ trigger_signature: cmd("npm", "write"), lifecycle_triggers: ["before_tool", "before_model"], scope_glob: "src/**" })]);
+    expect(dropped.accepted[0]).toMatchObject({ trigger_signature: null, relabels: ["signature_dropped"], signature_precision: null, side_effect: "read" });
+    const taskNoSig = run([fact({ trigger_signature: null, lifecycle_triggers: ["before_model"], scope_glob: "src/**", horizon: "task" })]);
+    expect(taskNoSig.accepted[0]?.horizon).toBe("task");
+    // reinforce facts carry the fields too (the reconciler decides what to do with them).
+    const reinforce = run([fact({ action: "reinforce", target_memory_id: "mem-1", trigger_signature: cmd("npm test", "write"), horizon: "task" })]);
+    expect(reinforce.accepted[0]).toMatchObject({ action: "reinforce", signature_precision: "mistake_exact", side_effect: "write", horizon: "task" });
+  });
+
+  test("the JSON schema handed to the provider accepts side_effect / horizon as optional enums and nothing else", () => {
+    const at = (root: unknown, ...keys: string[]): unknown => keys.reduce<unknown>((node, key) => (node as Record<string, unknown> | undefined)?.[key], root);
+    const factSchema = at(EXTRACTION_SCHEMA, "properties", "facts", "items");
+    expect(at(factSchema, "properties", "horizon", "enum")).toEqual([...HORIZONS]);
+    expect(at(factSchema, "properties", "trigger_signature", "properties", "side_effect", "enum")).toEqual([...SIDE_EFFECTS]);
+    expect(at(factSchema, "required")).not.toContain("horizon");
+    expect(at(factSchema, "properties", "trigger_signature", "required")).not.toContain("side_effect");
+    expect(at(factSchema, "properties", "horizon", "enum")).not.toContain("forever");
+    expect(at(factSchema, "properties", "trigger_signature", "properties", "side_effect", "enum")).not.toContain("maybe");
+    // additionalProperties: false — the provider rejects a field outside the listed ones.
+    expect(at(factSchema, "additionalProperties")).toBe(false);
+    expect(at(factSchema, "properties", "trigger_signature", "additionalProperties")).toBe(false);
+  });
+
+  test("through validateRawExtraction a recorded output carrying the fields is accepted and never leaks an unknown value", () => {
+    const rawFor = (signature: Record<string, unknown>, horizon: unknown) =>
+      JSON.stringify({
+        episode_summary: "wrong remote",
+        nothing_to_learn: false,
+        facts: [{ ...wrongRemoteFact(), trigger_signature: signature, horizon }],
+      });
+    const input = { ...baseInput(descriptorFor(wrongRemoteLines), seqMapOf(wrongRemoteLines)) };
+    const known = validateRawExtraction({ ...input, raw: rawFor({ ...cmd("git push upstream"), side_effect: "write" }, "task") });
+    expect(known.suspect).toBe(false);
+    expect(known.accepted).toHaveLength(1);
+    // parseExtractionOutput copies both fields and the validator passes them through unchanged.
+    expect(known.accepted[0]!.side_effect).toBe("write");
+    expect(known.accepted[0]!.horizon).toBe("task");
+    expect(known.accepted[0]?.signature_precision).toBe("mistake_exact");
+    // An unknown enum value is a V1 schema reject of that fact, never a silently normalized default.
+    const unknown = validateRawExtraction({ ...input, raw: rawFor({ ...cmd("git push upstream"), side_effect: "maybe" }, "forever") });
+    expect(unknown.suspect).toBe(false);
+    expect(unknown.accepted).toEqual([]);
+    expect(unknown.outcomes).toHaveLength(1);
+    expect(unknown.outcomes[0]).toMatchObject({ ordinal: 0, outcome: "rejected", rejection: "schema", detail: expect.stringContaining("side_effect") });
+  });
+});
+
+describe("signature precision is judged over every line of the episode, not only the rendered ones (review V1)", () => {
+  const write = (pattern: string): TriggerSignature => ({ tool: "bash", target: "command", pattern_kind: "cmd", pattern, side_effect: "write" });
+
+  // A long turn: a legitimate push early, dozens of routine reads, a failure fixed by switching managers and a silent
+  // push to the wrong remote late. With a full memory list the 24k cap drops the oldest routine lines — the early push
+  // first, i.e. exactly the sibling that proves `git push` names the operation and not the mistake.
+  const longLines: LedgerLine[] = [
+    promptLine("ship the feature branch and run the suite", { seq: 6001, turn_key: "p60" }),
+    toolOkLine("git push origin feature", { seq: 6002, turn_key: "p60", program_token: "git push" }),
+    ...Array.from({ length: 57 }, (_, i) =>
+      toolOkLine(`cat src/module-${String(i)}.ts ${"x".repeat(300)}`, { seq: 6010 + i, turn_key: "p60", scope_refs: [`src/module-${String(i)}.ts`], program_token: "cat", output_head: "y".repeat(150) })
+    ),
+    toolFailLine("npm test", `Exit code 1\n${'npm ERR! Missing script: "test"\n'.repeat(8)}`, { seq: 6100, turn_key: "p60", program_token: "pm test", failure_class: "exit_1" }),
+    toolOkLine("pnpm test", { seq: 6101, turn_key: "p60", program_token: "pm test", resolution_of: "bash|exit_1|pm test", output_head: "Test Files 3 passed" }),
+    toolOkLine("git push upstream main", { seq: 6102, turn_key: "p60", program_token: "git push" }),
+    assistantLine("Pushed and the tests pass.", { seq: 6103, turn_key: "p60" }),
+  ];
+  const memories: PromptMemory[] = Array.from({ length: 40 }, (_, i) => ({
+    id: `mem-${String(i)}`,
+    type: "pitfall",
+    status: "active",
+    authority: "auto",
+    scopeGlob: "**/*",
+    signatureKey: `bash|command|cmd|tool-${String(i)} run`,
+    summary: `Memory ${String(i)}: ${"m".repeat(190)}`,
+  }));
+  const descriptor = descriptorFor(longLines);
+  const built = buildExtractionPrompt({ descriptor, lines: longLines, existingMemories: memories });
+  const every = eventIdMap(longLines);
+  const refOf = (seq: number): string => [...every.entries()].find(([, line]) => line.seq === seq)![0];
+  const siblingRef = refOf(6002);
+  const failureRef = refOf(6100);
+  const latePushRef = refOf(6102);
+  const latePush = (overrides: Partial<ExtractionFact> = {}) =>
+    fact({
+      summary: "Push to origin only; a push to upstream is silently ignored by CI, which deploys from origin.",
+      details: "The upstream remote is a read-only mirror.",
+      trigger_signature: write("git push"),
+      evidence_refs: [latePushRef, failureRef],
+      knowledge_kind: "failure_resolution",
+      aliases: ["push", "remote"],
+      ...overrides,
+    });
+
+  test("the cap dropped the early sibling and kept the prompt, the failure and the late push citable", () => {
+    expect(built.droppedLines).toBeGreaterThan(0);
+    expect(built.seqMap.has(siblingRef)).toBe(false);
+    const sibling = every.get(siblingRef);
+    expect(sibling?.kind === "tool_ok" ? sibling.input_digest : null).toBe("git push origin feature");
+    expect(built.seqMap.has(refOf(6001))).toBe(true);
+    expect(built.seqMap.has(failureRef)).toBe(true);
+    expect(built.seqMap.has(latePushRef)).toBe(true);
+    expect(every.size).toBe(longLines.length);
+  });
+
+  test("the rendered map alone cannot see the dropped sibling: `git push` comes out mistake_exact (the fresh-path bug)", () => {
+    const rendered = run([latePush()], descriptor, built.seqMap);
+    expect(rendered.accepted).toHaveLength(1);
+    expect(rendered.accepted[0]?.signature_precision).toBe("mistake_exact");
+  });
+
+  test("precisionLines over every event id: the dropped sibling makes `git push` a noun; fresh and cached inputs agree; the exact token stays mistake_exact", () => {
+    const fresh = run([latePush()], descriptor, built.seqMap, { precisionLines: every });
+    expect(fresh.accepted).toHaveLength(1);
+    expect(fresh.accepted[0]).toMatchObject({ signature_precision: "noun", side_effect: "write" });
+    // The raw-cache path resolves refs over every event id and judges precision over the same map.
+    const cached = run([latePush()], descriptor, every, { precisionLines: every });
+    expect(cached.accepted[0]?.signature_precision).toBe("noun");
+    expect(cached.accepted[0]?.semanticKey).toBe(fresh.accepted[0]?.semanticKey);
+    // The exact token hits nothing but the cited mistaken call, dropped sibling or not.
+    const exact = run([latePush({ trigger_signature: write("git push upstream") })], descriptor, built.seqMap, { precisionLines: every });
+    expect(exact.accepted[0]?.signature_precision).toBe("mistake_exact");
+    // The exported function makes the same call over either map.
+    const compiled = fresh.accepted[0]!.compiledSignature!;
+    expect(signaturePrecision(compiled, [latePushRef, failureRef], built.seqMap)).toBe("mistake_exact");
+    expect(signaturePrecision(compiled, [latePushRef, failureRef], every)).toBe("noun");
+    // The citable checks keep the rendered map: a ref the render dropped is still unknown to V2.
+    const citesDropped = run([latePush({ evidence_refs: [siblingRef, failureRef] })], descriptor, built.seqMap, { precisionLines: every });
+    expect(citesDropped.accepted).toEqual([]);
+    expect(citesDropped.outcomes[0]).toMatchObject({ rejection: "evidence_ref", detail: `unknown refs: ${siblingRef}` });
+  });
+});
+
+describe("signature precision for correction_for episodes (union mode; review V2)", () => {
+  const write = (pattern: string): TriggerSignature => ({ tool: "bash", target: "command", pattern_kind: "cmd", pattern, side_effect: "write" });
+  const toolLines = (lines: readonly LedgerLine[]): LedgerLine[] => lines.filter((line) => line.kind === "tool_ok" || line.kind === "tool_fail");
+
+  // The corrected turn p50 pushed to both remotes; the user's next prompt corrects it.
+  const correctedLines: LedgerLine[] = [
+    promptLine("push the branch", { seq: 5001, turn_key: "p50" }),
+    toolOkLine("git push origin main", { seq: 5002, turn_key: "p50", program_token: "git push" }),
+    toolOkLine("git push upstream main", { seq: 5003, turn_key: "p50", program_token: "git push" }),
+    assistantLine("Pushed to origin and upstream.", { seq: 5004, turn_key: "p50" }),
+  ];
+  const corrected = descriptorFor(correctedLines);
+  const correctionForEpisode = { scope_refs: corrected.scope_refs, tools: corrected.tools };
+  // p51: the correcting turn is a prompt only — the mistaken call and its legitimate sibling live in p50.
+  const promptOnly: LedgerLine[] = [
+    promptLine("아니, upstream 말고 origin 으로만 push 해", { seq: 5101, turn_key: "p51", correction: 1 }),
+    assistantLine("Understood: pushes go to origin only.", { seq: 5102, turn_key: "p51" }),
+  ];
+  const promptOnlyDescriptor = descriptorFor(promptOnly, { correction_for: corrected.id });
+  const promptOnlySeqMap = seqMapOf(promptOnly);
+  // Variant B: the correcting turn also runs the fix.
+  const withFix: LedgerLine[] = [
+    promptLine("아니, upstream 말고 origin 으로만 push 해", { seq: 5201, turn_key: "p52", correction: 1 }),
+    toolOkLine("git push origin main", { seq: 5202, turn_key: "p52", program_token: "git push" }),
+    assistantLine("Pushed to origin.", { seq: 5203, turn_key: "p52" }),
+  ];
+  const withFixSeqMap = seqMapOf(withFix);
+  const citesFix = { evidence_refs: ["e5201", "e5202"] };
+  const remoteFact = (pattern: string, overrides: Partial<ExtractionFact> = {}) =>
+    fact({
+      summary: "Push to origin only; upstream is a read-only mirror and a push there is ignored by CI.",
+      details: "The upstream remote is a mirror.",
+      trigger_signature: write(pattern),
+      evidence_refs: ["e5101"],
+      knowledge_kind: "correction",
+      aliases: ["push", "remote"],
+      ...overrides,
+    });
+
+  test("the layout is union mode: the corrected turn's tool set admits the uncited signature that a tool-less turn would reject", () => {
+    expect(run([remoteFact("git push")], promptOnlyDescriptor, promptOnlySeqMap, { correctionForEpisode }).accepted).toHaveLength(1);
+    expect(run([remoteFact("git push")], descriptorFor(promptOnly), promptOnlySeqMap).outcomes[0]).toMatchObject({ rejection: "signature_tool" });
+  });
+
+  test("rule 2: hits on two distinct calls of the corrected turn make the operation-level pattern a noun; the exact token stays mistake_exact", () => {
+    const extra = { correctionForEpisode, contextLines: toolLines(correctedLines) };
+    const operation = run([remoteFact("git push")], promptOnlyDescriptor, promptOnlySeqMap, extra);
+    expect(operation.accepted).toHaveLength(1);
+    expect(operation.accepted[0]).toMatchObject({ signature_precision: "noun", side_effect: "write" });
+    const exact = run([remoteFact("git push upstream")], promptOnlyDescriptor, promptOnlySeqMap, extra);
+    expect(exact.accepted).toHaveLength(1);
+    expect(exact.accepted[0]?.signature_precision).toBe("mistake_exact");
+    // Without the corrected turn's lines nothing is tested anywhere: the vacuous mistake_exact, the design's letter (s01 / s11).
+    const vacuous = run([remoteFact("git push")], promptOnlyDescriptor, promptOnlySeqMap, { correctionForEpisode });
+    expect(vacuous.accepted[0]?.signature_precision).toBe("mistake_exact");
+  });
+
+  test("rule 2 counts distinct calls: the mistaken call repeated is one hit, and tool_fail lines never count", () => {
+    const repeated: LedgerLine[] = [
+      promptLine("push the branch", { seq: 5301, turn_key: "p53" }),
+      toolOkLine("git push upstream main", { seq: 5302, turn_key: "p53", program_token: "git push" }),
+      toolOkLine("git push upstream main", { seq: 5303, turn_key: "p53", program_token: "git push" }),
+    ];
+    const once = run([remoteFact("git push")], promptOnlyDescriptor, promptOnlySeqMap, { correctionForEpisode, contextLines: toolLines(repeated) });
+    expect(once.accepted[0]?.signature_precision).toBe("mistake_exact");
+    const failedSibling: LedgerLine[] = [
+      promptLine("push the branch", { seq: 5401, turn_key: "p54" }),
+      toolFailLine("git push origin main", "error: failed to push some refs", { seq: 5402, turn_key: "p54", program_token: "git push", failure_class: "exit_1" }),
+      toolOkLine("git push upstream main", { seq: 5403, turn_key: "p54", program_token: "git push" }),
+    ];
+    const failed = run([remoteFact("git push")], promptOnlyDescriptor, promptOnlySeqMap, { correctionForEpisode, contextLines: toolLines(failedSibling) });
+    expect(failed.accepted[0]?.signature_precision).toBe("mistake_exact");
+    // A line without a digest is identified by its first scope ref: two edits of different files are two calls.
+    const edits: LedgerLine[] = [
+      toolOkLine("", { seq: 5501, turn_key: "p55", tool: "edit", shell_dialect: null, scope_refs: ["config/.env"] }),
+      toolOkLine("", { seq: 5502, turn_key: "p55", tool: "edit", shell_dialect: null, scope_refs: ["deploy/.env"] }),
+    ];
+    const envFact = remoteFact("git push", { trigger_signature: { tool: "edit", target: "path", pattern_kind: "glob", pattern: "**/.env" } });
+    const editUnion = { scope_refs: ["config/.env", "deploy/.env"], tools: ["edit"] };
+    expect(run([envFact], promptOnlyDescriptor, promptOnlySeqMap, { correctionForEpisode: editUnion, contextLines: edits }).accepted[0]?.signature_precision).toBe("noun");
+    expect(run([envFact], promptOnlyDescriptor, promptOnlySeqMap, { correctionForEpisode: editUnion, contextLines: edits.slice(0, 1) }).accepted[0]?.signature_precision).toBe("mistake_exact");
+  });
+
+  test("rule 2 skips subagent lines of the corrected turn, as the citable map skips them for rule 1", () => {
+    // p56: the main agent pushed to upstream (the mistake) and a subagent pushed to origin. eventIdMap never carries a
+    // subagent's call, so rule 1 could not see it; rule 2 ignores it too, or the same line were a sibling here and
+    // invisible there.
+    const mainPush = toolOkLine("git push upstream main", { seq: 5602, turn_key: "p56", program_token: "git push" });
+    const subagentSibling = toolOkLine("git push origin main", { seq: 5603, turn_key: "p56", program_token: "git push", agent_id: "sub-1" });
+    const withSubagent = run([remoteFact("git push")], promptOnlyDescriptor, promptOnlySeqMap, { correctionForEpisode, contextLines: [mainPush, subagentSibling] });
+    expect(withSubagent.accepted).toHaveLength(1);
+    expect(withSubagent.accepted[0]?.signature_precision).toBe("mistake_exact");
+    // The same sibling run by the main agent is the second distinct hit: noun, as before.
+    const mainSibling = toolOkLine("git push origin main", { seq: 5603, turn_key: "p56", program_token: "git push" });
+    const withMainSibling = run([remoteFact("git push")], promptOnlyDescriptor, promptOnlySeqMap, { correctionForEpisode, contextLines: [mainPush, mainSibling] });
+    expect(withMainSibling.accepted[0]?.signature_precision).toBe("noun");
+    // An empty agent_id marks no subagent (the citable map keeps such lines as well).
+    const emptyAgent = toolOkLine("git push origin main", { seq: 5603, turn_key: "p56", program_token: "git push", agent_id: "" });
+    expect(run([remoteFact("git push")], promptOnlyDescriptor, promptOnlySeqMap, { correctionForEpisode, contextLines: [mainPush, emptyAgent] }).accepted[0]?.signature_precision).toBe("noun");
+  });
+
+  test("rule 1 in union mode: a cited tool_ok of the correcting turn is the fix, so a hit on it is a noun (variant B)", () => {
+    const withFixDescriptor = descriptorFor(withFix, { correction_for: corrected.id });
+    const operation = run([remoteFact("git push", citesFix)], withFixDescriptor, withFixSeqMap, { correctionForEpisode });
+    expect(operation.accepted).toHaveLength(1);
+    expect(operation.accepted[0]?.signature_precision).toBe("noun");
+    const exact = run([remoteFact("git push upstream", citesFix)], withFixDescriptor, withFixSeqMap, { correctionForEpisode });
+    expect(exact.accepted).toHaveLength(1);
+    expect(exact.accepted[0]?.signature_precision).toBe("mistake_exact");
+    // With the corrected turn's lines as well both rules agree.
+    const both = run([remoteFact("git push", citesFix)], withFixDescriptor, withFixSeqMap, { correctionForEpisode, contextLines: toolLines(correctedLines) });
+    expect(both.accepted[0]?.signature_precision).toBe("noun");
+    expect(run([remoteFact("git push upstream", citesFix)], withFixDescriptor, withFixSeqMap, { correctionForEpisode, contextLines: toolLines(correctedLines) }).accepted[0]?.signature_precision).toBe("mistake_exact");
+  });
+
+  test("control: outside union mode the same facts keep today's labels, and the exported function takes the two options", () => {
+    // The same turn without correction_for is an ordinary turn: the cited push is the mistake the fact describes and is exempt.
+    const plain = descriptorFor(withFix);
+    const operation = run([remoteFact("git push", citesFix)], plain, withFixSeqMap);
+    expect(operation.accepted).toHaveLength(1);
+    expect(operation.accepted[0]?.signature_precision).toBe("mistake_exact");
+    expect(run([remoteFact("git push upstream", citesFix)], plain, withFixSeqMap).accepted[0]?.signature_precision).toBe("mistake_exact");
+    // An uncited push of the turn still makes the operation a noun, as before.
+    expect(run([remoteFact("git push", { evidence_refs: ["e5201"] })], plain, withFixSeqMap).accepted[0]?.signature_precision).toBe("noun");
+    const compiled = operation.accepted[0]!.compiledSignature!;
+    expect(signaturePrecision(compiled, ["e5201", "e5202"], withFixSeqMap)).toBe("mistake_exact");
+    expect(signaturePrecision(compiled, ["e5201", "e5202"], withFixSeqMap, { union: true })).toBe("noun");
+    expect(signaturePrecision(compiled, ["e5101"], promptOnlySeqMap, { contextLines: toolLines(correctedLines) })).toBe("noun");
+    expect(signaturePrecision(compiled, ["e5101"], promptOnlySeqMap, { contextLines: toolLines(correctedLines).slice(0, 1) })).toBe("mistake_exact");
+    expect(signaturePrecision(compiled, ["e5101"], promptOnlySeqMap, { union: true, contextLines: null })).toBe("mistake_exact");
   });
 });
 

@@ -283,6 +283,9 @@ export function parseTriggerSignature(serialized: string | null): TriggerSignatu
   if (record.negate === true) {
     signature.negate = true;
   }
+  if (record.side_effect === "read" || record.side_effect === "write") {
+    signature.side_effect = record.side_effect;
+  }
 
   return signature;
 }

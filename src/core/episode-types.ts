@@ -81,12 +81,28 @@ export interface EpisodeDescriptor {
   last_assistant_message: string | null;
 }
 
+/**
+ * A bare correction cue ("A 말고 B", "never" inside a new instruction) weighs this much; the full
+ * EVIDENCE_WEIGHTS.correction needs the episode to correct a previous turn that ran tools (design §5).
+ */
+export const BARE_CORRECTION_WEIGHT = 1;
+
+export interface EvidenceWeightOptions {
+  /**
+   * True when the episode corrects a previous turn that had at least one tool call (`correction_for` set and the
+   * corrected episode carries a tool line). Only then does the correction flag add EVIDENCE_WEIGHTS.correction;
+   * otherwise the flag is a bare cue worth BARE_CORRECTION_WEIGHT (0.6.0-rc.2, design §5).
+   */
+  correctionReferencesPreviousTurn?: boolean;
+}
+
 export function computeEvidenceWeight(
   flags: EpisodeFlags,
-  failures: readonly Pick<FailureSignatureEntry, "resolved_seq">[]
+  failures: readonly Pick<FailureSignatureEntry, "resolved_seq">[],
+  options: EvidenceWeightOptions = {}
 ): number {
   let weight = 0;
-  if (flags.correction === 1) weight += EVIDENCE_WEIGHTS.correction;
+  if (flags.correction === 1) weight += options.correctionReferencesPreviousTurn === true ? EVIDENCE_WEIGHTS.correction : BARE_CORRECTION_WEIGHT;
   if (flags.remember === 1) weight += EVIDENCE_WEIGHTS.remember;
   for (const failure of failures) {
     weight += failure.resolved_seq === null ? EVIDENCE_WEIGHTS.failure : EVIDENCE_WEIGHTS.resolution;

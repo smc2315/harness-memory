@@ -28,6 +28,10 @@ import {
   type PatternKind,
   type SignatureTarget,
   type TriggerSignature,
+  HORIZONS,
+  SIDE_EFFECTS,
+  type Horizon,
+  type SideEffect,
 } from "../../core/vocabulary";
 
 export { EXTRACTION_LIMITS, EXTRACTION_SCHEMA, EXTRACTION_SCHEMA_JSON };
@@ -108,6 +112,10 @@ function parseSignature(value: unknown): { ok: true; signature: TriggerSignature
   if (value.negate !== undefined && typeof value.negate !== "boolean") {
     return { ok: false, detail: "trigger_signature.negate must be boolean" };
   }
+  // 0.6.0-rc.2: optional side_effect (read | write); an unknown value rejects the fact like the other enum fields.
+  if (value.side_effect !== undefined && value.side_effect !== null && !(SIDE_EFFECTS as readonly string[]).includes(value.side_effect as string)) {
+    return { ok: false, detail: `trigger_signature.side_effect must be one of ${SIDE_EFFECTS.join("|")}` };
+  }
   const signature: TriggerSignature = {
     tool: tool.trim(),
     target: target as SignatureTarget,
@@ -115,6 +123,7 @@ function parseSignature(value: unknown): { ok: true; signature: TriggerSignature
     pattern,
   };
   if (value.negate === true) signature.negate = true;
+  if (typeof value.side_effect === "string") signature.side_effect = value.side_effect as SideEffect;
   return { ok: true, signature };
 }
 
@@ -155,6 +164,11 @@ export function validateFactShape(value: unknown): FactShapeResult {
   if (triggers.length === 0) return { ok: false, detail: "lifecycle_triggers must contain at least one known trigger" };
   const signature = parseSignature(value.trigger_signature);
   if (!signature.ok) return { ok: false, detail: signature.detail };
+  // 0.6.0-rc.2: optional horizon (durable | task); an unknown value rejects the fact.
+  if (value.horizon !== undefined && value.horizon !== null && !(HORIZONS as readonly string[]).includes(value.horizon as string)) {
+    return { ok: false, detail: `horizon must be one of ${HORIZONS.join("|")}` };
+  }
+  const horizon: Horizon | undefined = typeof value.horizon === "string" ? (value.horizon as Horizon) : undefined;
 
   const targetMemoryId =
     typeof value.target_memory_id === "string" && value.target_memory_id.trim().length > 0 ? value.target_memory_id.trim() : null;
@@ -190,6 +204,7 @@ export function validateFactShape(value: unknown): FactShapeResult {
     knowledge_kind: knowledgeKind as ExtractedKnowledgeKind,
     rationale: clipText(typeof value.rationale === "string" ? value.rationale.trim() : "", RATIONALE_MAX),
     aliases,
+    ...(horizon === undefined ? {} : { horizon }),
   };
   return { ok: true, fact };
 }

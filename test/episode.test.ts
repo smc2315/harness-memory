@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { EVIDENCE_WEIGHT_CAP } from "../src/core/episode-types";
+import { BARE_CORRECTION_WEIGHT, EVIDENCE_WEIGHT_CAP, EVIDENCE_WEIGHTS, computeEvidenceWeight } from "../src/core/episode-types";
 import { episodeId } from "../src/core/ids";
 import type { LedgerLine } from "../src/core/ledger-types";
 import {
@@ -40,11 +40,12 @@ function build(lines: readonly LedgerLine[], overrides: Partial<BuildEpisodeInpu
 }
 
 describe("buildEpisodeDescriptor", () => {
-  test("s01: a turn with only a correction prompt has flags.correction=1 and evidence_weight 2 (§13.2 j)", () => {
+  test("s01: a turn with only a correction prompt has flags.correction=1 and evidence_weight 1 — a bare cue, no corrected turn (rc.2 §5)", () => {
     const lines = turnLines("s01-correction-only.jsonl", "p1");
     const descriptor = build(lines);
     expect(descriptor.flags).toEqual({ correction: 1 });
-    expect(descriptor.evidence_weight).toBe(2);
+    expect(descriptor.evidence_weight).toBe(BARE_CORRECTION_WEIGHT);
+    expect(descriptor.evidence_weight).toBe(1);
     expect(descriptor.tools).toEqual([]);
     expect(descriptor.scope_refs).toEqual([]);
     expect(descriptor.failure_signatures).toEqual([]);
@@ -81,7 +82,7 @@ describe("buildEpisodeDescriptor", () => {
     expect(descriptor.evidence_weight).toBe(2);
   });
 
-  test("an unresolved failure weighs 1; correction + remember + three resolutions are capped at 10", () => {
+  test("an unresolved failure weighs 1; bare correction + remember + three resolutions are capped at 10", () => {
     const bare = build([promptLine("run it", { seq: 1 }), toolFailLine("npm test", "Exit code 1", { seq: 2, program_token: "pm test", failure_class: "exit_1" })]);
     expect(bare.flags).toEqual({ failure: 1 });
     expect(bare.evidence_weight).toBe(1);
@@ -99,10 +100,10 @@ describe("buildEpisodeDescriptor", () => {
     expect(heavy.evidence_weight).toBe(EVIDENCE_WEIGHT_CAP);
   });
 
-  test("flags are re-derived from the text when the prompt line flags are 0", () => {
+  test("flags are re-derived from the text when the prompt line flags are 0; the regex alone is a bare cue (1)", () => {
     const descriptor = build([promptLine("don't do that, use pnpm", { seq: 1 })]);
     expect(descriptor.flags.correction).toBe(1);
-    expect(descriptor.evidence_weight).toBe(2);
+    expect(descriptor.evidence_weight).toBe(1);
   });
 
   test("a decision marker in the last assistant message makes a weight-0 turn eligible", () => {
@@ -117,7 +118,7 @@ describe("buildEpisodeDescriptor", () => {
     expect(descriptor.evidence_weight).toBe(0);
     expect(descriptor.flags).toEqual({});
     expect(isEligibleForExtraction(descriptor)).toEqual({ eligible: false, reason: "no_signal" });
-    expect(isEligibleForExtraction({ host: "import", evidence_weight: 0, flags: {} })).toEqual({ eligible: true, reason: "import" });
+    expect(isEligibleForExtraction({ host: "import", evidence_weight: 0, flags: {}, close_reason: "import", event_count: 1 })).toEqual({ eligible: true, reason: "import" });
   });
 
   test("subagent lines are excluded unless includeAgentLines is set", () => {
@@ -131,7 +132,7 @@ describe("buildEpisodeDescriptor", () => {
     expect(included.event_count).toBe(3);
   });
 
-  test("correction_for carries the corrected episode's tool lines as uncitable context", () => {
+  test("correction_for carries the corrected episode's tool lines as uncitable context, and only then does the correction weigh 2", () => {
     const corrected = turnLines("s02-fail-then-resolve.jsonl", "p2");
     const lines = turnLines("s01-correction-only.jsonl", "p1");
     const descriptor = build(lines, { correctionFor: "episode-prev", contextLines: corrected });
@@ -140,9 +141,20 @@ describe("buildEpisodeDescriptor", () => {
     expect(descriptor.context_ref).toContain("(prev) tool_ok bash(bash): pnpm test — resolves bash|exit_1|pm test");
     expect(descriptor.context_ref).not.toContain("e2002");
     expect(descriptor.flags.correction).toBe(1);
+    // rc.2 §5: a correction of a previous turn that ran tools is the full correction signal.
+    expect(descriptor.evidence_weight).toBe(EVIDENCE_WEIGHTS.correction);
 
     expect(build(lines, { contextLines: corrected }).context_ref).toBeNull();
-    expect(build(lines, { correctionFor: "episode-prev", contextRef: "pre-rendered" }).context_ref).toBe("pre-rendered");
+    // Context without correction_for is not a correction of that turn: bare cue.
+    expect(build(lines, { contextLines: corrected }).evidence_weight).toBe(1);
+    // A pre-rendered context (import / replay) stands for the corrected turn's tool lines.
+    const prerendered = build(lines, { correctionFor: "episode-prev", contextRef: "pre-rendered" });
+    expect(prerendered.context_ref).toBe("pre-rendered");
+    expect(prerendered.evidence_weight).toBe(2);
+    // correction_for whose corrected turn had no tool line (or whose lines are unknown) stays a bare cue.
+    expect(build(lines, { correctionFor: "episode-prev", contextLines: [promptLine("earlier", { seq: 1 }), assistantLine("talk only", { seq: 2 })] }).evidence_weight).toBe(1);
+    expect(build(lines, { correctionFor: "episode-prev", contextLines: null }).evidence_weight).toBe(1);
+    expect(build(lines, { correctionFor: "episode-prev" }).evidence_weight).toBe(1);
   });
 
   test("scope refs are unioned in first-appearance order and capped at 50", () => {
@@ -186,6 +198,72 @@ describe("buildEpisodeDescriptor", () => {
     });
     expect(descriptor.ledger_ref).toBe("import:docs/CLAUDE.md");
     expect(descriptor.close_reason).toBe("import");
+  });
+});
+
+describe("computeEvidenceWeight (rc.2 §5)", () => {
+  test("the correction flag adds 2 only when the correction references a tool-bearing previous turn, else 1", () => {
+    expect(computeEvidenceWeight({ correction: 1 }, [])).toBe(1);
+    expect(computeEvidenceWeight({ correction: 1 }, [], {})).toBe(1);
+    expect(computeEvidenceWeight({ correction: 1 }, [], { correctionReferencesPreviousTurn: false })).toBe(1);
+    expect(computeEvidenceWeight({ correction: 1 }, [], { correctionReferencesPreviousTurn: true })).toBe(2);
+    // The option only concerns the correction flag: remember and failures are unchanged.
+    expect(computeEvidenceWeight({ remember: 1 }, [{ resolved_seq: null }], { correctionReferencesPreviousTurn: true })).toBe(4);
+    expect(computeEvidenceWeight({ correction: 1, remember: 1 }, [{ resolved_seq: 5 }])).toBe(6);
+    expect(computeEvidenceWeight({ correction: 1, remember: 1 }, [{ resolved_seq: 5 }], { correctionReferencesPreviousTurn: true })).toBe(7);
+  });
+});
+
+describe("isEligibleForExtraction (§5.3, rc.2 §5 interrupted closes)", () => {
+  const corrected = turnLines("s02-fail-then-resolve.jsonl", "p2");
+
+  test("an interrupted close with the prompt plus at most one event is no_signal whatever its flags", () => {
+    const cueOnly = build([promptLine("no, don't do that", { seq: 1, correction: 1 })], { closeReason: "interrupted" });
+    expect(cueOnly.event_count).toBe(1);
+    expect(cueOnly.flags).toEqual({ correction: 1 });
+    expect(cueOnly.evidence_weight).toBe(1);
+    expect(isEligibleForExtraction(cueOnly)).toEqual({ eligible: false, reason: "no_signal" });
+
+    const promptAndFailure = build([promptLine("run the build", { seq: 1 }), toolFailLine("npm run build", "Exit code 1", { seq: 2, program_token: "pm build", failure_class: "exit_1" })], { closeReason: "interrupted" });
+    expect(promptAndFailure.event_count).toBe(2);
+    expect(promptAndFailure.evidence_weight).toBe(1);
+    expect(isEligibleForExtraction(promptAndFailure)).toEqual({ eligible: false, reason: "no_signal" });
+
+    // Even a full correction of a tool-bearing turn, or a remember cue, is noise when the user interrupted at once.
+    const fullCorrection = build([promptLine("use pnpm instead", { seq: 1, correction: 1, remember: 1 })], { closeReason: "interrupted", correctionFor: "episode-prev", contextLines: corrected });
+    expect(fullCorrection.evidence_weight).toBe(5);
+    expect(isEligibleForExtraction(fullCorrection)).toEqual({ eligible: false, reason: "no_signal" });
+    const decision = build([promptLine("which runner?", { seq: 1 }), assistantLine("We'll use vitest for all packages.", { seq: 2 })], { closeReason: "interrupted" });
+    expect(decision.flags).toEqual({ decision: 1 });
+    expect(isEligibleForExtraction(decision)).toEqual({ eligible: false, reason: "no_signal" });
+  });
+
+  test("an interrupted close with three or more events is judged as before", () => {
+    const lines = [
+      promptLine("run the build", { seq: 1 }),
+      toolFailLine("npm run build", "Exit code 1", { seq: 2, program_token: "pm build", failure_class: "exit_1" }),
+      assistantLine("Investigating the failure.", { seq: 3 }),
+    ];
+    const withFailure = build(lines, { closeReason: "interrupted" });
+    expect(withFailure.event_count).toBe(3);
+    expect(isEligibleForExtraction(withFailure)).toEqual({ eligible: true, reason: "evidence" });
+
+    const readOnly = build([promptLine("show me the config", { seq: 1 }), toolOkLine("cat package.json", { seq: 2 }), assistantLine("Here it is.", { seq: 3 })], { closeReason: "interrupted" });
+    expect(isEligibleForExtraction(readOnly)).toEqual({ eligible: false, reason: "no_signal" });
+    const decided = build([promptLine("which runner?", { seq: 1 }), toolOkLine("cat package.json", { seq: 2 }), assistantLine("We'll use vitest for all packages.", { seq: 3 })], { closeReason: "interrupted" });
+    expect(isEligibleForExtraction(decided)).toEqual({ eligible: true, reason: "decision" });
+  });
+
+  test("a stop (or any other close) with a single prompt line is unchanged: a bare cue is still evidence", () => {
+    const cueOnly = build([promptLine("no, don't do that", { seq: 1, correction: 1 })]);
+    expect(cueOnly.close_reason).toBe("stop");
+    expect(cueOnly.event_count).toBe(1);
+    expect(isEligibleForExtraction(cueOnly)).toEqual({ eligible: true, reason: "evidence" });
+    for (const closeReason of ["precompact", "session_end", "idle"] as const) {
+      expect(isEligibleForExtraction(build([promptLine("remember: seed first", { seq: 1, remember: 1 })], { closeReason }))).toEqual({ eligible: true, reason: "evidence" });
+    }
+    // Import episodes qualify whatever their shape.
+    expect(isEligibleForExtraction({ host: "import", evidence_weight: 0, flags: {}, close_reason: "interrupted", event_count: 1 })).toEqual({ eligible: true, reason: "import" });
   });
 });
 

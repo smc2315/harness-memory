@@ -4,11 +4,17 @@ import { toolGlobFamilies } from "../src/activation/tool-vocabulary";
 import { DEFAULT_CONFIG, type HarnessConfig } from "../src/core/config";
 import { PRE_TOOL_HOOKED_FAMILIES } from "../src/core/vocabulary";
 import {
+  ACTIVATION_MIN_EVIDENCE,
+  FULL_ACTIVATION_MIN_EVIDENCE,
+  KNOWLEDGE_TTL_DAYS,
+  SILENT_WRITE_MIN_EVIDENCE,
+  TASK_TTL_DAYS,
   addDays,
   baseTtlDays,
   decideTier,
   enforcementDefault,
   isReachableTrigger,
+  tierTtlDays,
   type DecideTierInput,
   type EnforcementDefaultInput,
 } from "../src/promotion/authority";
@@ -41,6 +47,11 @@ function auto(overrides: Partial<EnforcementDefaultInput> = {}): EnforcementDefa
     config,
     ...overrides,
   };
+}
+
+/** The 0.6.0-rc.2 §3 rule-1 row: a mistake_exact signature on a write into a shared system, learned from a correction with evidence 2. */
+function silentWrite(overrides: Partial<EnforcementDefaultInput> = {}): EnforcementDefaultInput {
+  return auto({ signaturePrecision: "mistake_exact", sideEffect: "write", horizon: "durable", evidenceScore: 2, ...overrides });
 }
 
 describe("enforcementDefault (§7.3)", () => {
@@ -76,8 +87,82 @@ describe("enforcementDefault (§7.3)", () => {
   });
 });
 
+describe("enforcementDefault: the silent-write birth (0.6.0-rc.2 design §3 rule 1)", () => {
+  test("the default config is soft_deny for a silent write and advise for the plain auto pitfall", () => {
+    expect(DEFAULT_CONFIG.before_tool.auto_enforcement_silent_write).toBe("soft_deny");
+    expect(DEFAULT_CONFIG.before_tool.auto_enforcement).toBe("advise");
+    expect(SILENT_WRITE_MIN_EVIDENCE).toBe(2);
+  });
+
+  test("positive: pitfall or policy, correction or failure_resolution, evidence ≥ 2, durable (or unknown) horizon", () => {
+    expect(enforcementDefault(silentWrite())).toBe("soft_deny");
+    expect(enforcementDefault(silentWrite({ type: "policy" }))).toBe("soft_deny");
+    expect(enforcementDefault(silentWrite({ knowledgeKind: "failure_resolution" }))).toBe("soft_deny");
+    expect(enforcementDefault(silentWrite({ evidenceScore: 3.5 }))).toBe("soft_deny");
+    // An auto policy's subtype is not part of the rule (subtypes belong to the human defaults).
+    expect(enforcementDefault(silentWrite({ type: "policy", policySubtype: "soft" }))).toBe("soft_deny");
+    // Horizon null / omitted = unknown = durable (it is the precision gate, not the horizon, that keeps pre-023 rows down).
+    expect(enforcementDefault(silentWrite({ horizon: null }))).toBe("soft_deny");
+    expect(enforcementDefault(silentWrite({ horizon: undefined }))).toBe("soft_deny");
+  });
+
+  test.each<[string, EnforcementDefaultInput]>([
+    ["noun-level signature", silentWrite({ signaturePrecision: "noun" })],
+    ["null precision (a row from before migration 023)", silentWrite({ signaturePrecision: null })],
+    ["precision not given", silentWrite({ signaturePrecision: undefined })],
+    ["read side effect", silentWrite({ sideEffect: "read" })],
+    ["null side effect", silentWrite({ sideEffect: null })],
+    ["side effect not given", silentWrite({ sideEffect: undefined })],
+    ["evidence 1", silentWrite({ evidenceScore: 1 })],
+    ["evidence just under 2", silentWrite({ evidenceScore: 1.9 })],
+    ["evidence not given (0)", silentWrite({ evidenceScore: undefined })],
+    ["task horizon", silentWrite({ horizon: "task" })],
+    ["convention kind", silentWrite({ knowledgeKind: "convention" })],
+    ["decision kind", silentWrite({ knowledgeKind: "decision" })],
+    ["null kind", silentWrite({ knowledgeKind: null })],
+    ["no signature", silentWrite({ hasSignature: false, specificityOk: false })],
+    ["signature failed V10", silentWrite({ specificityOk: false })],
+    ["workflow", silentWrite({ type: "workflow" })],
+    ["decision type", silentWrite({ type: "decision", knowledgeKind: "decision" })],
+    ["architecture_constraint", silentWrite({ type: "architecture_constraint" })],
+  ])("negative: %s → advise", (_label, input) => {
+    expect(enforcementDefault(input)).toBe("advise");
+  });
+
+  test("human rows keep the human defaults whatever the rc.2 facts say", () => {
+    const facts = { signaturePrecision: "mistake_exact", sideEffect: "write", horizon: "durable", evidenceScore: 5 } as const;
+    expect(enforcementDefault(human(facts))).toBe("confirm");
+    expect(enforcementDefault(human({ ...facts, policySubtype: "soft" }))).toBe("advise");
+    expect(enforcementDefault(human({ ...facts, type: "pitfall", policySubtype: null }))).toBe("advise");
+    expect(enforcementDefault(human({ ...facts, hasSignature: false, specificityOk: false }))).toBe("advise");
+    expect(enforcementDefault(human({ ...facts, policySubtype: null, knowledgeKind: "import", summary: "Never commit .env files." }))).toBe("confirm");
+    // The task-horizon gate belongs to the auto rules only.
+    expect(enforcementDefault(human({ horizon: "task" }))).toBe("confirm");
+  });
+
+  test("before_tool.auto_enforcement_silent_write = advise turns rule 1 off; rule 2 (auto_enforcement, pitfall only) still applies", () => {
+    const off: Pick<HarnessConfig, "before_tool"> = { before_tool: { ...DEFAULT_CONFIG.before_tool, auto_enforcement_silent_write: "advise" } };
+    expect(enforcementDefault(silentWrite({ config: off }))).toBe("advise");
+    expect(enforcementDefault(silentWrite({ config: off, type: "policy" }))).toBe("advise");
+    const preAPrime: Pick<HarnessConfig, "before_tool"> = { before_tool: { ...DEFAULT_CONFIG.before_tool, auto_enforcement_silent_write: "advise", auto_enforcement: "soft_deny" } };
+    expect(enforcementDefault(silentWrite({ config: preAPrime }))).toBe("soft_deny");
+    expect(enforcementDefault(silentWrite({ config: preAPrime, type: "policy" }))).toBe("advise");
+  });
+
+  test("a task-horizon auto row never exceeds advise through the auto rules, even under the pre-A′ auto_enforcement = soft_deny", () => {
+    const preAPrime: Pick<HarnessConfig, "before_tool"> = { before_tool: { ...DEFAULT_CONFIG.before_tool, auto_enforcement: "soft_deny" } };
+    expect(enforcementDefault(auto({ config: preAPrime }))).toBe("soft_deny");
+    expect(enforcementDefault(auto({ config: preAPrime, horizon: "task" }))).toBe("advise");
+    expect(enforcementDefault(auto({ config: preAPrime, horizon: "durable" }))).toBe("soft_deny");
+    expect(enforcementDefault(auto({ config: preAPrime, horizon: null }))).toBe("soft_deny");
+    expect(enforcementDefault(silentWrite({ config: preAPrime, horizon: "task" }))).toBe("advise");
+  });
+});
+
 describe("decideTier (§7.4)", () => {
   const NOW = "2026-11-08T00:00:00.000Z";
+  // autonomy_level is pinned to "standard" here on purpose: the default is "full" since 0.6.0-rc.2, and these are the
+  // review-gate assertions (proposals, informational types waiting). The nested describe below covers "full".
   function input(overrides: Partial<DecideTierInput> = {}, memory: Partial<DecideTierInput["memory"]> = {}): DecideTierInput {
     return {
       memory: {
@@ -119,7 +204,7 @@ describe("decideTier (§7.4)", () => {
     expect(decideTier(input({ knowledgeKind: null })).ttlExpiresAt).toBe("2026-11-15T00:00:00.000Z");
   });
 
-  test.each<[string, DecideTierInput, Record<string, unknown>]>([
+  const standardCases: Array<[string, DecideTierInput, Record<string, unknown>]> = [
     ["evidence below 2", input({ evidenceScore: 1 }), { status: "candidate", reason: "evidence" }],
     ["confidence below 0.7", input({}, { confidence: 0.69 }), { status: "candidate", reason: "confidence" }],
     ["episode cap exhausted", input({ capsRemaining: { episode: 0, day: 10 } }), { status: "candidate", reason: "cap" }],
@@ -140,8 +225,16 @@ describe("decideTier (§7.4)", () => {
     ["signature tool not hooked, before_tool only", input({}, { signatureTool: "read" }), { status: "candidate", reason: "trigger" }],
     ["no triggers", input({}, { lifecycleTriggers: [] }), { status: "candidate", reason: "trigger" }],
     ["scanner unsafe", input({ scanSafe: false }), { status: "candidate", reason: "security" }],
-  ])("%s", (_label, tierInput, expected) => {
+  ];
+
+  test.each(standardCases)("%s", (_label, tierInput, expected) => {
     expect(decideTier(tierInput)).toEqual(expected);
+  });
+
+  // The rc.2 inputs are optional; under standard they change nothing (the knowledge cap is a `full` concept).
+  test.each(standardCases)("%s — unchanged with the rc.2 inputs present", (_label, tierInput, expected) => {
+    expect(decideTier({ ...tierInput, knowledgeCapsRemaining: { day: 10 }, horizon: null })).toEqual(expected);
+    expect(decideTier({ ...tierInput, knowledgeCapsRemaining: { day: 0 }, horizon: "durable" })).toEqual(expected);
   });
 
   test("workflow rows activate through relevant_tools and a reachable trigger", () => {
@@ -179,12 +272,166 @@ describe("decideTier (§7.4)", () => {
     expect(decideTier(input({}, { signatureTool: "gr*" }))).toEqual({ status: "candidate", reason: "trigger" });
   });
 
-  test("baseTtlDays / addDays", () => {
+  test("baseTtlDays / tierTtlDays / addDays", () => {
     expect(baseTtlDays("correction")).toBe(30);
     expect(baseTtlDays("failure_resolution")).toBe(30);
     expect(baseTtlDays("convention")).toBe(7);
     expect(baseTtlDays("decision")).toBe(7);
     expect(baseTtlDays(null)).toBe(7);
     expect(addDays("2026-11-08T00:00:00.000Z", 1.5)).toBe("2026-11-09T12:00:00.000Z");
+    // 0.6.0-rc.2: a task horizon beats everything, informational types get 30 days, the rest keep baseTtlDays(kind).
+    expect(TASK_TTL_DAYS).toBe(7);
+    expect(KNOWLEDGE_TTL_DAYS).toBe(30);
+    expect(tierTtlDays("correction", "task", "pitfall")).toBe(7);
+    expect(tierTtlDays("decision", "task", "decision")).toBe(7);
+    expect(tierTtlDays("decision", "durable", "decision")).toBe(30);
+    expect(tierTtlDays("decision", null, "architecture_constraint")).toBe(30);
+    expect(tierTtlDays(null, undefined, "decision")).toBe(30);
+    expect(tierTtlDays("convention", "durable", "architecture_constraint")).toBe(30);
+    expect(tierTtlDays("correction", null, "pitfall")).toBe(30);
+    expect(tierTtlDays("failure_resolution", "durable", "pitfall")).toBe(30);
+    expect(tierTtlDays("convention", "durable", "workflow")).toBe(7);
+    expect(tierTtlDays("convention", null, "policy")).toBe(7);
+    expect(tierTtlDays(null, null, "pitfall")).toBe(7);
+  });
+
+  describe("autonomy_level full (0.6.0-rc.2 design §1): activation without the review gate", () => {
+    function full(overrides: Partial<DecideTierInput> = {}, memory: Partial<DecideTierInput["memory"]> = {}): DecideTierInput {
+      return input({ autonomyLevel: "full", knowledgeCapsRemaining: { day: 10 }, ...overrides }, memory);
+    }
+    /** A decision-marker fact: informational type, evidence 0, no signature, no tools, a session_start trigger. */
+    function decision(overrides: Partial<DecideTierInput> = {}, memory: Partial<DecideTierInput["memory"]> = {}): DecideTierInput {
+      return full(
+        { evidenceScore: 0, knowledgeKind: "decision", ...overrides },
+        { type: "decision", hasSignature: false, signatureTool: null, relevantTools: null, lifecycleTriggers: ["session_start"], ...memory }
+      );
+    }
+    const ACTIVE_30 = { status: "active", ttlExpiresAt: "2026-12-08T00:00:00.000Z", revalidateAfter: "2026-11-23T00:00:00.000Z" };
+    const ACTIVE_7 = { status: "active", ttlExpiresAt: "2026-11-15T00:00:00.000Z", revalidateAfter: "2026-11-11T12:00:00.000Z" };
+
+    test("full is the default level; the review-gate assertions above pin standard explicitly", () => {
+      expect(DEFAULT_CONFIG.autonomy_level).toBe("full");
+      expect(input().autonomyLevel).toBe("standard");
+    });
+
+    test("decision / architecture_constraint activate with evidence 0 and a 30-day TTL when the knowledge cap allows", () => {
+      expect(decideTier(decision())).toEqual(ACTIVE_30);
+      expect(decideTier(decision({}, { type: "architecture_constraint", lifecycleTriggers: ["before_model"], scopeGlob: "src/**" }))).toEqual(ACTIVE_30);
+      // Neither evidence, trigger reachability nor the pitfall activation caps gate them: the decision marker is the evidence.
+      expect(decideTier(decision({ capsRemaining: { episode: 0, day: 0 } }, { lifecycleTriggers: ["session_start"] }))).toEqual(ACTIVE_30);
+      // … but a row with no lifecycle trigger at all could never surface, so it stays a candidate.
+      expect(decideTier(decision({}, { lifecycleTriggers: [] }))).toEqual({ status: "candidate", reason: "trigger" });
+      expect(decideTier(decision({ knowledgeCapsRemaining: { day: 1 } }))).toEqual(ACTIVE_30);
+    });
+
+    test("knowledge_cap: an exhausted budget, or none given (a caller that does not track it cannot activate informational rows)", () => {
+      expect(decideTier(decision({ knowledgeCapsRemaining: { day: 0 } }))).toEqual({ status: "candidate", reason: "knowledge_cap" });
+      expect(decideTier(decision({ knowledgeCapsRemaining: { day: -1 } }, { type: "architecture_constraint" }))).toEqual({ status: "candidate", reason: "knowledge_cap" });
+      expect(decideTier(decision({ knowledgeCapsRemaining: undefined }))).toEqual({ status: "candidate", reason: "knowledge_cap" });
+      // The pitfall caps are not consulted for informational rows, and the knowledge cap is not consulted for pitfalls.
+      expect(decideTier(decision({ knowledgeCapsRemaining: { day: 0 }, capsRemaining: { episode: 3, day: 10 } }))).toEqual({ status: "candidate", reason: "knowledge_cap" });
+      expect(decideTier(full({ knowledgeCapsRemaining: { day: 0 } }))).toEqual(ACTIVE_30);
+      // Under standard the budget changes nothing: informational rows wait for review there.
+      expect(decideTier(input({ knowledgeCapsRemaining: { day: 10 }, evidenceScore: 0, knowledgeKind: "decision" }, { type: "decision", lifecycleTriggers: ["session_start"] }))).toEqual({ status: "candidate", reason: "type" });
+    });
+
+    test("a policy activates at advise without a proposal; a repo-wide row without a signature activates", () => {
+      expect(decideTier(full({}, { type: "policy" }))).toEqual(ACTIVE_30);
+      expect(decideTier(full({ knowledgeKind: "convention" }, { type: "policy", hasSignature: false, signatureTool: null }))).toEqual(ACTIVE_7);
+      expect(decideTier(full({}, { hasSignature: false, signatureTool: null }))).toEqual(ACTIVE_30);
+      expect(decideTier(full({ knowledgeKind: "convention" }, { type: "workflow", hasSignature: false, signatureTool: null, lifecycleTriggers: ["before_model"] }))).toEqual(ACTIVE_7);
+      expect(decideTier(decision({}, { scopeGlob: "**/*" }))).toEqual(ACTIVE_30);
+      // The same rows under standard: the proposals of the review gate.
+      expect(decideTier(input({}, { type: "policy" }))).toEqual({ status: "candidate", reason: "type", proposal: "activate_policy" });
+      expect(decideTier(input({}, { hasSignature: false, signatureTool: null }))).toEqual({ status: "candidate", reason: "scope", proposal: "activate_global" });
+    });
+
+    test("a pitfall activates at evidence 1 under full but not under standard; evidence 0 stays candidate under both", () => {
+      expect(FULL_ACTIVATION_MIN_EVIDENCE).toBe(1);
+      expect(ACTIVATION_MIN_EVIDENCE).toBe(2);
+      expect(decideTier(full({ evidenceScore: 1 }))).toEqual(ACTIVE_30);
+      expect(decideTier(input({ evidenceScore: 1 }))).toEqual({ status: "candidate", reason: "evidence" });
+      expect(decideTier(full({ evidenceScore: 0 }))).toEqual({ status: "candidate", reason: "evidence" });
+      expect(decideTier(full({ evidenceScore: 0.5 }))).toEqual({ status: "candidate", reason: "evidence" });
+      expect(decideTier(input({ evidenceScore: 0 }))).toEqual({ status: "candidate", reason: "evidence" });
+      expect(decideTier(full({ evidenceScore: 1, knowledgeKind: "convention" }, { type: "workflow", hasSignature: false, signatureTool: null, lifecycleTriggers: ["before_model"] }))).toEqual(ACTIVE_7);
+    });
+
+    test.each<[string, DecideTierInput, Record<string, unknown>]>([
+      ["replacement row", full({ isReplacementRow: true }), { status: "candidate", reason: "replacement" }],
+      ["replacement decision", decision({ isReplacementRow: true }), { status: "candidate", reason: "replacement" }],
+      ["invalid scope", full({}, { scopeGlob: "/abs/**" }), { status: "candidate", reason: "scope" }],
+      ["invalid scope on a decision", decision({}, { scopeGlob: "../x/**" }), { status: "candidate", reason: "scope" }],
+      ["scanner unsafe", full({ scanSafe: false }), { status: "candidate", reason: "security" }],
+      ["scanner unsafe decision", decision({ scanSafe: false }), { status: "candidate", reason: "security" }],
+      ["confidence below 0.7", full({}, { confidence: 0.69 }), { status: "candidate", reason: "confidence" }],
+      ["confidence below 0.7 on a decision", decision({}, { confidence: 0.69 }), { status: "candidate", reason: "confidence" }],
+      ["episode cap exhausted", full({ capsRemaining: { episode: 0, day: 10 } }), { status: "candidate", reason: "cap" }],
+      ["daily cap exhausted", full({ capsRemaining: { episode: 3, day: 0 } }), { status: "candidate", reason: "cap" }],
+      ["a policy counts against the activation caps", full({ capsRemaining: { episode: 3, day: 0 } }, { type: "policy" }), { status: "candidate", reason: "cap" }],
+      ["neither signature nor relevant tools", full({}, { hasSignature: false, signatureTool: null, relevantTools: null }), { status: "candidate", reason: "trigger" }],
+      ["policy with neither signature nor relevant tools", full({}, { type: "policy", hasSignature: false, signatureTool: null, relevantTools: null }), { status: "candidate", reason: "trigger" }],
+      ["signature tool not hooked, before_tool only", full({}, { signatureTool: "read" }), { status: "candidate", reason: "trigger" }],
+      ["workflow with before_tool only and no signature", full({}, { type: "workflow", hasSignature: false, signatureTool: null }), { status: "candidate", reason: "trigger" }],
+      ["no triggers", full({}, { lifecycleTriggers: [] }), { status: "candidate", reason: "trigger" }],
+    ])("still candidate under full: %s", (_label, tierInput, expected) => {
+      expect(decideTier(tierInput)).toEqual(expected);
+    });
+
+    test("order: scope → scanner → confidence → the type-specific checks", () => {
+      expect(decideTier(full({ scanSafe: false, evidenceScore: 0 }, { scopeGlob: "/abs/**", confidence: 0.1 }))).toEqual({ status: "candidate", reason: "scope" });
+      expect(decideTier(full({ scanSafe: false, evidenceScore: 0 }, { confidence: 0.1 }))).toEqual({ status: "candidate", reason: "security" });
+      expect(decideTier(full({ evidenceScore: 0, capsRemaining: { episode: 0, day: 0 } }, { confidence: 0.1, lifecycleTriggers: [] }))).toEqual({ status: "candidate", reason: "confidence" });
+      expect(decideTier(full({ evidenceScore: 0, capsRemaining: { episode: 0, day: 0 } }, { lifecycleTriggers: [] }))).toEqual({ status: "candidate", reason: "trigger" });
+      expect(decideTier(full({ evidenceScore: 0, capsRemaining: { episode: 0, day: 0 } }))).toEqual({ status: "candidate", reason: "evidence" });
+      expect(decideTier(full({ capsRemaining: { episode: 0, day: 0 } }))).toEqual({ status: "candidate", reason: "cap" });
+      expect(decideTier(decision({ knowledgeCapsRemaining: { day: 0 }, scanSafe: false }, { confidence: 0.1 }))).toEqual({ status: "candidate", reason: "security" });
+      expect(decideTier(decision({ knowledgeCapsRemaining: { day: 0 } }, { confidence: 0.1 }))).toEqual({ status: "candidate", reason: "confidence" });
+    });
+
+    test("the full path never opens a proposal, never reports type / autonomy and never reports shadow", () => {
+      const rows = [
+        full({}, { type: "policy" }),
+        full({}, { hasSignature: false, signatureTool: null }),
+        decision(),
+        decision({ knowledgeCapsRemaining: { day: 0 } }),
+        full({ evidenceScore: 0 }),
+        full({ scanSafe: false }),
+        full({}, { lifecycleTriggers: [] }),
+      ];
+      for (const tierInput of rows) {
+        const result = decideTier(tierInput);
+        expect(result).not.toHaveProperty("proposal");
+        expect(result).not.toHaveProperty("shadow");
+        expect(result.reason).not.toBe("type");
+        expect(result.reason).not.toBe("autonomy");
+      }
+    });
+
+    test("TTL by horizon and type: task 7 days whatever the type, decision / architecture_constraint 30 days, else baseTtlDays(kind)", () => {
+      expect(decideTier(full({ horizon: "task" }))).toEqual(ACTIVE_7);
+      expect(decideTier(decision({ horizon: "task" }))).toEqual(ACTIVE_7);
+      expect(decideTier(decision({ horizon: "task" }, { type: "architecture_constraint" }))).toEqual(ACTIVE_7);
+      expect(decideTier(decision({ horizon: "durable" }))).toEqual(ACTIVE_30);
+      expect(decideTier(decision({ horizon: null }))).toEqual(ACTIVE_30);
+      expect(decideTier(decision({ knowledgeKind: "convention" }))).toEqual(ACTIVE_30);
+      expect(decideTier(full({ horizon: "durable" }))).toEqual(ACTIVE_30);
+      expect(decideTier(full({ horizon: null, knowledgeKind: "failure_resolution" }))).toEqual(ACTIVE_30);
+      expect(decideTier(full({ knowledgeKind: "convention" }))).toEqual(ACTIVE_7);
+      expect(decideTier(full({ knowledgeKind: null }, { type: "policy" }))).toEqual(ACTIVE_7);
+      // Design §2 is level-agnostic: a task-horizon pitfall gets 7 days under standard too; with the horizon unknown
+      // standard keeps its old TTL.
+      expect(decideTier(input({ horizon: "task" }))).toEqual(ACTIVE_7);
+      expect(decideTier(input({ horizon: "durable" }))).toEqual(ACTIVE_30);
+      expect(decideTier(input({ horizon: null }))).toEqual(ACTIVE_30);
+    });
+
+    test("shadow and off keep today's meaning: shadow is a dry run of standard, off never activates", () => {
+      expect(decideTier(input({ autonomyLevel: "shadow", knowledgeCapsRemaining: { day: 10 } }))).toEqual({ status: "candidate", reason: "autonomy", shadow: "active" });
+      expect(decideTier(input({ autonomyLevel: "shadow", knowledgeCapsRemaining: { day: 10 }, evidenceScore: 1 }))).toEqual({ status: "candidate", reason: "evidence" });
+      expect(decideTier(input({ autonomyLevel: "shadow", knowledgeCapsRemaining: { day: 10 }, evidenceScore: 0, knowledgeKind: "decision" }, { type: "decision", lifecycleTriggers: ["session_start"] }))).toEqual({ status: "candidate", reason: "type" });
+      expect(decideTier(input({ autonomyLevel: "off", knowledgeCapsRemaining: { day: 10 } }))).toEqual({ status: "candidate", reason: "autonomy" });
+      expect(decideTier(input({ autonomyLevel: "off", knowledgeCapsRemaining: { day: 10 } }, { type: "policy" }))).toEqual({ status: "candidate", reason: "type", proposal: "activate_policy" });
+    });
   });
 });

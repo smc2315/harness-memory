@@ -103,6 +103,7 @@ describe("migrations: fresh database", () => {
         "020_policy_rules_v2.sql",
         "021_legacy_archive.sql",
         "022_episode_summaries.sql",
+        "023_signature_precision.sql",
       ]);
       expectHealthy(db);
     } finally {
@@ -140,7 +141,7 @@ describe("migrations: legacy v9 fixture (real v0.5 install)", () => {
     db.close();
   });
 
-  test("upgrades 9 → 22 with every row preserved", () => {
+  test("upgrades 9 → 23 with every row preserved", () => {
     const before = {
       memories: selectCount(db, "SELECT COUNT(*) FROM memories"),
       evidence: selectCount(db, "SELECT COUNT(*) FROM evidence"),
@@ -154,7 +155,7 @@ describe("migrations: legacy v9 fixture (real v0.5 install)", () => {
 
     expect(report.from).toBe(9);
     expect(report.to).toBe(TARGET_USER_VERSION);
-    expect(report.applied.length).toBe(13);
+    expect(report.applied.length).toBe(14);
     expectHealthy(db);
     expect(selectCount(db, "SELECT COUNT(*) FROM memories")).toBe(13);
     expect(selectCount(db, "SELECT COUNT(*) FROM evidence")).toBe(142);
@@ -224,7 +225,7 @@ describe("migrations: legacy v9 fixture (real v0.5 install)", () => {
 });
 
 describe("migrations: legacy v10 fixture", () => {
-  test("upgrades 10 → 22, keeps its memory, flags the R2 victim and backfills", async () => {
+  test("upgrades 10 → 23, keeps its memory, flags the R2 victim and backfills", async () => {
     const db = await createTestDbFromFixture(LEGACY_FIXTURES.v10, { migrate: false });
     try {
       expect(selectCount(db, "SELECT COUNT(*) FROM memories")).toBe(1);
@@ -232,7 +233,7 @@ describe("migrations: legacy v10 fixture", () => {
       const report = runMigrationsOnDb(db);
       db.run("PRAGMA foreign_keys = ON");
       expect(report).toMatchObject({ from: 10, to: TARGET_USER_VERSION });
-      expect(report.applied.length).toBe(12);
+      expect(report.applied.length).toBe(13);
       expectHealthy(db);
 
       expect(selectCount(db, "SELECT COUNT(*) FROM memories")).toBe(1);

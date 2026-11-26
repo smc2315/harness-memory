@@ -305,7 +305,8 @@ describe("hook core (in-process, synthetic Claude Code stdin)", () => {
     const descriptor = queue[0]!;
     expect(descriptor.close_reason).toBe("stop");
     expect(descriptor.flags).toEqual({ correction: 1 });
-    expect(descriptor.evidence_weight).toBe(2);
+    // rc.2 §5: no previous turn is corrected here, so the cue in the prompt is a bare cue (1), not the full 2.
+    expect(descriptor.evidence_weight).toBe(1);
     expect(descriptor.tools).toEqual(["bash"]);
     expect(descriptor.fired).toEqual([{ memory_id: seedPitfall.id, enforcement: "soft_deny", outcome: "override", tool: "bash" }]);
     expect(descriptor.last_assistant_message).toBe("Tests pass after seeding.");
@@ -341,11 +342,13 @@ describe("hook core (in-process, synthetic Claude Code stdin)", () => {
     expect(prompt.status).toBe("ok");
     expect(prompt.detail.closed_as).toBe("interrupted");
     expect(prompt.detail.correction).toBe(1);
-    expect(prompt.spawned).toEqual(["extract"]);
+    // rc.2 §5: an interrupted turn of a prompt plus one failed call is no_signal, so nothing is spawned for it;
+    // the queue file is still written (the worker marks it skipped) and the correction context below still works.
+    expect(prompt.spawned).toEqual([]);
 
     const queue = fixture.readQueue() as EpisodeDescriptor[];
     expect(queue).toHaveLength(1);
-    expect(queue[0]).toMatchObject({ turn_key: "p-3", close_reason: "interrupted", evidence_weight: 1 });
+    expect(queue[0]).toMatchObject({ turn_key: "p-3", close_reason: "interrupted", evidence_weight: 1, event_count: 2 });
     expect(queue[0]!.failure_signatures[0]).toMatchObject({ class: "exit_1", tool: "bash", program_token: "pm build", resolved_seq: null });
 
     const promptLines = fixture.readLedger().filter((line): line is PromptLine => line.kind === "prompt");
@@ -363,6 +366,9 @@ describe("hook core (in-process, synthetic Claude Code stdin)", () => {
     expect(second!.correction_for).toBe(queue[0]!.id);
     expect(second!.context_ref).toContain("(prev) tool_fail bash(bash): npm run build");
     expect(second!.flags).toEqual({ correction: 1 });
+    // A correction of a turn that ran tools carries the full correction weight (rc.2 §5) and is extracted.
+    expect(second!.evidence_weight).toBe(2);
+    expect(stop.spawned).toEqual(["extract"]);
     // The build success resolves the earlier failure of the same program token.
     const okLines = fixture.readLedger().filter((line): line is ToolOkLine => line.kind === "tool_ok");
     expect(okLines[0]!.resolution_of).toBe("bash|exit_1|pm build");
@@ -407,24 +413,49 @@ describe("hook core (in-process, synthetic Claude Code stdin)", () => {
     expect(promptLines.map((line) => line.correction)).toEqual([0, 1, 0, 1]);
   });
 
-  test("session-start injects startup rows only, skips before_tool-only pitfalls and host-loaded rows, and digests once a day", async () => {
+  test("session-start injects startup rows only, skips before_tool-only pitfalls and host-loaded rows; under autonomy_level full the proposal digest is not shown", async () => {
+    expect(fixture.config.autonomy_level).toBe("full");
     const first = await run(claudeStdin(fixture, "SessionStart", { source: "startup" }));
     expect(first.status).toBe("ok");
     expect(first.activated).toEqual([startupDecision.id]);
     expect(first.additionalContext).toContain("DECISION (human)");
     expect(first.additionalContext).not.toContain("production database");
     expect(first.additionalContext).not.toContain("CLAUDE.md");
-    expect(first.systemMessage).toBe("harness-memory: 3 proposals open, 1 expiring within 7 days — run `hm review`");
+    // rc.2 §1: nothing waits on `hm review` under full — the fixture's 3 open proposals produce no systemMessage.
+    expect(first.systemMessage).toBeNull();
     expect(first.spawned).toEqual([]);
     expect(fixture.readLedger()[0]).toMatchObject({ kind: "marker", marker: "session_start", detail: "startup" });
 
     const stdout = renderClaudeCode(first);
     expect(stdout?.hookSpecificOutput?.hookEventName).toBe("SessionStart");
-    expect(stdout?.systemMessage).toContain("3 proposals");
+    expect(stdout?.systemMessage).toBeUndefined();
+    // Nothing was said, so no throttle date was stamped (the state file is not even created).
+    expect(fixture.readState()).toBeNull();
 
     const second = await run(claudeStdin(fixture, "SessionStart", { source: "resume" }));
     expect(second.systemMessage).toBeNull();
-    expect(fixture.readState()?.last_digest_date).toBe(FIXTURE_NOW.slice(0, 10));
+    expect(second.activated).toEqual([startupDecision.id]);
+  });
+
+  test("session-start digests open proposals once a day under autonomy_level standard (the rc.1 review gate)", async () => {
+    const own = createHarnessFixture({ memories: ALL_MEMORIES, failureIndex: { enoent: [failureHint.id] }, counts: { open_proposals: 3, expiring_7d: 1 }, config: { autonomy_level: "standard" } });
+    const ownRecording = recordingRuntime(own);
+    try {
+      expect(own.config.autonomy_level).toBe("standard");
+      const input = normalize(claudeStdin(own, "SessionStart", { source: "startup" }));
+      const first = await runHook(input.event, input, ownRecording.runtime);
+      expect(first.status).toBe("ok");
+      expect(first.activated).toEqual([startupDecision.id]);
+      expect(first.systemMessage).toBe("harness-memory: 3 proposals open, 1 expiring within 7 days — run `hm review`");
+      expect(renderClaudeCode(first)?.systemMessage).toContain("3 proposals");
+
+      const resume = normalize(claudeStdin(own, "SessionStart", { source: "resume" }));
+      const second = await runHook(resume.event, resume, ownRecording.runtime);
+      expect(second.systemMessage).toBeNull();
+      expect(own.readState()?.last_digest_date).toBe(FIXTURE_NOW.slice(0, 10));
+    } finally {
+      own.cleanup();
+    }
   });
 
   test("session-start names rules born from a remember turn in the last 24 h with the one-command undo (A′), under the daily throttle", async () => {
@@ -494,8 +525,8 @@ describe("hook core (in-process, synthetic Claude Code stdin)", () => {
       own.cleanup();
     }
 
-    // With proposals open the digest and the notice share one systemMessage, digest first.
-    const both = createHarnessFixture({ memories: [rememberRule], counts: { open_proposals: 2, expiring_7d: 0 } });
+    // Under standard, with proposals open, the digest and the notice share one systemMessage, digest first.
+    const both = createHarnessFixture({ memories: [rememberRule], counts: { open_proposals: 2, expiring_7d: 0 }, config: { autonomy_level: "standard" } });
     const bothRecording = recordingRuntime(both);
     try {
       const input = normalize(claudeStdin(both, "SessionStart", { source: "startup" }));
@@ -507,6 +538,25 @@ describe("hook core (in-process, synthetic Claude Code stdin)", () => {
       expect(renderClaudeCode(result)?.systemMessage).toContain("from your request");
     } finally {
       both.cleanup();
+    }
+
+    // Under full (the default) the digest is gone; the notice stands alone and keeps the once-a-day throttle.
+    const fullOnly = createHarnessFixture({ memories: [rememberRule], counts: { open_proposals: 2, expiring_7d: 0 } });
+    const fullRecording = recordingRuntime(fullOnly);
+    try {
+      expect(fullOnly.config.autonomy_level).toBe("full");
+      const input = normalize(claudeStdin(fullOnly, "SessionStart", { source: "startup" }));
+      const result = await runHook(input.event, input, fullRecording.runtime);
+      expect(result.systemMessage).toBe(
+        "harness-memory: 1 rule from your request is active — Run pnpm lint before every git commit in this repository. (undo: hm memory:demote 33333333)"
+      );
+      expect(result.detail.remember_notice).toBe(true);
+      expect(fullOnly.readState()?.last_digest_date).toBe(FIXTURE_NOW.slice(0, 10));
+      const resume = normalize(claudeStdin(fullOnly, "SessionStart", { source: "resume" }));
+      const second = await runHook(resume.event, resume, fullRecording.runtime);
+      expect(second.systemMessage).toBeNull();
+    } finally {
+      fullOnly.cleanup();
     }
   });
 

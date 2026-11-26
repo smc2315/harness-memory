@@ -3,6 +3,7 @@ import type { Database as SqlJsDatabase } from "sql.js";
 
 import { MemoryRepository } from "../src/memory";
 import {
+  TASK_HORIZON_TTL_DAYS,
   baseTtlDays,
   computeRevalidation,
   extendTtlOnFire,
@@ -58,6 +59,21 @@ describe("TTL math", () => {
     const kept = computeRevalidation({ evidenceCount: 2, knowledgeKind: "convention", ttlExpiresAt: far, revalidateAfter: isoPlus(T0, { days: 70 }) }, T0);
     expect(kept.ttlExpiresAt).toBe(far);
     expect(kept.revalidateAfter).toBe(isoPlus(T0, { days: 70 }));
+  });
+
+  test("a task-horizon row is capped at TASK_HORIZON_TTL_DAYS whatever its kind or validation count (0.6.0-rc.2 design §2)", () => {
+    expect(TASK_HORIZON_TTL_DAYS).toBe(7);
+    const task = computeRevalidation({ evidenceCount: 4, knowledgeKind: "correction", ttlExpiresAt: null, revalidateAfter: null, horizon: "task" }, T0);
+    expect(task.validationCount).toBe(3);
+    expect(task.days).toBe(7);
+    expect(task.ttlExpiresAt).toBe(isoPlus(T0, { days: 7 }));
+    expect(task.revalidateAfter).toBe(isoPlus(T0, { days: 3, hours: 12 }));
+    // The TTL still never shrinks.
+    const kept = computeRevalidation({ evidenceCount: 1, knowledgeKind: "correction", ttlExpiresAt: isoPlus(T0, { days: 9 }), revalidateAfter: null, horizon: "task" }, T0);
+    expect(kept.ttlExpiresAt).toBe(isoPlus(T0, { days: 9 }));
+    // durable (or unknown) horizons keep the kind-based grant.
+    expect(computeRevalidation({ evidenceCount: 1, knowledgeKind: "correction", ttlExpiresAt: null, revalidateAfter: null, horizon: "durable" }, T0).days).toBe(30);
+    expect(computeRevalidation({ evidenceCount: 1, knowledgeKind: "correction", ttlExpiresAt: null, revalidateAfter: null, horizon: null }, T0).days).toBe(30);
   });
 });
 
@@ -148,5 +164,21 @@ describe("revalidateMemory / extendTtlOnFire", () => {
     const candidate = memories.create(autoMemory());
     expect(extendTtlOnFire(db, candidate.id, { lastFiredAt: T0 })).toMatchObject({ applied: false, skipped: "status" });
     expect(extendTtlOnFire(db, "missing", { lastFiredAt: T0 }).skipped).toBe("not_found");
+  });
+
+  test("a task-horizon row keeps its 7-day ceiling through reinforce and fire (AUTH-1)", () => {
+    const task = memories.create(autoMemory({ status: "active", knowledgeKind: "correction", horizon: "task", ttlExpiresAt: isoPlus(T0, { days: 7 }), revalidateAfter: isoPlus(T0, { days: 3, hours: 12 }) }));
+    memories.updateDerived(task.id, { evidenceScore: 3, evidenceCount: 3, distinctSessionCount: 2 });
+    // Day 2 reinforce: a durable correction row would jump to ≥ 30 days; the task row moves to now + 7 d only.
+    const reinforced = revalidateMemory(db, task.id, { now: isoPlus(T0, { days: 2 }), closedAt: isoPlus(T0, { days: 2 }) });
+    expect(reinforced.applied).toBe(true);
+    expect(reinforced.memory?.validationCount).toBe(2);
+    expect(reinforced.memory?.ttlExpiresAt).toBe(isoPlus(T0, { days: 9 }));
+    // Day 3 fire: + 7 d from the fire instead of + 14 d.
+    const fired = extendTtlOnFire(db, task.id, { lastFiredAt: isoPlus(T0, { days: 3 }) });
+    expect(fired.applied).toBe(true);
+    expect(fired.memory?.ttlExpiresAt).toBe(isoPlus(T0, { days: 10 }));
+    // A fire that would not move the ceiling changes nothing.
+    expect(extendTtlOnFire(db, task.id, { lastFiredAt: isoPlus(T0, { days: 2 }) }).applied).toBe(false);
   });
 });

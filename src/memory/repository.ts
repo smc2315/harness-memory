@@ -37,6 +37,12 @@ import {
   type KnowledgeKind,
   type SourceKind,
   type TriggerSignature,
+  HORIZONS,
+  SIDE_EFFECTS,
+  SIGNATURE_PRECISIONS,
+  type Horizon,
+  type SideEffect,
+  type SignaturePrecision,
 } from "../core/vocabulary";
 import {
   createDeterministicId,
@@ -105,6 +111,9 @@ const MEMORY_SELECT_COLUMNS = [
   "needs_scope",
   "import_unconfirmed",
   "aliases_json",
+  "signature_precision",
+  "side_effect",
+  "horizon",
 ].join(", ");
 
 const EVIDENCE_SELECT_COLUMNS = [
@@ -198,6 +207,10 @@ export interface MemoryRecord {
   needsScope: 0 | 1;
   importUnconfirmed: 0 | 1;
   aliases: string[];
+  /** 0.6.0-rc.2 (migration 023); null = unknown / before 023 (treated as `noun`, `read`, `durable`). */
+  signaturePrecision: SignaturePrecision | null;
+  sideEffect: SideEffect | null;
+  horizon: Horizon | null;
 }
 
 export interface EvidenceRecord {
@@ -258,6 +271,10 @@ export interface CreateMemoryInput {
   revalidateAfter?: string | null;
   importUnconfirmed?: 0 | 1;
   needsScope?: 0 | 1;
+  /** 0.6.0-rc.2: computed by the validator; stored as given (null when absent). */
+  signaturePrecision?: SignaturePrecision | null;
+  sideEffect?: SideEffect | null;
+  horizon?: Horizon | null;
   /**
    * When every row with the same identity is terminal (rejected/superseded), create a new live
    * row with id `memory:<identity_key>:<n>` instead of throwing (spec §5.7 step 4, R5).
@@ -778,7 +795,8 @@ export class MemoryRepository {
           embedding, embedding_summary, relevant_tools_json,
           semantic_key, trigger_signature_json, signature_key, knowledge_kind, failure_classes_json,
           status_reason, source_ref, revalidate_after, authority, enforcement, source_kind,
-          needs_scope, import_unconfirmed, aliases_json
+          needs_scope, import_unconfirmed, aliases_json,
+          signature_precision, side_effect, horizon
         )
         VALUES (
           $id, $contentHash, $identityKey, $type, $summary, $details, $scopeGlob, $activationClass,
@@ -787,7 +805,8 @@ export class MemoryRepository {
           $embedding, $embeddingSummary, $relevantToolsJson,
           $semanticKey, $triggerSignatureJson, $signatureKey, $knowledgeKind, $failureClassesJson,
           $statusReason, $sourceRef, $revalidateAfter, $authority, $enforcement, $sourceKind,
-          $needsScope, $importUnconfirmed, $aliasesJson
+          $needsScope, $importUnconfirmed, $aliasesJson,
+          $signaturePrecision, $sideEffect, $horizon
         )
       `,
       {
@@ -829,6 +848,9 @@ export class MemoryRepository {
         $needsScope: normalizeFlag(input.needsScope, 0),
         $importUnconfirmed: normalizeFlag(input.importUnconfirmed, 0),
         $aliasesJson: serializeStringArray(input.aliases),
+        $signaturePrecision: input.signaturePrecision ?? null,
+        $sideEffect: input.sideEffect ?? null,
+        $horizon: input.horizon ?? null,
       }
     );
 
@@ -1691,6 +1713,9 @@ export function mapMemoryRow(row: SqlRow): MemoryRecord {
     needsScope: expectFlag(row.needs_scope, "needs_scope"),
     importUnconfirmed: expectFlag(row.import_unconfirmed, "import_unconfirmed"),
     aliases: parseStringArray(expectString(row.aliases_json, "aliases_json"), "aliases_json"),
+    signaturePrecision: expectNullableEnum(row.signature_precision, "signature_precision", SIGNATURE_PRECISIONS),
+    sideEffect: expectNullableEnum(row.side_effect, "side_effect", SIDE_EFFECTS),
+    horizon: expectNullableEnum(row.horizon, "horizon", HORIZONS),
   };
 }
 

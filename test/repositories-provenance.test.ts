@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { Database as SqlJsDatabase } from "sql.js";
 
 import { ProvenanceRepository, deriveAutoConfidence, recomputeDerived } from "../src/db/repositories";
+import { SESSION_BLOCK_HOURS } from "../src/db/repositories/provenance";
 import { MemoryNotFoundError, MemoryRepository } from "../src/memory";
 import { createTestDb } from "./helpers/create-test-db";
 import { T0, autoMemory, humanMemory, insertEpisode, isoPlus } from "./helpers/memory-fixtures";
@@ -69,6 +70,44 @@ describe("ProvenanceRepository / recomputeDerived (R1)", () => {
 
     provenance.insert({ memoryId: memory.id, episodeId: "import:CLAUDE.md", eventSeq: 0, relation: "import", confidence: 0.9, createdAt: T0 });
     expect(provenance.aggregate(memory.id)).toEqual({ evidenceCount: 4, evidenceScore: 5, distinctSessionCount: 4, maxConfidence: 0.9 });
+  });
+
+  test("distinct_session_count counts (session_id, 4-hour block of started_at) pairs (0.6.0-rc.2 §4); import rows without an episode count once", () => {
+    expect(SESSION_BLOCK_HOURS).toBe(4);
+    const memory = memories.create(autoMemory());
+    // T0 sits on a block boundary (unix(T0) is a multiple of 4 h), so +1 h / +3 h 59 min share its block and +4 h / +5 h do not.
+    const first = insertEpisode(db, { session_id: "s-long", started_at: T0, evidence_weight: 1 });
+    const oneHourLater = insertEpisode(db, { session_id: "s-long", started_at: isoPlus(T0, { hours: 1 }), evidence_weight: 1 });
+    provenance.insert({ memoryId: memory.id, episodeId: first.id, eventSeq: 1, relation: "origin", confidence: 0.8, createdAt: T0 });
+    provenance.insert({ memoryId: memory.id, episodeId: oneHourLater.id, eventSeq: 1, relation: "reinforce", confidence: 0.8, createdAt: isoPlus(T0, { hours: 1 }) });
+    expect(provenance.aggregate(memory.id)).toMatchObject({ evidenceCount: 2, evidenceScore: 2, distinctSessionCount: 1 });
+
+    const lastMinuteOfBlock = insertEpisode(db, { session_id: "s-long", started_at: isoPlus(T0, { hours: 3, minutes: 59 }), evidence_weight: 1 });
+    provenance.insert({ memoryId: memory.id, episodeId: lastMinuteOfBlock.id, eventSeq: 1, relation: "reinforce", confidence: 0.8, createdAt: isoPlus(T0, { hours: 4 }) });
+    expect(provenance.aggregate(memory.id).distinctSessionCount).toBe(1);
+
+    // The same resumed session five hours later is another block: reinforcement the A′ ladder can see.
+    const fiveHoursLater = insertEpisode(db, { session_id: "s-long", started_at: isoPlus(T0, { hours: 5 }), evidence_weight: 1 });
+    provenance.insert({ memoryId: memory.id, episodeId: fiveHoursLater.id, eventSeq: 1, relation: "reinforce", confidence: 0.8, createdAt: isoPlus(T0, { hours: 5 }) });
+    expect(provenance.aggregate(memory.id)).toMatchObject({ evidenceCount: 4, distinctSessionCount: 2 });
+
+    // Another session in the very same block is still another session.
+    const otherSession = insertEpisode(db, { session_id: "s-other", started_at: isoPlus(T0, { minutes: 30 }), evidence_weight: 1 });
+    provenance.insert({ memoryId: memory.id, episodeId: otherSession.id, eventSeq: 1, relation: "reinforce", confidence: 0.8, createdAt: isoPlus(T0, { hours: 6 }) });
+    expect(provenance.aggregate(memory.id).distinctSessionCount).toBe(3);
+
+    // An import bullet has no episodes row: it counts once, by its episode id, as before.
+    provenance.insert({ memoryId: memory.id, episodeId: "import:CLAUDE.md", eventSeq: 0, relation: "import", confidence: 0.9, createdAt: isoPlus(T0, { hours: 7 }) });
+    provenance.insert({ memoryId: memory.id, episodeId: "import:CLAUDE.md", eventSeq: 0, relation: "import", confidence: 0.9, createdAt: isoPlus(T0, { hours: 8 }) });
+    expect(provenance.aggregate(memory.id)).toMatchObject({ evidenceCount: 6, evidenceScore: 6, distinctSessionCount: 4 });
+
+    // A contradict row never counts, whatever its block.
+    const contradicting = insertEpisode(db, { session_id: "s-contra", started_at: isoPlus(T0, { days: 1 }), evidence_weight: 2 });
+    provenance.insert({ memoryId: memory.id, episodeId: contradicting.id, eventSeq: 1, relation: "contradict", confidence: 0.9, createdAt: isoPlus(T0, { days: 1 }) });
+    expect(provenance.aggregate(memory.id).distinctSessionCount).toBe(4);
+
+    expect(recomputeDerived(db, memory.id).distinctSessionCount).toBe(4);
+    expect(memories.getById(memory.id)?.distinctSessionCount).toBe(4);
   });
 
   test("recomputeDerived writes counters and raises auto confidence by 0.05 per extra episode, capped at 0.99", () => {

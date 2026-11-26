@@ -1,7 +1,7 @@
 /**
  * s09 — lifecycle (§13.2 (k) and §13.1 s09 stale suppression): a learned correction row (TTL 30 d →
- * revalidate proposal → stale when the proposal expires), a bare-failure candidate (rejected(expiry) at
- * 45 d), a seeded auto convention row (fired once → TTL extended to last_fired + 14 d, then stale(ttl_expired));
+ * revalidate proposal → stale when the proposal expires), a bare-failure candidate (confidence 0.65, below the
+ * activation bar, so it stays a candidate under the rc.2 default `full` level too; rejected(expiry) at 45 d), a seeded auto convention row (fired once → TTL extended to last_fired + 14 d, then stale(ttl_expired));
  * the hooks suppress a TTL-expired row before the dream and no longer see it afterwards.
  */
 
@@ -42,7 +42,7 @@ export const s09 = defineScenario({
       return;
     }
     run.equal("(k) the correction row activated with a 30 d TTL", [(await run.memory(correctionId))?.status, (await run.memory(correctionId))?.ttlExpiresAt], ["active", isoPlus(extractAt, { days: 30 })]);
-    run.equal("(k) the bare failure stays a candidate", (await run.memory(candidateId))?.status, "candidate");
+    run.equal("(k) the bare failure stays a candidate (confidence 0.65 is below the activation bar)", (await run.memory(candidateId))?.status, "candidate");
 
     // +1 h: both rows fire in a third session (both as advise: the learned correction row is born at advise under A′).
     run.at(isoPlus(t0, { hours: 1 }));

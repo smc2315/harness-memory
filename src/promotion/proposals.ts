@@ -31,11 +31,26 @@ import { EpisodeRepository } from "../db/repositories/episodes";
 import { ProposalRepository, type ProposalRecord, type ProposalSupportRecord } from "../db/repositories/proposals";
 import { ProvenanceRepository } from "../db/repositories/provenance";
 import { InvalidMemoryTransitionError, MemoryRepository, type MemoryRecord } from "../memory/repository";
-import { addDays, baseTtlDays, midpointIso, revalidateMemory } from "./revalidate";
+import { TASK_HORIZON_TTL_DAYS, addDays, baseTtlDays, midpointIso, revalidateMemory } from "./revalidate";
 import { transitionMemory } from "./transitions";
 
 export const RECENT_REJECT_SKIP_DAYS = 30;
 export const AUTO_DEMOTION_MIN_SESSIONS = 2;
+/** The proposal kinds whose human reject the automatic activation paths honour (0.6.0-rc.2 design §1). */
+export const ACTIVATION_PROPOSAL_KINDS: ReadonlySet<ProposalKind> = new Set<ProposalKind>(["activate_policy", "activate_global"]);
+
+/**
+ * 0.6.0-rc.2 (design §1): true when a human rejected an `activate_policy` / `activate_global` proposal on this row.
+ * Under `full`, reconcile's decideTiers and the dream sweep then leave the row a candidate for its life — it meets the
+ * `retention.candidate_days` expiry like any declined rc.1 candidate — instead of enacting the claim the human
+ * declined; `standard`'s re-proposal path keeps its own 30-day skip (openOrSupportProposal). Only
+ * `decided_by = 'human'` counts: expiry and auto_rule write `expired`, never `rejected`.
+ */
+export function humanRejectedActivation(proposals: ProposalRepository, memoryId: string): boolean {
+  return proposals
+    .listForMemory(memoryId, { status: "rejected" })
+    .some((proposal) => ACTIVATION_PROPOSAL_KINDS.has(proposal.kind) && proposal.decidedBy === "human" && proposal.targetMemoryId === memoryId);
+}
 
 export type ProposalNotApplicableCode = "payload_missing" | "candidate_not_live";
 
@@ -298,7 +313,8 @@ export function decideProposal(db: SqlJsDatabase, input: DecideProposalInput): D
                 runId: input.runId ?? null,
               });
               if (actor === "auto_rule") {
-                const days = baseTtlDays(promoted.knowledgeKind);
+                // A `task`-horizon replacement gets the same 7-day ceiling every other activation path gives it (design §2).
+                const days = promoted.horizon === "task" ? TASK_HORIZON_TTL_DAYS : baseTtlDays(promoted.knowledgeKind);
                 const ttl = addDays(input.now, days);
                 remember(repository.setTtl(candidate.id, { ttlExpiresAt: ttl, revalidateAfter: midpointIso(input.now, ttl), validationCount: Math.max(0, promoted.evidenceCount - 1), updatedAt: input.now }));
               } else {
