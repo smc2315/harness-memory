@@ -186,6 +186,12 @@ export function buildEpisodeDescriptor(input: BuildEpisodeInput): EpisodeDescrip
       : correctionFor !== null && input.contextLines !== undefined && input.contextLines !== null
         ? renderContextRef(input.contextLines)
         : null;
+  // Design §5: the correction flag weighs 2 only when this turn corrects a previous one that ran tools — `correction_for`
+  // set and the corrected episode had ≥ 1 tool line (`contextLines` holds a tool_ok / tool_fail, or a pre-rendered
+  // `contextRef` was given). The prompt line's own flag or the cue regex alone is a bare cue (1).
+  const correctedTurnHadTools =
+    correctionFor !== null &&
+    (typeof input.contextRef === "string" || (input.contextLines !== undefined && input.contextLines !== null && input.contextLines.some(isToolLine)));
 
   return {
     schema: EPISODE_SCHEMA,
@@ -206,7 +212,7 @@ export function buildEpisodeDescriptor(input: BuildEpisodeInput): EpisodeDescrip
     failure_signatures: failures,
     flags,
     fired,
-    evidence_weight: computeEvidenceWeight(flags, failures),
+    evidence_weight: computeEvidenceWeight(flags, failures, { correctionReferencesPreviousTurn: correctedTurnHadTools }),
     event_count: lines.length,
     prompt_text: promptLine?.text ?? null,
     last_assistant_message: lastAssistant,
@@ -215,12 +221,22 @@ export function buildEpisodeDescriptor(input: BuildEpisodeInput): EpisodeDescrip
 
 export type EligibilityReason = "evidence" | "decision" | "import" | "no_signal";
 
-/** §5.3: `evidence_weight ≥ 1` or a decision marker in the last assistant message; import episodes always qualify. */
-export function isEligibleForExtraction(descriptor: Pick<EpisodeDescriptor, "host" | "evidence_weight" | "flags">): {
+/**
+ * An `interrupted` close with at most this many ledger lines (the prompt plus at most one event) carries no signal
+ * whatever its flags (design §5: 41 such episodes in the dogfood run, 0 accepted facts).
+ */
+export const INTERRUPTED_NO_SIGNAL_MAX_EVENTS = 2;
+
+/**
+ * §5.3: `evidence_weight ≥ 1` or a decision marker in the last assistant message; import episodes always qualify.
+ * 0.6.0-rc.2: an episode closed as `interrupted` with ≤ INTERRUPTED_NO_SIGNAL_MAX_EVENTS lines is `no_signal` first.
+ */
+export function isEligibleForExtraction(descriptor: Pick<EpisodeDescriptor, "host" | "evidence_weight" | "flags" | "close_reason" | "event_count">): {
   eligible: boolean;
   reason: EligibilityReason;
 } {
   if (descriptor.host === "import") return { eligible: true, reason: "import" };
+  if (descriptor.close_reason === "interrupted" && descriptor.event_count <= INTERRUPTED_NO_SIGNAL_MAX_EVENTS) return { eligible: false, reason: "no_signal" };
   if (descriptor.evidence_weight >= 1) return { eligible: true, reason: "evidence" };
   if (descriptor.flags.decision === 1) return { eligible: true, reason: "decision" };
   return { eligible: false, reason: "no_signal" };

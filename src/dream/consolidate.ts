@@ -4,6 +4,10 @@
  *
  *   (4) fire roll-ups already written by lock session 1 → auto rows: ttl = max(ttl, last_fired_at + 14 d);
  *       override downgrade: auto ∧ override_count ≥ 3 ∧ evidence_score < 3 → enforcement 'advise' + audit_log
+ *   (S) full sweep (0.6.0-rc.2, `autonomy_level: "full"` only): auto candidates that are not replacement rows are
+ *       re-evaluated with decideTier, oldest first, and activated when they pass — up to dream.full_sweep_per_run
+ *       activations per run; their open activate_* proposals close as expired(full_autonomy). Runs before (2)/(3)
+ *       so a candidate that passes today is activated rather than expired.
  *   (2) TTL: correction / failure_resolution auto rows open a `revalidate` proposal, other auto rows → stale(ttl_expired)
  *   (3) auto candidates older than retention.candidate_days → rejected(expiry); proposals past expires_at → expired
  *       (an expired revalidate stales its row)
@@ -32,21 +36,28 @@ import { ledgerFile, queueFile, type HarnessPaths } from "../core/paths";
 import { LIVE_STATUSES } from "../core/vocabulary";
 import { cleanOrphanTmp } from "../db/db-file";
 import { META_KEYS, MetaRepository } from "../db/repositories/meta";
+import { ProposalRepository } from "../db/repositories/proposals";
 import { selectAll } from "../db/sql";
 import type { WriteOp } from "../db/store";
 import { MemoryRepository, type MemoryRecord } from "../memory/repository";
+import { decideTier, type DecideTierInput } from "../promotion/authority";
 import { expireProposals, openOrSupportProposal } from "../promotion/proposals";
 import { extendTtlOnFire } from "../promotion/revalidate";
 import { transitionMemory } from "../promotion/transitions";
+import { scanMemoryContent } from "../security/scanner";
 import { buildEpisodeDescriptor } from "./episode";
 import { appendLedgerLine, makeSeq, readLedgerRangeLines } from "./ledger";
-import { cosine, jaccard, scopesIntersect, summaryTokens } from "./reconcile";
+import { cosine, jaccard, resolveTargetRow, scopesIntersect, summaryTokens } from "./reconcile";
 
 export const MERGE_JACCARD = 0.8;
 export const MERGE_COSINE = 0.92;
 export const OVERRIDE_DOWNGRADE_COUNT = 3;
 export const OVERRIDE_DOWNGRADE_MAX_EVIDENCE = 3;
 export const IDLE_TURN_MS = 60 * 60 * 1000;
+/** `proposals.decision_note` of an activate_* proposal the full sweep closed because its target activated on its own. */
+export const FULL_AUTONOMY_DECISION_NOTE = "full_autonomy";
+/** `memory_transitions.reason` of a candidate the full sweep activated. */
+export const FULL_SWEEP_TRANSITION_REASON = "full_sweep";
 const EMBED_BATCH = 32;
 
 export type EmbedFn = (texts: string[]) => Promise<Float32Array[]>;
@@ -78,6 +89,10 @@ export interface DreamReport {
   staledByExpiry: string[];
   mergeProposals: string[];
   fixSignatureProposals: string[];
+  /** 0.6.0-rc.2 full sweep: auto candidates activated by decideTier under `autonomy_level: "full"` (empty otherwise). */
+  sweptActivated: string[];
+  /** 0.6.0-rc.2 full sweep: activate_policy / activate_global proposals closed as expired(full_autonomy) with their target. */
+  sweptProposalsClosed: string[];
   embedded: number;
   idleClosed: string[];
   gc: { ledgers: number; states: number; raw: number; tmp: number; audit: number };
@@ -85,6 +100,11 @@ export interface DreamReport {
 }
 
 export type DreamWriteOp = WriteOp & { report: DreamReport };
+
+function oneLine(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`;
+}
 
 function addDays(iso: string, days: number): string {
   return new Date(Date.parse(iso) + days * 24 * 60 * 60 * 1000).toISOString();
@@ -125,6 +145,105 @@ function fireAndOverride(db: SqlJsDatabase, repository: MemoryRepository, now: s
       report.downgraded.push(memory.id);
       changed = true;
     }
+  }
+  return changed;
+}
+
+const SWEEP_CLOSED_PROPOSAL_KINDS: ReadonlySet<string> = new Set(["activate_policy", "activate_global"]);
+
+/**
+ * Same bookkeeping as the proposal queue's flagTarget after the sweep closed a row's activate_* proposals:
+ * `open_proposal_id` keeps pointing at a still-open proposal or is cleared. `contested` tracks supersede / stale /
+ * revalidate proposals only, which the sweep never touches.
+ */
+function refreshOpenProposalFlag(repository: MemoryRepository, proposals: ProposalRepository, memoryId: string): void {
+  const target = repository.getById(memoryId);
+  if (target === null) return;
+  const open = proposals.listOpen({ targetId: memoryId });
+  const first = open[0] ?? null;
+  const openProposalId = first === null ? null : open.some((proposal) => proposal.id === target.openProposalId) ? target.openProposalId : first.id;
+  if (target.openProposalId !== openProposalId) repository.setFlags(memoryId, { openProposalId, updatedAt: target.updatedAt });
+}
+
+/**
+ * Backlog drain (design §1, `autonomy_level: "full"` only). Every auto `candidate` row that is not a replacement row
+ * — no live `supersedes_memory_id` target and not the candidate of an open proposal, the same test as reconcile's
+ * decideTiers — is re-evaluated with decideTier under `full`, oldest first, and activated when it passes. The sweep
+ * has its own budget, `dream.full_sweep_per_run` activations per run: `capsRemaining` and `knowledgeCapsRemaining`
+ * are both the activations left here, never the extraction day caps, and a row that does not pass costs nothing,
+ * so unpassable old rows cannot stall the drain. An activation transitions the row by `auto_rule` (reason
+ * `full_sweep`), stores the decision's TTL / revalidate with validation_count = evidence_count − 1, writes an
+ * audit_log row (`full_sweep_activation`) and closes every open activate_policy / activate_global proposal on the
+ * row as `expired` with decision note `full_autonomy`. Human rows are never selected; `standard`, `shadow` and
+ * `off` leave this step out entirely.
+ */
+function fullSweep(db: SqlJsDatabase, repository: MemoryRepository, config: HarnessConfig, now: string, report: DreamReport): boolean {
+  if (config.autonomy_level !== "full") return false;
+  let remaining = Math.max(0, Math.floor(config.dream.full_sweep_per_run));
+  if (remaining === 0) return false;
+  const proposals = new ProposalRepository(db);
+  const candidates = repository
+    .list({ authority: "auto", status: "candidate" })
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+  let changed = false;
+
+  for (const memory of candidates) {
+    if (remaining <= 0) break;
+    const supersedesLive = memory.supersedesMemoryId !== null && resolveTargetRow(repository, memory.supersedesMemoryId) !== null;
+    if (supersedesLive || proposals.listOpen({ candidateId: memory.id }).length > 0) continue;
+
+    const hasSignature = memory.triggerSignature !== null && memory.signatureKey.length > 0;
+    const input: DecideTierInput = {
+      memory: {
+        type: memory.type,
+        scopeGlob: memory.scopeGlob,
+        hasSignature,
+        signatureTool: memory.triggerSignature?.tool ?? null,
+        relevantTools: memory.relevantTools,
+        lifecycleTriggers: memory.lifecycleTriggers,
+        confidence: memory.confidence,
+        authority: memory.authority,
+      },
+      evidenceScore: memory.evidenceScore,
+      capsRemaining: { episode: remaining, day: remaining },
+      knowledgeCapsRemaining: { day: remaining },
+      autonomyLevel: "full",
+      knowledgeKind: memory.knowledgeKind,
+      isReplacementRow: false,
+      // The validator rejected unsafe facts when the row was written; legacy / imported text is scanned here again.
+      scanSafe: scanMemoryContent(memory.summary, memory.details).safe,
+      horizon: memory.horizon,
+      now,
+    };
+    const decision = decideTier(input);
+    if (decision.status !== "active") continue;
+
+    transitionMemory(db, { memoryId: memory.id, to: "active", actor: "auto_rule", reason: FULL_SWEEP_TRANSITION_REASON, now });
+    repository.setTtl(memory.id, {
+      ttlExpiresAt: decision.ttlExpiresAt ?? null,
+      revalidateAfter: decision.revalidateAfter ?? null,
+      validationCount: Math.max(0, memory.evidenceCount - 1),
+      updatedAt: now,
+    });
+    const closed: string[] = [];
+    for (const proposal of proposals.listOpen({ targetId: memory.id })) {
+      if (!SWEEP_CLOSED_PROPOSAL_KINDS.has(proposal.kind)) continue;
+      proposals.decide(proposal.id, { status: "expired", decidedBy: "auto_rule", note: FULL_AUTONOMY_DECISION_NOTE, now });
+      closed.push(proposal.id);
+    }
+    if (closed.length > 0) refreshOpenProposalFlag(repository, proposals, memory.id);
+    writeAudit(
+      db,
+      "full_sweep_activation",
+      createDeterministicId(`audit:full_sweep_activation:${memory.id}:${now}`),
+      `full sweep: ${memory.type} ${oneLine(memory.summary, 80)} activated (evidence ${String(memory.evidenceScore)}, confidence ${String(memory.confidence)})`,
+      { memoryId: memory.id, type: memory.type, evidenceScore: memory.evidenceScore, confidence: memory.confidence, ttlExpiresAt: decision.ttlExpiresAt ?? null, proposalsClosed: closed },
+      now
+    );
+    report.sweptActivated.push(memory.id);
+    report.sweptProposalsClosed.push(...closed);
+    remaining -= 1;
+    changed = true;
   }
   return changed;
 }
@@ -607,6 +726,8 @@ export async function runDream(db: SqlJsDatabase, options: DreamOptions): Promis
     staledByExpiry: [],
     mergeProposals: [],
     fixSignatureProposals: [],
+    sweptActivated: [],
+    sweptProposalsClosed: [],
     embedded: 0,
     idleClosed: [],
     gc: { ledgers: 0, states: 0, raw: 0, tmp: 0, audit: 0 },
@@ -629,6 +750,7 @@ export async function runDream(db: SqlJsDatabase, options: DreamOptions): Promis
   };
 
   step("fire", () => fireAndOverride(db, repository, now, report));
+  step("sweep", () => fullSweep(db, repository, config, now, report));
   step("ttl", () => ttlExpiry(db, repository, config, now, report));
   step("expiry", () => candidateAndProposalExpiry(db, repository, config, now, report));
   step("merge", () => nearDuplicateMerges(db, repository, config, now, report));

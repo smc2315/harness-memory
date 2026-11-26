@@ -3,6 +3,10 @@
  * sets (correction_for union → import rule → tool-less correction/remember episodes) and the
  * run-level circuit breaker (non-JSON, > 8 facts, > 50 % hallucinated refs → `suspect`).
  *
+ * 0.6.0-rc.2 (design §2): every accepted fact also carries `signature_precision` (the compiled signature tested
+ * against the episode's `tool_ok` lines the way the hooks would), `side_effect` and `horizon` (extractor fields
+ * normalized to their defaults). The reconciler stores the three in their own columns (migration 023).
+ *
  * Pure: no database. The worker supplies the existing memory ids and, for `correction_for`
  * episodes, the corrected episode's scope_refs / tools.
  */
@@ -36,7 +40,10 @@ import {
   isGlobalScope,
   toolFamily,
   type CanonicalToolFamily,
+  type Horizon,
   type LifecycleTrigger,
+  type SideEffect,
+  type SignaturePrecision,
   type TriggerSignature,
 } from "../../core/vocabulary";
 import { citesRememberPrompt } from "../../promotion/remember";
@@ -76,6 +83,17 @@ export interface ValidatedFact extends ExtractionFact {
   normalizedScope: string;
   /** e.g. `signature_dropped`, `tool_not_hooked`, `no_target_create` */
   relabels: string[];
+  /**
+   * 0.6.0-rc.2 (design §2): `mistake_exact` when `compiledSignature` hits no `tool_ok` line of the episode other than the
+   * cited mistaken call; `noun` when it also hits an uncited `tool_ok` line or a cited line that resolved a failure
+   * (the pattern names the operation, not the mistake). `null` when the fact ends without a signature (none, or V10
+   * dropped it). Only `mistake_exact` rows may be born at or climb to soft_deny (§3).
+   */
+  signature_precision: SignaturePrecision | null;
+  /** 0.6.0-rc.2: `trigger_signature.side_effect` of the signature the fact ends with, `read` when absent or without a signature. */
+  side_effect: SideEffect;
+  /** 0.6.0-rc.2: the extractor's `horizon`, `durable` when absent (`task` = 7-day TTL, never above advise). */
+  horizon: Horizon;
 }
 
 export type SuspectReason = "not_json" | "schema" | "too_many_facts" | "hallucinated_refs";
@@ -278,6 +296,33 @@ function resolutionConflict(compiled: CompiledSignature, refs: readonly string[]
   return null;
 }
 
+/**
+ * Signature precision (design §2). The compiled signature is tested against every `tool_ok` line the prompt rendered
+ * (`seqMap`: citable ref → line) the way the hooks would: the signature's tool glob must cover the line's tool, then
+ * the input digest or, when present, the first scope ref must match (the two checks of `classifyFiredOutcome`). A hit
+ * on a line the fact does not cite, or on a cited line that resolved a failure (`resolution_of` set), means the pattern
+ * names the operation (a host, a table, a tool) rather than the mistake → `noun`. No such hit → `mistake_exact`.
+ * `tool_fail` lines never count: the mistaken call failing is what the signature exists for. V12 stays the separate,
+ * rejecting case (the signature matches the resolving command of a *different* program).
+ */
+export function signaturePrecision(
+  compiled: CompiledSignature,
+  evidenceRefs: readonly string[],
+  seqMap: ReadonlyMap<string, LedgerLine>
+): SignaturePrecision {
+  const cited = new Set(evidenceRefs);
+  for (const [ref, line] of seqMap) {
+    if (line.kind !== "tool_ok") continue;
+    if (cited.has(ref) && line.resolution_of === null) continue;
+    if (!toolGlobMatches(compiled.tool, line.tool)) continue;
+    const digestHit = line.input_digest.length > 0 && matchSignature(compiled, line.input_digest, line.shell_dialect);
+    const scopeRef = line.scope_refs[0];
+    const scopeHit = scopeRef !== undefined && scopeRef.length > 0 && matchSignature(compiled, scopeRef, line.shell_dialect);
+    if (digestHit || scopeHit) return "noun";
+  }
+  return "mistake_exact";
+}
+
 function validateFact(original: ExtractionFact, ordinal: number, ctx: FactContext): FactResult {
   const relabels: string[] = [];
   let fact: ExtractionFact = {
@@ -394,6 +439,13 @@ function validateFact(original: ExtractionFact, ordinal: number, ctx: FactContex
   const normalizedScope = compiled !== null && !commandSignatureNamesPath(compiled) ? GLOBAL_SCOPE : scope.normalized;
   const key = semanticKey(fact.type, normalizedScope, compiled?.signature_key ?? "", fact.summary);
 
+  // 0.6.0-rc.2 (design §2) — precision of the signature the fact ends with (null once V10 dropped it), and the
+  // extractor's optional side_effect / horizon normalized to their defaults. The stored trigger_signature object is
+  // left as it arrived (side_effect may stay on it); the reconciler writes the three into their own columns.
+  const precision = compiled === null ? null : signaturePrecision(compiled, fact.evidence_refs, ctx.seqMap);
+  const sideEffect: SideEffect = signature?.side_effect ?? "read";
+  const horizon: Horizon = fact.horizon ?? "durable";
+
   return {
     ok: true,
     fact: {
@@ -406,6 +458,9 @@ function validateFact(original: ExtractionFact, ordinal: number, ctx: FactContex
       semanticKey: key,
       normalizedScope,
       relabels,
+      signature_precision: precision,
+      side_effect: sideEffect,
+      horizon,
     },
   };
 }

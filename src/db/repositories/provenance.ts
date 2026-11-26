@@ -6,6 +6,13 @@
  * for `authority='auto'` rows only, `confidence = min(0.99, max(provenance.confidence) + 0.05 * (evidence_count - 1))`.
  * Human rows keep their confidence and importance frozen. Reconcile calls it inside the same SAVEPOINT
  * that inserted the provenance rows, before `decideTier` reads evidenceScore.
+ *
+ * `distinct_session_count` (0.6.0-rc.2, docs/redesign/full-autonomy-0.6.0-rc.2.md §4) counts distinct
+ * `(session_id, 4-hour block of episodes.started_at)` pairs rather than sessions: in the dogfood run one session was
+ * resumed for 17 days and held half of all episodes, so "another session" never happened inside it and the A′ ladder
+ * never saw reinforcement. The same fact coming back ≥ 4 hours later in the same session now counts as another
+ * block. Provenance rows whose episode is unknown (import bullets such as `import:CLAUDE.md`) keep counting once
+ * per episode id, as before.
  */
 
 import type { Database as SqlJsDatabase } from "sql.js";
@@ -48,8 +55,18 @@ const PROVENANCE_COLUMNS = [
 export const PROVENANCE_EXCERPT_MAX_CHARS = 500;
 export const AUTO_CONFIDENCE_CAP = 0.99;
 export const AUTO_CONFIDENCE_STEP = 0.05;
+/** Width of the `(session_id, block of episodes.started_at)` pair that `distinct_session_count` counts (design §4). */
+export const SESSION_BLOCK_HOURS = 4;
 
 const EVIDENCE_RELATION_SQL = EVIDENCE_RELATIONS.map((relation) => `'${relation}'`).join(", ");
+const SESSION_BLOCK_SECONDS = SESSION_BLOCK_HOURS * 60 * 60;
+/**
+ * Session-block key of an evidence episode: `<session_id>/<floor(unix(started_at) / 4h)>`. The division sits inside
+ * the CAST on purpose: SQLite binds `||` tighter than `/`, so `a || '/' || x / n` would divide the concatenated text.
+ * An unparseable `started_at` makes the block NULL and the key falls back to the session id (one block per session),
+ * a missing episode row (import bullet) to the episode id.
+ */
+const SESSION_BLOCK_KEY_SQL = `COALESCE(e.session_id || '/' || CAST(strftime('%s', e.started_at) / ${String(SESSION_BLOCK_SECONDS)} AS INTEGER), e.session_id, ev.episode_id)`;
 
 export interface ProvenanceRecord {
   memoryId: string;
@@ -80,6 +97,11 @@ export interface DerivedAggregate {
   evidenceCount: number;
   /** Sum of episodes.evidence_weight over those episodes; import relations and unknown episodes weigh 1. */
   evidenceScore: number;
+  /**
+   * COUNT(DISTINCT (session_id, 4-hour block of episodes.started_at)) over those episodes (0.6.0-rc.2 §4); an
+   * episode id without an episodes row (import bullet) counts as its own entry. What the A′ ladder compares with
+   * `before_tool.auto_escalation.sessions`.
+   */
   distinctSessionCount: number;
   /** MAX(confidence) over the evidence relations, null when there is no evidence. */
   maxConfidence: number | null;
@@ -166,7 +188,7 @@ export class ProvenanceRepository {
         )
         SELECT COUNT(*) AS evidence_count,
                COALESCE(SUM(CASE WHEN ev.is_import = 1 THEN 1.0 ELSE COALESCE(e.evidence_weight, 1.0) END), 0) AS evidence_score,
-               COUNT(DISTINCT COALESCE(e.session_id, ev.episode_id)) AS distinct_session_count,
+               COUNT(DISTINCT ${SESSION_BLOCK_KEY_SQL}) AS distinct_session_count,
                MAX(ev.max_confidence) AS max_confidence
         FROM ev
         LEFT JOIN episodes e ON e.id = ev.episode_id
@@ -188,8 +210,10 @@ export class ProvenanceRepository {
 }
 
 /**
- * Writes the derived counters of one memory from its provenance (§5.7 step 4/5). Auto rows also get
- * their confidence recomputed; human rows keep confidence/importance. Throws MemoryNotFoundError.
+ * Writes the derived counters of one memory from its provenance (§5.7 step 4/5): evidence_count (distinct evidence
+ * episodes), evidence_score (their weights), distinct_session_count (distinct session / 4-hour-block pairs, 0.6.0-rc.2
+ * §4). Auto rows also get their confidence recomputed; human rows keep confidence/importance. Throws
+ * MemoryNotFoundError.
  */
 export function recomputeDerived(db: SqlJsDatabase, memoryId: string): RecomputeDerivedResult {
   const current = selectOne(db, "SELECT authority, confidence FROM memories WHERE id = $id", { $id: memoryId });

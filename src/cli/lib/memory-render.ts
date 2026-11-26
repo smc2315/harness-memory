@@ -102,6 +102,7 @@ export function renderMemoryDetail(memory: MemoryRecord, extras: MemoryDetailExt
     field("scope", `${memory.scopeGlob} (${memory.activationClass})`),
     field("triggers", memory.lifecycleTriggers.join(", ")),
     field("signature", formatSignature(memory.triggerSignature)),
+    field("precision", `${memory.signaturePrecision ?? "-"} / side effect ${memory.sideEffect ?? "-"} / horizon ${memory.horizon ?? "-"}`),
     field("relevant_tools", memory.relevantTools === null ? null : memory.relevantTools.join(", ")),
     field("confidence", `${memory.confidence.toFixed(2)} (importance ${memory.importance.toFixed(2)}, validations ${String(memory.validationCount)})`),
     field("evidence", `score ${String(memory.evidenceScore)}, episodes ${String(memory.evidenceCount)}, sessions ${String(memory.distinctSessionCount)}`),

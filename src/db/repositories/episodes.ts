@@ -463,6 +463,27 @@ export class EpisodeRepository {
     return row === null ? 0 : expectNumber(row.n, "n");
   }
 
+  /**
+   * Decision-marker-only episodes (`evidence_weight = 0`, session hosts) that reached the extractor since `startIso`:
+   * one per episode with an extraction run started at or after that time, whatever the run's status — the same
+   * accounting as `max_runs_per_day` (a retry reuses the run id). Pass the start of the UTC day for the
+   * `extraction.decision_only_per_day` cap (0.6.0-rc.2, design §5).
+   */
+  countDecisionOnlyExtractedSince(startIso: string): number {
+    const row = selectOne(
+      this.db,
+      `
+        SELECT COUNT(DISTINCT e.id) AS n
+        FROM episodes e
+        JOIN extraction_runs r ON r.episode_id = e.id
+        WHERE e.evidence_weight = 0 AND e.host <> 'import' AND r.started_at >= $start
+      `,
+      { $start: startIso }
+    );
+
+    return row === null ? 0 : expectNumber(row.n, "n");
+  }
+
   countByStatus(): Record<EpisodeStatus, number> {
     const counts: Record<EpisodeStatus, number> = {
       queued: 0,

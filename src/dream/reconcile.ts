@@ -5,13 +5,21 @@
  * bad fact never poisons the batch. Order per fact:
  *   2 normalize (type boundary, trigger correction, semantic_key, failure classes)
  *   3 resolve the target: `t` = target_memory_id (following superseded_by), `m` = live row with the same
- *     semantic_key, else a Jaccard ≥ 0.6 neighbour of the same type with an intersecting scope
+ *     semantic_key, else a neighbour of the same type with an intersecting scope (findNeighbour: Jaccard ≥ 0.6 on
+ *     the summary, or — 0.6.0-rc.2 design §4 — equal / substring signature keys of one tool, ≥ 2 shared aliases, a
+ *     shared error-code token; a signature-bearing fact is never absorbed by a signature-less row)
  *   4 create → reinforce(m) when a twin exists, else MemoryRepository.create({authority:'auto', status:'candidate'})
- *     + memory_provenance(origin) + recomputeDerived INSIDE the savepoint (R1: step 7 must see evidence_score)
+ *     + memory_provenance(origin) + recomputeDerived INSIDE the savepoint (R1: step 7 must see evidence_score).
+ *     The row is born with the validator's signature_precision, the signature's side_effect and the fact's horizon
+ *     (migration 023), which enforcementDefault reads for the silent-write soft_deny birth (design §3 rule 1); a
+ *     reinforce leaves the three stored values alone
  *   5 reinforce → provenance(reinforce) + recomputeDerived + revalidateMemory (auto active/stale), stale(ttl_expired) → active
  *   6 propose_supersede / propose_stale → replacement candidate row, provenance(contradict), openOrSupportProposal,
  *     auto demotion rule (two sessions) — human rows are only flagged contested
- *   7 decideTier for every created / reinforced auto candidate (replacement rows are always candidate)
+ *   7 decideTier for every created / reinforced auto candidate (replacement rows are always candidate). Under
+ *     `autonomy_level` full (design §1) nothing opens a proposal or writes the notify file; decision /
+ *     architecture_constraint activations are counted against `extraction.max_auto_knowledge_activations_per_day`,
+ *     separately from the pitfall / workflow / policy caps
  *   8 extraction_runs.outcomes_json, episodes.status = extracted, session_summaries upsert; the WriteOp carries the run id
  *
  * Step 1 (write_ops idempotency) is answered through `ctx.alreadyApplied(runId)`; a re-applied run only marks
@@ -68,6 +76,8 @@ import type { ValidatedFact, ValidationResult } from "./extract/validate";
 
 export const NEIGHBOUR_JACCARD = 0.6;
 export const NEIGHBOUR_COSINE = 0.85;
+/** 0.6.0-rc.2 design §4: shared case-folded aliases that make two live rows of one type twins without a Jaccard hit. */
+export const NEIGHBOUR_MIN_SHARED_ALIASES = 2;
 export const RECENT_REJECT_DAYS = 30;
 export const MAX_EXTRACTION_ATTEMPTS = 3;
 /** Backoff after the n-th failed attempt (1-based); the third failure makes the episode `dead` (§9.4 F3). */
@@ -219,6 +229,92 @@ function uniqueTriggers(triggers: readonly LifecycleTrigger[]): LifecycleTrigger
   const order: LifecycleTrigger[] = ["session_start", "before_model", "before_tool", "after_tool"];
   const set = new Set(triggers);
   return order.filter((trigger) => set.has(trigger));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Neighbour rules (step 3; 0.6.0-rc.2 design §4)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Error-code shapes: `C001`, `G006`, `P003`, `E0308`; `ERROR 1054`; `JDBC-11021`, `ORA-00942`. Upper-case only — a code
+ * is quoted the way the tool printed it — and matched over summary + details of both rows.
+ */
+const ERROR_CODE_PATTERNS: readonly RegExp[] = [/\b[A-Z]{1,4}[0-9]{3,4}\b/g, /\bERROR [0-9]{4}\b/g, /\b[A-Z]+-[0-9]{4,5}\b/g];
+/** A four-digit run that reads as a year (`FY2026`, `CVE-2026`, `ERROR 2026`) names a date, not a failure. */
+const YEAR_DIGITS = /^(?:19|20)[0-9]{2}$/;
+/** Upper-case technical names of the first shape that name an algorithm or a standard rather than a failure. */
+export const ERROR_CODE_STOPLIST: ReadonlySet<string> = new Set([
+  "SHA256",
+  "SHA384",
+  "SHA512",
+  "AES128",
+  "AES192",
+  "AES256",
+  "RSA2048",
+  "RSA4096",
+  "ISO8601",
+  "X509",
+  "H264",
+  "H265",
+]);
+
+/** Error-code tokens of a text (design §4), years and the stoplist excluded; compared verbatim between two rows. */
+export function errorCodeTokens(text: string): Set<string> {
+  const tokens = new Set<string>();
+  for (const pattern of ERROR_CODE_PATTERNS) {
+    for (const match of text.matchAll(pattern)) {
+      const token = match[0];
+      const digits = /[0-9]+$/.exec(token)?.[0] ?? "";
+      if (YEAR_DIGITS.test(digits) || ERROR_CODE_STOPLIST.has(token)) continue;
+      tokens.add(token);
+    }
+  }
+  return tokens;
+}
+
+/** `tool|target|kind|pattern…` (activation/signature.ts buildSignatureKey): the tool glob is the first field. */
+function signatureKeyTool(key: string): string {
+  const end = key.indexOf("|");
+  return end === -1 ? key : key.slice(0, end);
+}
+
+/**
+ * Design §2 / §4: two non-empty signature keys are twins when they are equal, or when one is a substring of the other
+ * for the same tool (`bash|command|cmd|npm test` and `bash|command|cmd|npm test --coverage`: the longer pattern names
+ * the same mistake more narrowly). Whole keys are compared, so `…|npm test` is not a twin of `…|pnpm test`.
+ */
+export function signatureKeysTwin(left: string, right: string): "signature_key" | "signature_substring" | null {
+  if (left.length === 0 || right.length === 0) return null;
+  if (left === right) return "signature_key";
+  if (signatureKeyTool(left) !== signatureKeyTool(right)) return null;
+  return left.includes(right) || right.includes(left) ? "signature_substring" : null;
+}
+
+function foldedAliases(aliases: readonly string[]): Set<string> {
+  const folded = new Set<string>();
+  for (const alias of aliases) {
+    const key = alias.trim().toLowerCase();
+    if (key.length > 0) folded.add(key);
+  }
+  return folded;
+}
+
+/** Number of aliases two rows share after trimming and case-folding (design §4: ≥ NEIGHBOUR_MIN_SHARED_ALIASES makes twins). */
+export function sharedAliasCount(left: readonly string[], right: readonly string[]): number {
+  const rightSet = foldedAliases(right);
+  let shared = 0;
+  for (const alias of foldedAliases(left)) if (rightSet.has(alias)) shared += 1;
+  return shared;
+}
+
+export type NeighbourRule = "jaccard" | "signature_key" | "signature_substring" | "aliases" | "error_code";
+
+export interface NeighbourMatch {
+  memory: MemoryRecord;
+  /** Token Jaccard of the two summaries — the tie-breaker among several matches, whatever rule matched. */
+  score: number;
+  /** Every rule that matched, in the order above; never empty. */
+  rules: NeighbourRule[];
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -485,8 +581,11 @@ interface RunState {
   proposalIds: string[];
   escalated: string[];
   remembered: string[];
+  /** Today's / this run's auto activations of pitfall / workflow / policy rows (extraction.max_auto_activations_per_day / _per_episode). */
   activatedToday: number;
   activatedThisRun: number;
+  /** 0.6.0-rc.2: today's auto activations of decision / architecture_constraint rows (extraction.max_auto_knowledge_activations_per_day). */
+  knowledgeActivatedToday: number;
   isImport: boolean;
   hasHumanSignal: 0 | 1;
   lines: LedgerLine[];
@@ -532,15 +631,72 @@ export function resolveTargetRow(repository: MemoryRepository, targetId: string 
   return current !== null && (LIVE_STATUSES as readonly MemoryStatus[]).includes(current.status) ? current : null;
 }
 
-export function findNeighbour(repository: MemoryRepository, normalized: NormalizedFact): MemoryRecord | null {
-  const tokens = summaryTokens(normalized.fact.summary);
-  let best: { memory: MemoryRecord; score: number } | null = null;
+interface NeighbourProbe {
+  tokens: Set<string>;
+  aliases: readonly string[];
+  codes: Set<string>;
+}
+
+function neighbourProbe(normalized: NormalizedFact): NeighbourProbe {
+  const { fact } = normalized;
+  return { tokens: summaryTokens(fact.summary), aliases: fact.aliases, codes: errorCodeTokens(`${fact.summary}\n${fact.details}`) };
+}
+
+function neighbourRulesFor(normalized: NormalizedFact, probe: NeighbourProbe, memory: MemoryRecord): { score: number; rules: NeighbourRule[] } {
+  const score = jaccard(probe.tokens, summaryTokens(memory.summary));
+  const rules: NeighbourRule[] = [];
+  if (score >= NEIGHBOUR_JACCARD) rules.push("jaccard");
+  const keyRule = signatureKeysTwin(normalized.signatureKey, memory.signatureKey);
+  if (keyRule !== null) rules.push(keyRule);
+  if (sharedAliasCount(probe.aliases, memory.aliases) >= NEIGHBOUR_MIN_SHARED_ALIASES) rules.push("aliases");
+  if (probe.codes.size > 0) {
+    const memoryCodes = errorCodeTokens(`${memory.summary}\n${memory.details}`);
+    for (const code of probe.codes) {
+      if (memoryCodes.has(code)) {
+        rules.push("error_code");
+        break;
+      }
+    }
+  }
+  return { score, rules };
+}
+
+/**
+ * The step 3 rules (§5.7; 0.6.0-rc.2 design §4) that make a live row of the fact's type with an intersecting scope its
+ * twin: summary Jaccard ≥ NEIGHBOUR_JACCARD, equal signature keys, substring keys of one tool, ≥
+ * NEIGHBOUR_MIN_SHARED_ALIASES shared aliases, a shared error-code token. Empty when the row is no twin — including
+ * every signature-less row when the fact carries a signature (§5.7: a signature is never absorbed by a row without one),
+ * and every row of another type or a disjoint scope.
+ */
+export function neighbourRules(normalized: NormalizedFact, memory: MemoryRecord): NeighbourRule[] {
+  if (memory.type !== normalized.type || !isLiveRow(memory)) return [];
+  if (!scopesIntersect(memory.scopeGlob, normalized.scopeGlob)) return [];
+  if (normalized.signatureKey.length > 0 && memory.signatureKey.length === 0) return [];
+  return neighbourRulesFor(normalized, neighbourProbe(normalized), memory).rules;
+}
+
+/**
+ * Step 3 neighbour: among the live rows of the fact's type whose scope intersects (and, for a signature-bearing fact,
+ * that carry a signature themselves), every row that matches any rule is a candidate and the one with the highest
+ * summary Jaccard wins — a key or alias match with little shared wording loses to a closer restatement. Ties keep the
+ * first row in repository order (newest first).
+ */
+export function findNeighbourMatch(repository: MemoryRepository, normalized: NormalizedFact): NeighbourMatch | null {
+  const probe = neighbourProbe(normalized);
+  const factHasSignature = normalized.signatureKey.length > 0;
+  let best: NeighbourMatch | null = null;
   for (const memory of repository.list({ type: normalized.type, status: LIVE_STATUSES })) {
     if (!scopesIntersect(memory.scopeGlob, normalized.scopeGlob)) continue;
-    const score = jaccard(tokens, summaryTokens(memory.summary));
-    if (score >= NEIGHBOUR_JACCARD && (best === null || score > best.score)) best = { memory, score };
+    if (factHasSignature && memory.signatureKey.length === 0) continue;
+    const { score, rules } = neighbourRulesFor(normalized, probe, memory);
+    if (rules.length === 0) continue;
+    if (best === null || score > best.score) best = { memory, score, rules };
   }
-  return best?.memory ?? null;
+  return best;
+}
+
+export function findNeighbour(repository: MemoryRepository, normalized: NormalizedFact): MemoryRecord | null {
+  return findNeighbourMatch(repository, normalized)?.memory ?? null;
 }
 
 function recentlyRejected(repository: MemoryRepository, normalized: NormalizedFact, input: CreateMemoryInput, now: string): MemoryRecord | null {
@@ -593,6 +749,11 @@ function createInputFor(state: RunState, normalized: NormalizedFact, supersedes:
   const remember = supersedes === null && isRememberCreate(state, normalized);
   const authority = state.isImport || remember ? "human" : "auto";
   const knowledgeKind: KnowledgeKind = state.isImport ? "import" : normalized.knowledgeKind;
+  // 0.6.0-rc.2 (migration 023, design §2): the validator's precision and the signature's side effect exist only with
+  // a signature; the horizon is the fact's (`durable` when the extractor said nothing). Stored once at birth — a
+  // reinforce never rewrites them, the first extraction's verdict stands.
+  const signaturePrecision = hasSignature ? fact.signature_precision : null;
+  const sideEffect = hasSignature ? fact.side_effect : null;
   const enforcement = remember
     ? rememberEnforcement(normalized.type, hasSignature, state.ctx.config)
     : enforcementDefault({
@@ -605,6 +766,12 @@ function createInputFor(state: RunState, normalized: NormalizedFact, supersedes:
         importUnconfirmed: state.isImport ? 1 : 0,
         config: state.ctx.config,
         summary: fact.summary,
+        // Design §3 rule 1 (silent-write soft_deny birth) reads these four; the evidence a row is born with is this
+        // episode's weight — its first and only provenance at this point (recomputeDerived runs after the insert).
+        signaturePrecision,
+        sideEffect,
+        horizon: fact.horizon,
+        evidenceScore: state.descriptor.evidence_weight,
       });
   return {
     type: normalized.type,
@@ -630,6 +797,9 @@ function createInputFor(state: RunState, normalized: NormalizedFact, supersedes:
     triggerSignature: hasSignature ? fact.trigger_signature : null,
     signatureKey: normalized.signatureKey,
     semanticKey: normalized.semanticKey,
+    signaturePrecision,
+    sideEffect,
+    horizon: fact.horizon,
     aliases: fact.aliases,
     failureClasses: normalized.failureClasses,
     sourceRef: state.isImport ? state.descriptor.ledger_ref : `episode:${state.descriptor.id}`,
@@ -825,15 +995,17 @@ function applyFact(state: RunState, fact: ValidatedFact): FactOutcome {
   const normalized = normalizeFact(fact, state.descriptor, state.ctx.seqMap, state.ctx.correctionForEpisode);
   const target = resolveTargetRow(state.repository, fact.target_memory_id);
   const sameKey = state.repository.getBySemanticKey(normalized.semanticKey);
-  const hasSignature = fact.compiledSignature !== null && fact.trigger_signature !== null;
 
   switch (fact.action) {
     case "create":
     case "reinforce": {
       let twin = target ?? sameKey;
+      // Step 3 neighbour (findNeighbourMatch applies the §5.7 rule: a signature-bearing fact never lands on a
+      // signature-less row); the matching rules are reported in the outcome detail for the replay fixtures.
+      let neighbour: NeighbourMatch | null = null;
       if (twin === null && fact.action === "create") {
-        const neighbour = findNeighbour(state.repository, normalized);
-        if (neighbour !== null && !(neighbour.signatureKey.length === 0 && hasSignature)) twin = neighbour;
+        neighbour = findNeighbourMatch(state.repository, normalized);
+        if (neighbour !== null) twin = neighbour.memory;
       }
       const escalatedBefore = state.escalated.length;
       const rememberedBefore = state.remembered.length;
@@ -848,6 +1020,7 @@ function applyFact(state: RunState, fact: ValidatedFact): FactOutcome {
       const addDetail = (extra: string): void => {
         outcome.detail = outcome.detail === undefined ? extra : `${outcome.detail}; ${extra}`;
       };
+      if (step.kind === "reinforced" && neighbour !== null) addDetail(`neighbour=${neighbour.rules.join("+")}`);
       if (state.remembered.length > rememberedBefore) addDetail("remember:active");
       if (state.escalated.length > escalatedBefore) addDetail("escalated=soft_deny");
       if (step.kind === "reinforced") {
@@ -886,9 +1059,32 @@ function applyFact(state: RunState, fact: ValidatedFact): FactOutcome {
   }
 }
 
-function countAutoActivationsSince(db: SqlJsDatabase, startIso: string): number {
-  // from_status <> to_status: an A′ escalation is recorded as active → active by auto_rule and is not an activation.
-  const row = selectOne(db, "SELECT COUNT(*) AS n FROM memory_transitions WHERE actor = 'auto_rule' AND to_status = 'active' AND from_status <> to_status AND created_at >= ?", [startIso]);
+const KNOWLEDGE_TYPES: readonly MemoryType[] = ["decision", "architecture_constraint"];
+const KNOWLEDGE_TYPE_SQL = KNOWLEDGE_TYPES.map((type) => `'${type}'`).join(", ");
+
+/** 0.6.0-rc.2 (design §1): decision / architecture_constraint rows draw on `extraction.max_auto_knowledge_activations_per_day`, not on the rule caps. */
+export function isKnowledgeType(type: MemoryType): boolean {
+  return KNOWLEDGE_TYPES.includes(type);
+}
+
+/**
+ * Today's automatic activations (memory_transitions by auto_rule into active) charged to one of the two daily budgets:
+ * `rules` = pitfall / workflow / policy rows (extraction.max_auto_activations_per_day), `knowledge` = decision /
+ * architecture_constraint rows (extraction.max_auto_knowledge_activations_per_day, 0.6.0-rc.2). The split keeps a
+ * knowledge activation from eating the rule budget on the next run of the day. from_status <> to_status: an A′
+ * escalation is recorded as active → active by auto_rule and is not an activation.
+ */
+function countAutoActivationsSince(db: SqlJsDatabase, startIso: string, budget: "rules" | "knowledge"): number {
+  const typeFilter = budget === "knowledge" ? `m.type IN (${KNOWLEDGE_TYPE_SQL})` : `(m.type IS NULL OR m.type NOT IN (${KNOWLEDGE_TYPE_SQL}))`;
+  const row = selectOne(
+    db,
+    `SELECT COUNT(*) AS n
+     FROM memory_transitions t
+     LEFT JOIN memories m ON m.id = t.memory_id
+     WHERE t.actor = 'auto_rule' AND t.to_status = 'active' AND t.from_status <> t.to_status AND t.created_at >= ?
+       AND (t.reason IS NULL OR t.reason <> 'full_sweep') AND ${typeFilter}`,
+    [startIso]
+  );
   return row === null ? 0 : Number(row.n ?? 0);
 }
 
@@ -924,6 +1120,10 @@ function decideTiers(state: RunState): void {
         episode: config.extraction.max_auto_activations_per_episode - state.activatedThisRun,
         day: config.extraction.max_auto_activations_per_day - state.activatedToday,
       },
+      // 0.6.0-rc.2 (`full`): decision / architecture_constraint rows have their own daily budget (design §1) and the
+      // row's horizon sets the TTL (task → 7 days). Both are ignored by the `standard` / `shadow` / `off` chain.
+      knowledgeCapsRemaining: { day: config.extraction.max_auto_knowledge_activations_per_day - state.knowledgeActivatedToday },
+      horizon: memory.horizon,
       autonomyLevel: config.autonomy_level,
       knowledgeKind: memory.knowledgeKind,
       isReplacementRow,
@@ -946,8 +1146,14 @@ function decideTiers(state: RunState): void {
         updatedAt: state.ctx.now,
       });
       state.activated.push(memory.id);
-      state.activatedThisRun += 1;
-      state.activatedToday += 1;
+      // Each type family draws on its own budget: a knowledge row (only ever active here under `full`) must not
+      // consume the pitfall / workflow / policy caps, nor the other way round.
+      if (isKnowledgeType(memory.type)) {
+        state.knowledgeActivatedToday += 1;
+      } else {
+        state.activatedThisRun += 1;
+        state.activatedToday += 1;
+      }
       if (outcome !== undefined) {
         if (outcome.outcome === "created" || outcome.outcome === "reinforced") outcome.outcome = "activated";
         outcome.detail = outcome.detail === undefined ? "tier=active" : `${outcome.detail}; tier=active`;
@@ -967,6 +1173,8 @@ function decideTiers(state: RunState): void {
       );
     }
 
+    // `standard` (and its shadow dry run / off) only: decideTier never sets a proposal under `full`, so no activate_*
+    // proposal is opened and no notify file is written there (design §1).
     if (decision.proposal !== undefined) {
       const opened = openOrSupportProposal(state.db, {
         kind: decision.proposal,
@@ -1066,8 +1274,9 @@ export function reconcileRun(db: SqlJsDatabase, input: ReconcileInput): Reconcil
     proposalIds: [],
     escalated: [],
     remembered: [],
-    activatedToday: countAutoActivationsSince(db, startOfUtcDay(ctx.now)),
+    activatedToday: countAutoActivationsSince(db, startOfUtcDay(ctx.now), "rules"),
     activatedThisRun: 0,
+    knowledgeActivatedToday: countAutoActivationsSince(db, startOfUtcDay(ctx.now), "knowledge"),
     isImport: descriptor.host === "import",
     hasHumanSignal: descriptor.flags.correction === 1 || descriptor.flags.remember === 1 ? 1 : 0,
     lines: [...ctx.seqMap.values()],

@@ -8,8 +8,10 @@ import { defineScenario } from "../scenario";
 
 export const s02 = defineScenario({
   id: "s02",
-  title: "bare failure → candidate; a second episode reinforces it to active",
+  title: "bare failure → candidate; a second episode reinforces it to active (standard review gate)",
   asserts: ["b"],
+  // The evidence ≥ 2 rule is the standard level's; under the rc.2 default (full) a bare failure activates at advise from evidence 1.
+  config: { autonomy_level: "standard" },
   async run(run) {
     const first = await run.turn("A", "s02-bare-failure.jsonl");
     run.checkTurn(first);

@@ -12,6 +12,7 @@ import type { Database as SqlJsDatabase } from "sql.js";
 import { memoryTableRow } from "../src/cli/lib/memory-render";
 import { DEFAULT_CONFIG } from "../src/core/config";
 import type { EpisodeDescriptor } from "../src/core/episode-types";
+import type { ExtractionFact } from "../src/core/extraction-types";
 import type { LedgerLine } from "../src/core/ledger-types";
 import { resolvePaths } from "../src/core/paths";
 import { hasWriteOp } from "../src/db/meta";
@@ -39,6 +40,13 @@ const s02 = loadLedgerFixture("s02-fail-then-resolve.jsonl").lines.filter((line)
 let db: SqlJsDatabase;
 let memories: MemoryRepository;
 
+/**
+ * 0.6.0-rc.2: DEFAULT_CONFIG.autonomy_level is `full` (everything activates on its own at advise). Scenarios that
+ * exist to test the rc.1 review gate — evidence ≥ 2, the activate_* proposals, informational types waiting — pin
+ * `standard` explicitly; everything else runs under the default.
+ */
+const STANDARD = { ...DEFAULT_CONFIG, autonomy_level: "standard" as const };
+
 beforeEach(async () => {
   db = await createTestDb({ now: REPLAY_NOW });
   memories = new MemoryRepository(db, { clock: () => REPLAY_NOW });
@@ -59,11 +67,14 @@ function bareFailureLines(turnKey: string, seqBase: number): LedgerLine[] {
   ];
 }
 
-describe("(a) correction episode → active / auto / advise (A′ ladder start); (j) evidence_weight 2", () => {
+describe("(a) correction episode → active / auto / advise (A′ ladder start); (j) a bare correction cue weighs 1 (rc.2 §5) and still activates under full", () => {
   test("s01 p1 with a recorded pitfall activates in one run", () => {
     const descriptor = descriptorFromLines(s01);
     expect(descriptor.flags).toEqual({ correction: 1 });
-    expect(descriptor.evidence_weight).toBe(2);
+    // 0.6.0-rc.2 design §5: a correction cue without `correction_for` is a bare cue (weight 1); under `full` (the
+    // default) a pitfall with a signature activates from evidence ≥ 1 (FULL_ACTIVATION_MIN_EVIDENCE).
+    expect(DEFAULT_CONFIG.autonomy_level).toBe("full");
+    expect(descriptor.evidence_weight).toBe(1);
 
     const output = outputFixture([factFixture({ evidence_refs: ["e1"] })]);
     const result = applyRun(db, { descriptor, lines: s01, output });
@@ -85,9 +96,14 @@ describe("(a) correction episode → active / auto / advise (A′ ladder start);
     expect(memory.sourceKind).toBe("extraction");
     expect(memory.sourceRef).toBe(`episode:${descriptor.id}`);
     expect(memory.knowledgeKind).toBe("correction");
-    expect(memory.evidenceScore).toBe(2);
+    expect(memory.evidenceScore).toBe(1);
     expect(memory.evidenceCount).toBe(1);
     expect(memory.validationCount).toBe(0);
+    // Migration 023 columns, written at birth from the validator: s01 has no tool_ok line, so the signature hits
+    // nothing but the mistake (mistake_exact); the recorded output names no side_effect / horizon (read / durable).
+    expect(memory.signaturePrecision).toBe("mistake_exact");
+    expect(memory.sideEffect).toBe("read");
+    expect(memory.horizon).toBe("durable");
     expect(memory.promotionSource).toBe("auto");
     expect(memory.signatureKey).toBe("bash|command|cmd|npm test");
     expect(memory.scopeGlob).toBe("**/*");
@@ -119,11 +135,13 @@ describe("(a) correction episode → active / auto / advise (A′ ladder start);
 });
 
 describe("(b) a bare failure yields a candidate; a second episode activates it", () => {
-  test("evidence 1 → candidate(evidence), evidence 2 → active", () => {
+  test("standard: evidence 1 → candidate(evidence), evidence 2 → active", () => {
+    // The evidence ≥ 2 gate is the rc.1 `standard` rule (ACTIVATION_MIN_EVIDENCE); under the default `full` level the
+    // bare failure activates at once (next test), so this scenario pins `standard`.
     const first = descriptorFromLines(bareFailureLines("p10", 1100), { sessionId: "session-a", turnKey: "p10" });
     expect(first.evidence_weight).toBe(1);
     const fact = factFixture({ knowledge_kind: "failure_resolution", evidence_refs: ["e1"], summary: "Use pnpm test rather than npm test; the npm script is missing in this repository." });
-    const one = applyRun(db, { descriptor: first, lines: bareFailureLines("p10", 1100), output: outputFixture([fact]) });
+    const one = applyRun(db, { descriptor: first, lines: bareFailureLines("p10", 1100), output: outputFixture([fact]), config: STANDARD });
     const id = one.op.report.created[0]!;
     expect(memories.getById(id)?.status).toBe("candidate");
     expect(one.op.report.outcomes[0]).toMatchObject({ outcome: "created", detail: "tier=candidate:evidence" });
@@ -135,6 +153,7 @@ describe("(b) a bare failure yields a candidate; a second episode activates it",
       lines: secondLines,
       output: outputFixture([{ ...fact, action: "reinforce", target_memory_id: id, evidence_refs: ["e1"] }]),
       now: isoPlus(REPLAY_NOW, { hours: 1 }),
+      config: STANDARD,
     });
     expect(two.op.report.reinforced).toEqual([id]);
     expect(two.op.report.activated).toEqual([id]);
@@ -145,6 +164,24 @@ describe("(b) a bare failure yields a candidate; a second episode activates it",
     expect(memory.distinctSessionCount).toBe(2);
     expect(memory.validationCount).toBe(1);
     expect(memory.confidence).toBeCloseTo(0.9, 5);
+  });
+
+  test("full (default): the bare failure activates at advise from its first evidence episode (evidence 1), with the kind's TTL", () => {
+    const lines = bareFailureLines("p10", 1100);
+    const first = descriptorFromLines(lines, { sessionId: "session-a", turnKey: "p10" });
+    expect(first.evidence_weight).toBe(1);
+    const fact = factFixture({ knowledge_kind: "failure_resolution", evidence_refs: ["e1"], summary: "Use pnpm test rather than npm test; the npm script is missing in this repository." });
+    const one = applyRun(db, { descriptor: first, lines, output: outputFixture([fact]) });
+    const id = one.op.report.created[0]!;
+    expect(one.op.report.activated).toEqual([id]);
+    expect(one.op.report.proposals).toEqual([]);
+    expect(one.op.report.outcomes[0]).toMatchObject({ outcome: "activated", detail: "tier=active" });
+    const memory = memories.getById(id)!;
+    expect(memory).toMatchObject({ status: "active", authority: "auto", enforcement: "advise", evidenceScore: 1, evidenceCount: 1, distinctSessionCount: 1 });
+    // failure_resolution → baseTtlDays 30 (tierTtlDays with a durable horizon), revalidate at the midpoint.
+    expect(memory.ttlExpiresAt).toBe(isoPlus(REPLAY_NOW, { days: 30 }));
+    expect(memory.revalidateAfter).toBe(isoPlus(REPLAY_NOW, { days: 15 }));
+    expect(new ProposalRepository(db).countOpen()).toBe(0);
   });
 
   test("a create whose claim already lives as a candidate reinforces it (semantic twin)", () => {
@@ -442,6 +479,9 @@ describe("(i) learn-and-apply episodes are pitfalls", () => {
         trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: scenario.failed },
         knowledge_kind: "failure_resolution",
         evidence_refs: ["e2", "e3"],
+        // Six distinct claims: the fixture's default aliases are the same two strings, which the rc.2 neighbour rule
+        // (≥ 2 shared aliases, design §4) would read as one claim.
+        aliases: [],
       });
       const result = applyRun(db, { descriptor, lines, output: outputFixture([fact]) });
       expect(result.op.report.created).toHaveLength(1);
@@ -470,6 +510,9 @@ describe("normalization and guards", () => {
       semanticKey: "stale-key",
       normalizedScope: "**/*",
       relabels: [],
+      signature_precision: "mistake_exact" as const,
+      side_effect: "read" as const,
+      horizon: "durable" as const,
     };
     const normalized = normalizeFact(validated, descriptor, seqMap, null);
     expect(normalized.type).toBe("pitfall");
@@ -483,7 +526,7 @@ describe("normalization and guards", () => {
   test("decision facts get session_start + before_model triggers", () => {
     const descriptor = descriptorFromLines(s02);
     const fact = factFixture({ type: "decision", trigger_signature: null, lifecycle_triggers: ["before_tool"], knowledge_kind: "decision", scope_glob: "**/*", evidence_refs: ["e5"] });
-    const validated = { ...fact, ordinal: 0, compiledSignature: null, semanticKey: "k", normalizedScope: "**/*", relabels: ["tool_not_hooked"] };
+    const validated = { ...fact, ordinal: 0, compiledSignature: null, semanticKey: "k", normalizedScope: "**/*", relabels: ["tool_not_hooked"], signature_precision: null, side_effect: "read" as const, horizon: "durable" as const };
     const normalized = normalizeFact(validated, descriptor, new Map(), null);
     expect(normalized.lifecycleTriggers).toEqual(["session_start", "before_model"]);
     expect(normalized.activationClass).toBe("scoped");
@@ -513,7 +556,9 @@ describe("normalization and guards", () => {
     const again = applyRun(db, { descriptor: descriptorFromLines(lines, { sessionId: "session-r", turnKey: "p41" }), lines, output: outputFixture([{ ...fact, evidence_refs: ["e1"] }]), now: isoPlus(REPLAY_NOW, { days: 1 }) });
     expect(again.op.report.created).toHaveLength(1);
     expect(again.op.report.created[0]).not.toBe(id);
-    expect(memories.getById(again.op.report.created[0]!)?.status).toBe("candidate");
+    // A new live row with its own history: under `full` the bare failure's evidence (1) activates it at once.
+    expect(memories.getById(again.op.report.created[0]!)).toMatchObject({ status: "active", authority: "auto", evidenceScore: 1 });
+    expect(memories.getById(id)?.status).toBe("rejected");
   });
 
   test("a propose_supersede with the target's own claim becomes reinforce + stale proposal", () => {
@@ -551,6 +596,8 @@ describe("normalization and guards", () => {
         summary: summaries[index]!,
         trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: command },
         evidence_refs: ["e1"],
+        // Distinct aliases too: two shared aliases make twins since rc.2 (design §4).
+        aliases: [],
       })
     );
     const promptText = s01[0]!.kind === "prompt" ? s01[0]!.text : "";
@@ -569,8 +616,13 @@ describe("normalization and guards", () => {
     const descriptor = descriptorFromLines(s01);
     const fact = factFixture({ evidence_refs: ["e1"] });
     const off = applyRun(db, { descriptor, lines: s01, output: outputFixture([fact]), config: { ...DEFAULT_CONFIG, autonomy_level: "off" } });
-    expect(memories.getById(off.op.report.created[0]!)?.status).toBe("candidate");
+    const offId = off.op.report.created[0]!;
+    expect(memories.getById(offId)?.status).toBe("candidate");
+    expect(off.op.report.outcomes[0]?.detail).toContain("tier=candidate:autonomy");
 
+    // A restatement from another session: same signature key and the same two aliases, little shared wording. The
+    // rc.2 neighbour rule (design §4) folds it into the `off` row — a reinforce, not a second row — and the two bare
+    // episodes (1 + 1) give the evidence the shadow dry run of `standard` would have activated on: audit row, no change.
     const shadowDescriptor = descriptorFromLines(s01, { sessionId: "session-shadow", turnKey: "p1s" });
     const shadow = applyRun(db, {
       descriptor: shadowDescriptor,
@@ -579,7 +631,13 @@ describe("normalization and guards", () => {
       config: { ...DEFAULT_CONFIG, autonomy_level: "shadow" },
       now: isoPlus(REPLAY_NOW, { hours: 1 }),
     });
-    expect(memories.getById(shadow.op.report.created[0]!)?.status).toBe("candidate");
+    expect(shadow.op.report.created).toEqual([]);
+    expect(shadow.op.report.reinforced).toEqual([offId]);
+    expect(shadow.op.report.activated).toEqual([]);
+    expect(shadow.op.report.outcomes[0]).toMatchObject({ outcome: "reinforced", memory_id: offId });
+    expect(shadow.op.report.outcomes[0]?.detail).toContain("neighbour=signature_key+aliases");
+    expect(shadow.op.report.outcomes[0]?.detail).toContain("tier=candidate:autonomy");
+    expect(memories.getById(offId)).toMatchObject({ status: "candidate", evidenceScore: 2, distinctSessionCount: 2 });
     const audit = db.exec("SELECT event_type FROM audit_log WHERE event_type = 'auto_activation_shadow'");
     expect(audit[0]?.values).toHaveLength(1);
   });
@@ -698,6 +756,166 @@ describe("normalization and guards", () => {
   });
 });
 
+describe("autonomy_level full (0.6.0-rc.2 §1): policies and informational rows activate on their own; standard keeps the review gate", () => {
+  /** A decision-marker episode (weight 0): prompt, a successful command, an assistant line that "decided". */
+  function decisionLines(turnKey: string, seqBase: number): LedgerLine[] {
+    return [
+      promptLine("ok, what next", { seq: seqBase, turn_key: turnKey }),
+      toolOkLine("pnpm test", { seq: seqBase + 1, turn_key: turnKey, program_token: "pm test", output_head: "ok" }),
+      assistantLine("We decided to keep the pnpm workspace for the suite in this repository.", { seq: seqBase + 2, turn_key: turnKey }),
+    ];
+  }
+
+  const decisionFact = (summary: string, extra: Partial<ExtractionFact> = {}) =>
+    factFixture({
+      type: "decision",
+      summary,
+      details: "Recorded from the session's decision marker.",
+      trigger_signature: null,
+      lifecycle_triggers: ["session_start", "before_model"],
+      relevant_tools: [],
+      knowledge_kind: "decision",
+      scope_glob: "**/*",
+      evidence_refs: ["e1"],
+      aliases: [],
+      ...extra,
+    });
+
+  /** A push to the protected branch that fails, then the branch push that resolves it (evidence_weight 2, tools: bash). */
+  function protectedPushLines(turnKey: string, seqBase: number): LedgerLine[] {
+    return [
+      promptLine("push the fix", { seq: seqBase, turn_key: turnKey }),
+      toolFailLine("git push origin main", "remote: error: GH006: Protected branch update failed for refs/heads/main", { seq: seqBase + 1, turn_key: turnKey, program_token: "git", exit_code: 1, failure_class: "exit_1" }),
+      toolOkLine("git push origin fix/login", { seq: seqBase + 2, turn_key: turnKey, program_token: "git", output_head: "ok", resolution_of: "bash|exit_1|git" }),
+      assistantLine("Pushed the branch; main is protected, so the change goes through a pull request.", { seq: seqBase + 3, turn_key: turnKey }),
+    ];
+  }
+
+  const policyFact = (pattern: string, summary: string) =>
+    factFixture({
+      type: "policy",
+      summary,
+      details: "Main is protected; the release workflow merges.",
+      trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern },
+      knowledge_kind: "convention",
+      evidence_refs: ["e2", "e3"],
+      aliases: [],
+    });
+
+  test("a policy (convention, signature) activates at advise with no activate_policy proposal under full; standard parks it behind the proposal", () => {
+    const lines = protectedPushLines("p94", 9400);
+    const descriptor = descriptorFromLines(lines, { sessionId: "session-pol", turnKey: "p94" });
+    expect(descriptor.evidence_weight).toBe(2);
+    const full = applyRun(db, { descriptor, lines, output: outputFixture([policyFact("git push origin main", "Push feature branches and open a pull request; never push to main directly in this repository.")]) });
+    const id = full.op.report.created[0]!;
+    expect(full.op.report.activated).toEqual([id]);
+    expect(full.op.report.proposals).toEqual([]);
+    expect(full.op.report.outcomes[0]).toMatchObject({ outcome: "activated", memory_id: id, detail: "tier=active" });
+    expect(full.op.report.outcomes[0]?.relabel).toBeUndefined();
+    const row = memories.getById(id)!;
+    // A convention stays a policy (no policy_to_pitfall relabel); the silent-write rule needs correction / failure_resolution, so advise.
+    expect(row).toMatchObject({ type: "policy", status: "active", authority: "auto", enforcement: "advise", knowledgeKind: "convention", signaturePrecision: "mistake_exact", sideEffect: "read", evidenceScore: 2 });
+    // convention → baseTtlDays 7 (tierTtlDays, durable horizon).
+    expect(row.ttlExpiresAt).toBe(isoPlus(REPLAY_NOW, { days: 7 }));
+    expect(new ProposalRepository(db).countOpen()).toBe(0);
+
+    const standardLines = protectedPushLines("p94s", 9450);
+    const standard = applyRun(db, { descriptor: descriptorFromLines(standardLines, { sessionId: "session-std", turnKey: "p94s" }), lines: standardLines, output: outputFixture([policyFact("git push --force", "Open a pull request for every change; force-pushing is not allowed here.")]), config: STANDARD, now: isoPlus(REPLAY_NOW, { hours: 1 }) });
+    const parked = standard.op.report.created[0]!;
+    expect(standard.op.report.activated).toEqual([]);
+    expect(standard.op.report.outcomes[0]?.detail).toContain("tier=candidate:type");
+    expect(memories.getById(parked)?.status).toBe("candidate");
+    expect(new ProposalRepository(db).listOpen({ targetId: parked }).map((proposal) => proposal.kind)).toEqual(["activate_policy"]);
+  });
+
+  test("a repo-wide decision without evidence activates at advise under full (knowledge budget, 30-day TTL); standard parks it behind activate_global", () => {
+    const lines = decisionLines("p95", 9500);
+    const descriptor = descriptorFromLines(lines, { sessionId: "session-dec", turnKey: "p95" });
+    expect(descriptor.flags).toEqual({ decision: 1 });
+    expect(descriptor.evidence_weight).toBe(0);
+    const result = applyRun(db, { descriptor, lines, output: outputFixture([decisionFact("The suite stays on the pnpm workspace; npm scripts are not maintained.", { evidence_refs: ["e3"] })]) });
+    const id = result.op.report.created[0]!;
+    expect(result.op.report.activated).toEqual([id]);
+    expect(result.op.report.proposals).toEqual([]);
+    expect(result.op.report.outcomes[0]).toMatchObject({ outcome: "activated", detail: "tier=active" });
+    const row = memories.getById(id)!;
+    expect(row).toMatchObject({ type: "decision", status: "active", authority: "auto", enforcement: "advise", evidenceScore: 0, scopeGlob: "**/*", horizon: "durable", signaturePrecision: null, sideEffect: null });
+    expect(row.lifecycleTriggers).toEqual(["session_start", "before_model"]);
+    expect(row.ttlExpiresAt).toBe(isoPlus(REPLAY_NOW, { days: 30 }));
+    expect(row.revalidateAfter).toBe(isoPlus(REPLAY_NOW, { days: 15 }));
+    expect(new TransitionRepository(db).listForMemory(id)).toEqual([expect.objectContaining({ fromStatus: "candidate", toStatus: "active", actor: "auto_rule", reason: "decideTier" })]);
+
+    const standardLines = decisionLines("p96", 9600);
+    const standard = applyRun(db, { descriptor: descriptorFromLines(standardLines, { sessionId: "session-dec-std", turnKey: "p96" }), lines: standardLines, output: outputFixture([decisionFact("Releases are cut from the main branch only after the e2e suite passes.", { evidence_refs: ["e3"] })]), config: STANDARD, now: isoPlus(REPLAY_NOW, { hours: 1 }) });
+    const parked = standard.op.report.created[0]!;
+    expect(standard.op.report.activated).toEqual([]);
+    expect(standard.op.report.outcomes[0]?.detail).toContain("tier=candidate:scope");
+    expect(memories.getById(parked)?.status).toBe("candidate");
+    expect(new ProposalRepository(db).listOpen({ targetId: parked }).map((proposal) => proposal.kind)).toEqual(["activate_global"]);
+  });
+
+  test("the knowledge budget is its own counter: a decision activation neither consumes nor is consumed by the rule caps, and both counters survive across runs of the day", () => {
+    const config = { ...DEFAULT_CONFIG, extraction: { ...DEFAULT_CONFIG.extraction, max_auto_activations_per_day: 1, max_auto_knowledge_activations_per_day: 1 } };
+    const pitfall = (pattern: string, summary: string) =>
+      factFixture({ summary, trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern }, knowledge_kind: "failure_resolution", evidence_refs: ["e1"], aliases: [] });
+
+    // Run 1: a decision takes the single knowledge slot of the day.
+    const first = decisionLines("p97", 9700);
+    const one = applyRun(db, { descriptor: descriptorFromLines(first, { sessionId: "session-k1", turnKey: "p97" }), lines: first, output: outputFixture([decisionFact("The suite stays on the pnpm workspace; npm scripts are not maintained.", { evidence_refs: ["e3"] })]), config });
+    expect(one.op.report.activated).toHaveLength(1);
+
+    // Run 2 (another session, same day): the next decision meets the knowledge cap — the counter was rebuilt from
+    // today's transitions — while a pitfall still finds the rule budget untouched.
+    const second = bareFailureLines("p98", 9800);
+    const two = applyRun(db, {
+      descriptor: descriptorFromLines(second, { sessionId: "session-k2", turnKey: "p98" }),
+      lines: second,
+      output: outputFixture([
+        decisionFact("Releases are cut from the main branch only after the e2e suite passes."),
+        pitfall("npm run build", "Build with pnpm build; npm run build breaks without the workspace flags."),
+      ]),
+      config,
+      now: isoPlus(REPLAY_NOW, { hours: 1 }),
+    });
+    expect(two.op.report.created).toHaveLength(2);
+    const [decisionId, pitfallId] = two.op.report.created as [string, string];
+    expect(two.op.report.activated).toEqual([pitfallId]);
+    expect(two.op.report.outcomes[0]).toMatchObject({ outcome: "created", memory_id: decisionId, detail: "tier=candidate:knowledge_cap" });
+    expect(two.op.report.outcomes[1]).toMatchObject({ outcome: "activated", memory_id: pitfallId, detail: "tier=active" });
+    expect(two.op.report.proposals).toEqual([]);
+    expect(memories.getById(decisionId)?.status).toBe("candidate");
+
+    // Run 3: both budgets are spent for the day; neither row activates, each for its own reason.
+    const third = bareFailureLines("p99", 9900);
+    const three = applyRun(db, {
+      descriptor: descriptorFromLines(third, { sessionId: "session-k3", turnKey: "p99" }),
+      lines: third,
+      output: outputFixture([
+        decisionFact("Database migrations run in CI before the application image is built."),
+        pitfall("yarn lint", "Lint via pnpm lint; yarn lint is not configured for this project."),
+      ]),
+      config,
+      now: isoPlus(REPLAY_NOW, { hours: 2 }),
+    });
+    expect(three.op.report.activated).toEqual([]);
+    expect(three.op.report.outcomes.map((outcome) => outcome.detail)).toEqual(["tier=candidate:knowledge_cap", "tier=candidate:cap"]);
+
+    // Tomorrow both counters start from zero again.
+    const tomorrow = bareFailureLines("p100", 10_000);
+    const four = applyRun(db, {
+      descriptor: descriptorFromLines(tomorrow, { sessionId: "session-k4", turnKey: "p100" }),
+      lines: tomorrow,
+      output: outputFixture([
+        decisionFact("The API contract is versioned in the openapi folder, not in code comments."),
+        pitfall("npm run e2e", "Execute end-to-end checks with pnpm e2e because npm run e2e cannot locate the playwright config."),
+      ]),
+      config,
+      now: isoPlus(REPLAY_NOW, { days: 1 }),
+    });
+    expect(four.op.report.activated).toHaveLength(2);
+  });
+});
+
 describe("decideTier reads the scanner verdict on the stored text (Phase D)", () => {
   function legacyCandidate(summary: string, details: string) {
     return memories.create(
@@ -715,7 +933,8 @@ describe("decideTier reads the scanner verdict on the stored text (Phase D)", ()
 
   function reinforce(targetId: string, sessionId: string, now: string) {
     const descriptor = descriptorFromLines(s01, { sessionId, turnKey: "p1" });
-    expect(descriptor.evidence_weight).toBe(2);
+    // rc.2 §5: a bare correction cue weighs 1 — enough for `full` to activate a safe row (evidence ≥ 1).
+    expect(descriptor.evidence_weight).toBe(1);
     const fact = factFixture({ action: "reinforce", target_memory_id: targetId, evidence_refs: ["e1"] });
     return applyRun(db, { descriptor, lines: s01, output: outputFixture([fact]), now });
   }
@@ -728,7 +947,7 @@ describe("decideTier reads the scanner verdict on the stored text (Phase D)", ()
     expect(unsafeRun.op.report.reinforced).toEqual([unsafe.id]);
     expect(unsafeRun.op.report.activated).toEqual([]);
     expect(unsafeRun.op.report.outcomes[0]).toMatchObject({ outcome: "reinforced", detail: `target=${unsafe.id}; tier=candidate:security` });
-    expect(memories.getById(unsafe.id)).toMatchObject({ status: "candidate", evidenceScore: 2 });
+    expect(memories.getById(unsafe.id)).toMatchObject({ status: "candidate", evidenceScore: 1 });
 
     const safeRun = reinforce(safe.id, "session-safe", isoPlus(REPLAY_NOW, { hours: 1 }));
     expect(safeRun.op.report.activated).toEqual([safe.id]);
@@ -804,10 +1023,11 @@ describe("A′ autonomy ladder: advise → soft_deny on a second session's reinf
     expect(new TransitionRepository(db).listForMemory(id)).toHaveLength(1);
   });
 
-  test("shadow autonomy never raises an auto row above advise; standard escalates the same row afterwards", () => {
+  test("shadow autonomy never raises an auto row above advise; the default level (full) escalates the same row afterwards", () => {
     const shadow = { ...DEFAULT_CONFIG, autonomy_level: "shadow" as const };
-    // Under shadow nothing auto-activates, so the active row is seeded the way decideTier would have left it.
-    const seeded = memories.create(autoMemory({ status: "active", enforcement: "advise", knowledgeKind: "correction", triggerSignature: SIGNATURE, signatureKey: "bash|command|cmd|npm test", summary: "Run the suite with pnpm test; npm test lacks a script in this repository." }));
+    // Under shadow nothing auto-activates, so the active row is seeded the way decideTier would have left it — with
+    // the rc.2 precision the validator would have stored (only `mistake_exact` climbs; NULL never does).
+    const seeded = memories.create(autoMemory({ status: "active", enforcement: "advise", knowledgeKind: "correction", triggerSignature: SIGNATURE, signatureKey: "bash|command|cmd|npm test", signaturePrecision: "mistake_exact", summary: "Run the suite with pnpm test; npm test lacks a script in this repository." }));
     reinforceFrom(seeded.id, "session-a", "p53", 5400, isoPlus(REPLAY_NOW, { hours: 1 }), shadow);
     const second = reinforceFrom(seeded.id, "session-b", "p54", 5500, isoPlus(REPLAY_NOW, { hours: 2 }), shadow);
     expect(second.op.report.escalated).toEqual([]);
@@ -902,46 +1122,73 @@ describe("A′ autonomy ladder: advise → soft_deny on a second session's reinf
     const { id } = learn(capped);
     const up = reinforceFrom(id, "session-z", "p65", 6600, isoPlus(REPLAY_NOW, { hours: 1 }), capped);
     expect(up.op.report.escalated).toEqual([id]);
-    // One activation + one escalation so far today; a second distinct claim must still activate (1 of 2 used).
+    // One activation + one escalation so far today; a second distinct claim (its own signature, no shared aliases)
+    // must still activate (1 of 2 used) — under `full` straight from its bare-failure evidence.
+    const claim = (pattern: string, summary: string) =>
+      factFixture({ summary, trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern }, knowledge_kind: "failure_resolution", evidence_refs: ["e1"], aliases: [] });
     const lines = bareFailureLines("p66", 6700);
     const other = applyRun(db, {
       descriptor: descriptorFromLines(lines, { sessionId: "session-q", turnKey: "p66" }),
       lines,
-      output: outputFixture([factFixture({ summary: "Build with pnpm build; npm run build breaks without the workspace flags.", trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "npm run build" }, knowledge_kind: "failure_resolution", evidence_refs: ["e1"] })]),
+      output: outputFixture([claim("npm run build", "Build with pnpm build; npm run build breaks without the workspace flags.")]),
       now: isoPlus(REPLAY_NOW, { hours: 2 }),
       config: capped,
     });
     expect(other.op.report.created).toHaveLength(1);
-    // evidence 1 → candidate(evidence) on its own; reinforce it from a second session so it reaches the cap check.
-    const again = applyRun(db, {
+    expect(other.op.report.activated).toEqual(other.op.report.created);
+    expect(other.op.report.outcomes[0]?.detail).toContain("tier=active");
+    expect(other.op.report.outcomes[0]?.detail ?? "").not.toContain("tier=candidate:cap");
+    // Two activations today: the third distinct claim meets the cap — the escalation itself never counted.
+    const third = applyRun(db, {
       descriptor: descriptorFromLines(bareFailureLines("p67", 6800), { sessionId: "session-w", turnKey: "p67" }),
       lines: bareFailureLines("p67", 6800),
-      output: outputFixture([factFixture({ action: "reinforce", target_memory_id: other.op.report.created[0]!, summary: "Build with pnpm build; npm run build breaks without the workspace flags.", trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "npm run build" }, knowledge_kind: "failure_resolution", evidence_refs: ["e1"] })]),
+      output: outputFixture([claim("yarn lint", "Lint via pnpm lint; yarn lint is not configured for this project.")]),
       now: isoPlus(REPLAY_NOW, { hours: 3 }),
       config: capped,
     });
-    expect(again.op.report.activated).toEqual([other.op.report.created[0]]);
-    expect(again.op.report.outcomes[0]?.detail).toContain("tier=active");
-    expect(again.op.report.outcomes[0]?.detail ?? "").not.toContain("tier=candidate:cap");
+    expect(third.op.report.created).toHaveLength(1);
+    expect(third.op.report.activated).toEqual([]);
+    expect(third.op.report.outcomes[0]?.detail).toContain("tier=candidate:cap");
   });
 
-  test("an activation never escalates: the second session's reinforce activates a bare-failure candidate at advise even though the evidence now spans two sessions; the third session climbs it", () => {
+  test("standard: an activation never escalates: the second session's reinforce activates a bare-failure candidate at advise even though the evidence now spans two sessions; the third session climbs it", () => {
+    // The two-step activation (evidence 1 → candidate, 2 → active) is the `standard` gate; pinned so the ordering
+    // property — a row that activates in a run is not also escalated in it — stays observable.
     const first = bareFailureLines("p90", 9000);
-    const seed = applyRun(db, { descriptor: descriptorFromLines(first, { sessionId: "session-a", turnKey: "p90" }), lines: first, output: outputFixture([factFixture({ knowledge_kind: "failure_resolution", evidence_refs: ["e1"] })]) });
+    const seed = applyRun(db, { descriptor: descriptorFromLines(first, { sessionId: "session-a", turnKey: "p90" }), lines: first, output: outputFixture([factFixture({ knowledge_kind: "failure_resolution", evidence_refs: ["e1"] })]), config: STANDARD });
     const id = seed.op.report.created[0]!;
     expect(memories.getById(id)).toMatchObject({ status: "candidate", authority: "auto", enforcement: "advise", distinctSessionCount: 1 });
 
-    const second = reinforceFrom(id, "session-b", "p91", 9100, isoPlus(REPLAY_NOW, { hours: 1 }));
+    const second = reinforceFrom(id, "session-b", "p91", 9100, isoPlus(REPLAY_NOW, { hours: 1 }), STANDARD);
     expect(second.op.report.activated).toEqual([id]);
     expect(second.op.report.escalated).toEqual([]);
     expect(second.op.report.outcomes[0]?.detail).toContain("tier=active");
     expect(second.op.report.outcomes[0]?.detail ?? "").not.toContain("escalated");
     expect(memories.getById(id)).toMatchObject({ status: "active", enforcement: "advise", authority: "auto", distinctSessionCount: 2 });
 
-    const third = reinforceFrom(id, "session-c", "p92", 9200, isoPlus(REPLAY_NOW, { hours: 2 }));
+    const third = reinforceFrom(id, "session-c", "p92", 9200, isoPlus(REPLAY_NOW, { hours: 2 }), STANDARD);
     expect(third.op.report.activated).toEqual([]);
     expect(third.op.report.escalated).toEqual([id]);
     expect(memories.getById(id)).toMatchObject({ status: "active", enforcement: "soft_deny", distinctSessionCount: 3 });
+    expect(new TransitionRepository(db).listForMemory(id).map((row) => [row.fromStatus, row.toStatus, row.reason.split(":")[0]])).toEqual([
+      ["candidate", "active", "decideTier"],
+      ["active", "active", "auto_escalation"],
+    ]);
+  });
+
+  test("full (default): the bare-failure seed activates at advise in its own run (evidence 1, one session, nothing to escalate); the second session's reinforce climbs it", () => {
+    const first = bareFailureLines("p90", 9000);
+    const seed = applyRun(db, { descriptor: descriptorFromLines(first, { sessionId: "session-a", turnKey: "p90" }), lines: first, output: outputFixture([factFixture({ knowledge_kind: "failure_resolution", evidence_refs: ["e1"] })]) });
+    const id = seed.op.report.created[0]!;
+    expect(seed.op.report.activated).toEqual([id]);
+    expect(seed.op.report.escalated).toEqual([]);
+    // The signature `npm test` hits only the cited failing call (no tool_ok line): mistake_exact, so the ladder may climb it.
+    expect(memories.getById(id)).toMatchObject({ status: "active", authority: "auto", enforcement: "advise", distinctSessionCount: 1, evidenceScore: 1, signaturePrecision: "mistake_exact" });
+
+    const second = reinforceFrom(id, "session-b", "p91", 9100, isoPlus(REPLAY_NOW, { hours: 1 }));
+    expect(second.op.report.activated).toEqual([]);
+    expect(second.op.report.escalated).toEqual([id]);
+    expect(memories.getById(id)).toMatchObject({ status: "active", enforcement: "soft_deny", distinctSessionCount: 2, evidenceScore: 2 });
     expect(new TransitionRepository(db).listForMemory(id).map((row) => [row.fromStatus, row.toStatus, row.reason.split(":")[0]])).toEqual([
       ["candidate", "active", "decideTier"],
       ["active", "active", "auto_escalation"],
@@ -966,10 +1213,11 @@ describe("A′ autonomy ladder: advise → soft_deny on a second session's reinf
 
   test("the consolidator's own override downgrade (runDream → fireAndOverride) gates re-escalation: the overriding session cannot climb the row back, a session begun afterwards can", async () => {
     const { id } = learn();
-    // Evidence 2 over two sessions (the second episode weighs 0): the ladder applies while evidence stays < 3.
+    // Evidence 1 over two sessions (the bare correction weighs 1 since rc.2 §5, the decision episode 0): the ladder
+    // applies on sessions alone, and the override downgrade below needs evidence < 3.
     const up = decisionReinforceFrom(id, "session-z", "p80", 8000, isoPlus(REPLAY_NOW, { hours: 1 }));
     expect(up.op.report.escalated).toEqual([id]);
-    expect(memories.getById(id)).toMatchObject({ enforcement: "soft_deny", evidenceScore: 2, distinctSessionCount: 2 });
+    expect(memories.getById(id)).toMatchObject({ enforcement: "soft_deny", evidenceScore: 1, distinctSessionCount: 2 });
 
     // Three overrides of the soft_deny (what the stop hook's fire roll-up writes), then the real consolidation step.
     memories.recordFire(id, { at: isoPlus(REPLAY_NOW, { hours: 2 }), count: 3, overrideDelta: 3 });
@@ -1093,23 +1341,46 @@ describe("A′ remember-as-human: a create of a remember turn citing the remembe
       factFixture({ action: "reinforce", target_memory_id: auto.id, type: "pitfall", summary: "Use pnpm for every script in this repository.", lifecycle_triggers: ["before_model"], knowledge_kind: "convention", evidence_refs: ["e1"], aliases: [] }),
     ];
     const result = applyRun(db, { descriptor, lines, output: outputFixture(facts) });
-    expect(result.op.report.outcomes.map((outcome) => outcome.outcome)).toEqual(["created", "created", "reinforced"]);
+    expect(result.op.report.outcomes.map((outcome) => outcome.outcome)).toEqual(["created", "activated", "reinforced"]);
     expect(result.op.report.created).toHaveLength(2);
     const [ruleId, constraintId] = result.op.report.created as [string, string];
     expect(result.op.report.remembered).toEqual([ruleId]);
     expect(memories.getById(ruleId)).toMatchObject({ authority: "human", status: "active", statusReason: "remember" });
-    // Tool-line-only create: auto candidate behind an activate_global proposal (no signature, global scope).
-    expect(memories.getById(constraintId)).toMatchObject({ authority: "auto", status: "candidate", enforcement: "advise", statusReason: null });
-    expect(result.op.report.outcomes[1]?.detail).toContain("tier=candidate:scope");
-    expect(new ProposalRepository(db).listOpen({ targetId: constraintId }).map((proposal) => proposal.kind)).toEqual(["activate_global"]);
+    // Tool-line-only create: the automatic path — under `full` an architecture_constraint activates at advise on its
+    // own (knowledge budget, 30-day TTL) with no activate_global proposal; the remember flag plays no part in it.
+    expect(result.op.report.activated).toEqual([constraintId]);
+    expect(memories.getById(constraintId)).toMatchObject({ authority: "auto", status: "active", enforcement: "advise", statusReason: "auto_rule", promotionSource: "auto" });
+    expect(memories.getById(constraintId)?.ttlExpiresAt).toBe(isoPlus(REPLAY_NOW, { days: 30 }));
+    expect(result.op.report.outcomes[1]?.detail).toContain("tier=active");
+    expect(new ProposalRepository(db).listOpen({ targetId: constraintId })).toEqual([]);
+    expect(result.op.report.proposals).toEqual([]);
     // Reinforce of an existing auto row: counters only, still auto (the remember flag is not a blanket approval).
     expect(result.op.report.reinforced).toEqual([auto.id]);
     expect(memories.getById(auto.id)).toMatchObject({ authority: "auto", status: "active", evidenceCount: 1 });
   });
 
+  test("standard: the tool-line-only create of a remember episode waits behind an activate_global proposal (review gate)", () => {
+    const lines = rememberLines("p72s", 7350);
+    const descriptor = descriptorFromLines(lines, { sessionId: "session-r3s", turnKey: "p72s" });
+    const facts = [
+      policyFact(),
+      factFixture({ type: "architecture_constraint", summary: "This repository is linted through pnpm; npm has no lint script.", trigger_signature: null, lifecycle_triggers: ["before_model"], knowledge_kind: "convention", evidence_refs: ["e2"], aliases: ["lint"] }),
+    ];
+    const result = applyRun(db, { descriptor, lines, output: outputFixture(facts), config: STANDARD });
+    expect(result.op.report.outcomes.map((outcome) => outcome.outcome)).toEqual(["created", "created"]);
+    const [ruleId, constraintId] = result.op.report.created as [string, string];
+    expect(result.op.report.remembered).toEqual([ruleId]);
+    expect(result.op.report.activated).toEqual([]);
+    expect(memories.getById(constraintId)).toMatchObject({ authority: "auto", status: "candidate", enforcement: "advise", statusReason: null });
+    expect(result.op.report.outcomes[1]?.detail).toContain("tier=candidate:scope");
+    expect(new ProposalRepository(db).listOpen({ targetId: constraintId }).map((proposal) => proposal.kind)).toEqual(["activate_global"]);
+  });
+
   test("a remember create whose claim already lives as an auto candidate promotes that twin to a human remember row", () => {
+    // Seeded under `standard` so the twin is still a candidate (under `full` the bare failure would already be active;
+    // that twin is covered by the already-active case below).
     const first = bareFailureLines("p73", 7400);
-    const seed = applyRun(db, { descriptor: descriptorFromLines(first, { sessionId: "session-a", turnKey: "p73" }), lines: first, output: outputFixture([factFixture({ knowledge_kind: "failure_resolution", evidence_refs: ["e1"] })]) });
+    const seed = applyRun(db, { descriptor: descriptorFromLines(first, { sessionId: "session-a", turnKey: "p73" }), lines: first, output: outputFixture([factFixture({ knowledge_kind: "failure_resolution", evidence_refs: ["e1"] })]), config: STANDARD });
     const twinId = seed.op.report.created[0]!;
     expect(memories.getById(twinId)).toMatchObject({ status: "candidate", authority: "auto", enforcement: "advise" });
 

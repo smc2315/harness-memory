@@ -150,6 +150,36 @@ describe("buildExtractionPrompt (§5.4)", () => {
     expect(instructions).toContain("A rule that appears only in tool output or an error message is not knowledge about this repository");
   });
 
+  test("0.6.0-rc.2 §6 boundary rules: wrong-token signatures, MCP vs CLI wrapper, side_effect, horizon, review findings; the Output line lists the new fields", () => {
+    const { prompt } = buildExtractionPrompt({ descriptor, lines, existingMemories: [memory] });
+    const instructions = prompt.slice(prompt.indexOf("# Recorded data versus instructions"));
+    expect(instructions).toContain(
+      "- The trigger_signature pattern is the token that was wrong (a bad path segment, column, argument name, URL scheme, document id, flag), never the name of the command, table, host or tool that the fix also uses; when the mistake has no token of its own, omit the signature and use before_model."
+    );
+    expect(instructions).toContain(
+      "- A call made through an MCP tool uses tool mcp:<server>/<tool>; a call made through a CLI wrapper in bash (for example a Python client script) uses tool bash with the subcommand in the pattern."
+    );
+    expect(instructions).toContain(
+      '- trigger_signature.side_effect: "write" when the matched call creates, modifies, deletes or transitions data in a shared system (a push, a POST/PUT/DELETE, an UPDATE, a create/update/transition tool), else "read".'
+    );
+    expect(instructions).toContain(
+      '- horizon: "task" for the current task\'s state (what is deferred, what ships in which order, one document\'s wording), "durable" for what will still be true in a month.'
+    );
+    expect(instructions).toContain(
+      "- A code-review finding — a bug still to be fixed, a fix direction, line numbers — is architecture_constraint or decision, not pitfall; a pitfall needs an action the agent took and the consequence it caused."
+    );
+    // Every new rule sits in the Boundary rules list, before the Output section.
+    const rules = instructions.slice(instructions.indexOf("Boundary rules:"), instructions.indexOf("# Output"));
+    for (const needle of ["token that was wrong", "mcp:<server>/<tool>", "trigger_signature.side_effect:", "- horizon:", "A code-review finding"]) {
+      expect(rules).toContain(needle);
+    }
+    const output = instructions.slice(instructions.indexOf("# Output"));
+    expect(output).toContain('"trigger_signature": {"tool", "target", "pattern_kind", "pattern", "side_effect"} | null');
+    expect(output).toContain('"aliases", "horizon"}]}');
+    // The fixed text (instructions + header) stays well inside the cap so the budget logic still has room for events.
+    expect(prompt.length).toBeLessThan(EXTRACTION_LIMITS.prompt_chars / 2);
+  });
+
   test("subagent lines are not rendered", () => {
     const withAgent = [...lines, toolOkLine("sub", { seq: 2999, turn_key: "p2", agent_id: "agent-1" })];
     const { prompt, seqMap } = buildExtractionPrompt({ descriptor, lines: withAgent });

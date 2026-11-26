@@ -4,6 +4,7 @@ import type { Database as SqlJsDatabase } from "sql.js";
 import { sessionKey } from "../src/core/paths";
 import {
   EpisodeRepository,
+  ExtractionRunRepository,
   episodeRecordToDescriptor,
   isCorrectionEpisode,
 } from "../src/db/repositories";
@@ -191,6 +192,33 @@ describe("EpisodeRepository", () => {
     expect(episodes.releaseExpiredLeases(isoPlus(now, { hours: 1, seconds: 60 }))).toBe(1);
     expect(episodes.getById(c.id)?.status).toBe("queued");
     expect(episodes.getById(c.id)?.leaseUntil).toBeNull();
+  });
+
+  test("countDecisionOnlyExtractedSince counts evidence-0 session episodes with a run started since the given time, once each", () => {
+    const runs = new ExtractionRunRepository(db);
+    const start = (episodeId: string, startedAt: string) =>
+      runs.start({ id: `run:${episodeId}`, episodeId, provider: "replay", extractorVersion: "test", promptSha256: "0".repeat(64), inputChars: 10, startedAt });
+
+    const decisionToday = insertEpisode(db, { evidence_weight: 0, flags: { decision: 1 } });
+    start(decisionToday.id, isoPlus(T0, { hours: 3 }));
+    runs.finish(`run:${decisionToday.id}`, { status: "ok", finishedAt: isoPlus(T0, { hours: 3, minutes: 1 }) });
+    // A failed attempt counts like max_runs_per_day counts it; a retry reuses the run id (no double count).
+    const decisionFailedToday = insertEpisode(db, { evidence_weight: 0, flags: { decision: 1 } });
+    start(decisionFailedToday.id, isoPlus(T0, { hours: 5 }));
+    runs.finish(`run:${decisionFailedToday.id}`, { status: "timeout", finishedAt: isoPlus(T0, { hours: 5, minutes: 2 }), error: "killed" });
+    start(decisionFailedToday.id, isoPlus(T0, { hours: 7 }));
+    const decisionYesterday = insertEpisode(db, { evidence_weight: 0, flags: { decision: 1 } });
+    start(decisionYesterday.id, isoPlus(T0, { hours: -2 }));
+    const correctionToday = insertEpisode(db, { evidence_weight: 2, flags: { correction: 1 } });
+    start(correctionToday.id, isoPlus(T0, { hours: 3 }));
+    const importToday = insertEpisode(db, { host: "import", evidence_weight: 0, close_reason: "import", ledger_ref: "import:CLAUDE.md#L1" });
+    start(importToday.id, isoPlus(T0, { hours: 3 }));
+    insertEpisode(db, { evidence_weight: 0, flags: { decision: 1 } }); // queued, never reached the extractor
+
+    expect(episodes.countDecisionOnlyExtractedSince(T0)).toBe(2);
+    expect(episodes.countDecisionOnlyExtractedSince(isoPlus(T0, { hours: 4 }))).toBe(1);
+    expect(episodes.countDecisionOnlyExtractedSince(isoPlus(T0, { days: -1 }))).toBe(3);
+    expect(episodes.countDecisionOnlyExtractedSince(isoPlus(T0, { days: 1 }))).toBe(0);
   });
 
   test("listForSession returns the session's episodes oldest first", () => {

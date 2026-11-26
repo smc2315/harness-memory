@@ -1,21 +1,23 @@
 import { describe, expect, test } from "vitest";
 
 import type { EpisodeDescriptor } from "../src/core/episode-types";
-import type { ExtractionFact } from "../src/core/extraction-types";
+import { EXTRACTION_SCHEMA, type ExtractionFact } from "../src/core/extraction-types";
 import { semanticKey } from "../src/core/ids";
 import type { LedgerLine } from "../src/core/ledger-types";
+import { HORIZONS, SIDE_EFFECTS, type TriggerSignature } from "../src/core/vocabulary";
 import { buildEpisodeDescriptor } from "../src/dream/episode";
 import { parseExtractionOutput } from "../src/dream/extract/schema";
 import {
   isRestatement,
   isSelfReference,
+  signaturePrecision,
   textCitesCommand,
   validateExtraction,
   validateRawExtraction,
   type ValidateExtractionInput,
 } from "../src/dream/extract/validate";
 import type { OffsetLedgerLine } from "../src/dream/ledger";
-import { loadExtractionFixture, loadLedgerFixture, promptLine, seqMapOf, toolFailLine, toolOkLine } from "./helpers/ledger-fixture";
+import { assistantLine, loadExtractionFixture, loadLedgerFixture, promptLine, seqMapOf, toolFailLine, toolOkLine } from "./helpers/ledger-fixture";
 
 const NOW = "2026-11-08T23:30:00.000Z";
 
@@ -100,6 +102,10 @@ describe("fixtures", () => {
     expect(accepted.lifecycle_triggers).toEqual(["before_tool"]);
     expect(accepted.aliases).toEqual(["pnpm test", "test runner", "테스트 실행"]);
     expect(result.output?.episode_summary).toContain("pnpm test ran the suite");
+    // 0.6.0-rc.2 §2: the pinned `npm test` hits neither `ls` nor the resolving `pnpm test`; no side_effect / horizon emitted.
+    expect(accepted.signature_precision).toBe("mistake_exact");
+    expect(accepted.side_effect).toBe("read");
+    expect(accepted.horizon).toBe("durable");
   });
 
   test("garbage-not-json.txt is a suspect run (not_json) with nothing applied", () => {
@@ -379,6 +385,194 @@ describe("validator table (§5.6)", () => {
     const result = run([fact({ relevant_tools: ["Bash", "mcp:github/x", "bash"] as never })]);
     expect(result.accepted[0]?.relevant_tools).toEqual(["bash", "mcp"]);
   });
+});
+
+describe("signature precision, side_effect and horizon (0.6.0-rc.2 §2)", () => {
+  const cmd = (pattern: string, side_effect?: TriggerSignature["side_effect"]): TriggerSignature => ({
+    tool: "bash",
+    target: "command",
+    pattern_kind: "cmd",
+    pattern,
+    ...(side_effect === undefined ? {} : { side_effect }),
+  });
+
+  // Two pushes in one turn; only the second is cited, so the pattern also covers a legitimate call.
+  const pushLines: LedgerLine[] = [
+    promptLine("deploy the service", { seq: 5001, turn_key: "p50" }),
+    toolOkLine("git push origin main", { seq: 5002, turn_key: "p50", program_token: "git push" }),
+    toolOkLine("git push origin release", { seq: 5003, turn_key: "p50", program_token: "git push" }),
+    assistantLine("Pushed both branches.", { seq: 5004, turn_key: "p50" }),
+  ];
+  const pushFact = (overrides: Partial<ExtractionFact> = {}) =>
+    fact({
+      summary: "Push release builds from the release branch only; main is deployed by CI.",
+      details: "A push to main triggers the production deploy.",
+      trigger_signature: cmd("git push origin"),
+      evidence_refs: ["e5003"],
+      knowledge_kind: "correction",
+      aliases: ["push"],
+      ...overrides,
+    });
+
+  // The same command fails, is fixed by an environment step and succeeds: the pattern names the operation.
+  const sameCommandLines: LedgerLine[] = [
+    promptLine("run the tests", { seq: 3001, turn_key: "p3" }),
+    toolFailLine("npm test", "Error: Cannot find module 'vitest'", { seq: 3002, turn_key: "p3", program_token: "pm test", failure_class: "exit_1" }),
+    toolOkLine("npm install", { seq: 3003, turn_key: "p3", program_token: "pm install" }),
+    toolOkLine("npm test", { seq: 3004, turn_key: "p3", program_token: "pm test", resolution_of: "bash|exit_1|pm test" }),
+  ];
+
+  // A silent mistake (pushed to the wrong remote), corrected by the user; the pattern names the wrong token only.
+  const wrongRemoteLines: LedgerLine[] = [
+    promptLine("아니, upstream 말고 origin 으로 push 해", { seq: 5101, turn_key: "p51", correction: 1 }),
+    toolOkLine("git push upstream main", { seq: 5102, turn_key: "p51", program_token: "git push" }),
+    toolOkLine("git push origin main", { seq: 5103, turn_key: "p51", program_token: "git push" }),
+    assistantLine("Pushed to origin.", { seq: 5104, turn_key: "p51" }),
+  ];
+  const wrongRemoteFact = (overrides: Partial<ExtractionFact> = {}) =>
+    fact({
+      summary: "Push to origin; upstream is the read-only mirror and a push there is silently ignored by CI.",
+      details: "The upstream remote is a mirror.",
+      trigger_signature: cmd("git push upstream", "write"),
+      evidence_refs: ["e5101", "e5102"],
+      knowledge_kind: "correction",
+      aliases: ["push", "remote"],
+      ...overrides,
+    });
+
+  test("noun: the signature also hits a tool_ok line the fact does not cite", () => {
+    const result = run([pushFact()], descriptorFor(pushLines), seqMapOf(pushLines));
+    expect(result.accepted).toHaveLength(1);
+    expect(result.accepted[0]?.signature_precision).toBe("noun");
+    // Citing both pushes makes every hit a cited, non-resolving line: nothing left to prove the pattern is a noun.
+    const both = run([pushFact({ evidence_refs: ["e5002", "e5003"] })], descriptorFor(pushLines), seqMapOf(pushLines));
+    expect(both.accepted[0]?.signature_precision).toBe("mistake_exact");
+  });
+
+  test("noun: the signature hits a cited tool_ok line that resolved a failure (same program, so V12 does not reject)", () => {
+    const result = run(
+      [fact({ summary: "Run npm install before npm test after pulling; a missing module fails the suite.", evidence_refs: ["e3002", "e3004"] })],
+      descriptorFor(sameCommandLines),
+      seqMapOf(sameCommandLines)
+    );
+    expect(result.accepted).toHaveLength(1);
+    expect(result.accepted[0]?.relabels).toEqual([]);
+    expect(result.accepted[0]?.signature_precision).toBe("noun");
+  });
+
+  test("mistake_exact: the only hit is the cited mistaken tool_ok; side_effect and horizon pass through", () => {
+    const result = run([wrongRemoteFact({ horizon: "task" })], descriptorFor(wrongRemoteLines), seqMapOf(wrongRemoteLines));
+    expect(result.accepted).toHaveLength(1);
+    const accepted = result.accepted[0]!;
+    expect(accepted.signature_precision).toBe("mistake_exact");
+    expect(accepted.side_effect).toBe("write");
+    expect(accepted.horizon).toBe("task");
+    // The stored signature object is untouched beyond tool normalization: side_effect stays on it.
+    expect(accepted.trigger_signature).toEqual({ ...cmd("git push upstream", "write"), tool: "bash" });
+    expect(accepted.compiledSignature?.signature_key).toBe("bash|command|cmd|git push upstream");
+    // Widening the pattern to the operation turns the same fact into a noun (the corrected push matches too).
+    const widened = run([wrongRemoteFact({ trigger_signature: cmd("git push", "write") })], descriptorFor(wrongRemoteLines), seqMapOf(wrongRemoteLines));
+    expect(widened.accepted[0]?.signature_precision).toBe("noun");
+  });
+
+  test("mistake_exact when nothing hits; tool_fail lines never make a signature noun", () => {
+    expect(run([fact()]).accepted[0]?.signature_precision).toBe("mistake_exact");
+    const withUncitedFailure: LedgerLine[] = [
+      ...scopedLines,
+      toolFailLine("npm test", "Exit code 1\nnpm ERR! Missing script: \"test\"", { seq: 2010, turn_key: "p2", program_token: "pm test", failure_class: "exit_1" }),
+    ];
+    const result = run([fact()], descriptorFor(withUncitedFailure), seqMapOf(withUncitedFailure));
+    expect(result.accepted).toHaveLength(1);
+    expect(result.accepted[0]?.signature_precision).toBe("mistake_exact");
+  });
+
+  test("the hooks' pre-checks apply: the tool glob must cover the line and the first scope ref is a target too", () => {
+    const envLines: LedgerLine[] = [
+      promptLine("put the new setting into the env file", { seq: 5201, turn_key: "p52" }),
+      toolOkLine(".env", { seq: 5202, turn_key: "p52", tool: "read", shell_dialect: null, scope_refs: [".env"] }),
+      toolOkLine("(3 lines)", { seq: 5203, turn_key: "p52", tool: "edit", shell_dialect: null, scope_refs: [".env"] }),
+      toolOkLine("(1 line)", { seq: 5204, turn_key: "p52", tool: "edit", shell_dialect: null, scope_refs: ["src/config.ts"] }),
+    ];
+    const envFact = (refs: string[]) =>
+      fact({
+        summary: "Edit .env.example for new settings; .env is gitignored and the change never reaches the team.",
+        details: "The real env file is local only.",
+        trigger_signature: { tool: "edit", target: "path", pattern_kind: "glob", pattern: "**/.env" },
+        evidence_refs: refs,
+        knowledge_kind: "correction",
+        aliases: ["env file"],
+      });
+    const descriptor = descriptorFor(envLines);
+    const seqMap = seqMapOf(envLines);
+    // The cited edit of .env is the mistake; the read of .env is a hit on the path but `edit` does not cover `read`.
+    const cited = run([envFact(["e5203"])], descriptor, seqMap);
+    expect(cited.accepted).toHaveLength(1);
+    expect(cited.accepted[0]?.signature_precision).toBe("mistake_exact");
+    // Not citing the edit leaves an uncited edit of .env: matched through scope_refs[0], the input digest says nothing.
+    const uncited = run([envFact(["e5201"])], descriptor, seqMap);
+    expect(uncited.accepted[0]?.signature_precision).toBe("noun");
+    // A glob covering every tool does see the read.
+    const anyTool = run([{ ...envFact(["e5203"]), trigger_signature: { tool: "*", target: "path", pattern_kind: "glob", pattern: "**/.env" } }], descriptor, seqMap);
+    expect(anyTool.accepted[0]?.signature_precision).toBe("noun");
+  });
+
+  test("signaturePrecision is exported for callers that hold a compiled signature", () => {
+    const compiled = run([fact()]).accepted[0]!.compiledSignature!;
+    expect(signaturePrecision(compiled, ["e2002", "e2004"], scopedSeqMap)).toBe("mistake_exact");
+    expect(signaturePrecision(compiled, [], seqMapOf(sameCommandLines))).toBe("noun");
+    expect(signaturePrecision(compiled, ["e3004"], seqMapOf(sameCommandLines))).toBe("noun");
+    expect(signaturePrecision(compiled, ["e3004"], seqMapOf(sameCommandLines.filter((line) => line.seq !== 3004)))).toBe("mistake_exact");
+  });
+
+  test("null precision and read/durable defaults without a signature, including one V10 dropped", () => {
+    const noSig = run([fact({ trigger_signature: null, lifecycle_triggers: ["before_model"], scope_glob: "src/**" })]);
+    expect(noSig.accepted[0]).toMatchObject({ signature_precision: null, side_effect: "read", horizon: "durable" });
+    const dropped = run([fact({ trigger_signature: cmd("npm", "write"), lifecycle_triggers: ["before_tool", "before_model"], scope_glob: "src/**" })]);
+    expect(dropped.accepted[0]).toMatchObject({ trigger_signature: null, relabels: ["signature_dropped"], signature_precision: null, side_effect: "read" });
+    const taskNoSig = run([fact({ trigger_signature: null, lifecycle_triggers: ["before_model"], scope_glob: "src/**", horizon: "task" })]);
+    expect(taskNoSig.accepted[0]?.horizon).toBe("task");
+    // reinforce facts carry the fields too (the reconciler decides what to do with them).
+    const reinforce = run([fact({ action: "reinforce", target_memory_id: "mem-1", trigger_signature: cmd("npm test", "write"), horizon: "task" })]);
+    expect(reinforce.accepted[0]).toMatchObject({ action: "reinforce", signature_precision: "mistake_exact", side_effect: "write", horizon: "task" });
+  });
+
+  test("the JSON schema handed to the provider accepts side_effect / horizon as optional enums and nothing else", () => {
+    const at = (root: unknown, ...keys: string[]): unknown => keys.reduce<unknown>((node, key) => (node as Record<string, unknown> | undefined)?.[key], root);
+    const factSchema = at(EXTRACTION_SCHEMA, "properties", "facts", "items");
+    expect(at(factSchema, "properties", "horizon", "enum")).toEqual([...HORIZONS]);
+    expect(at(factSchema, "properties", "trigger_signature", "properties", "side_effect", "enum")).toEqual([...SIDE_EFFECTS]);
+    expect(at(factSchema, "required")).not.toContain("horizon");
+    expect(at(factSchema, "properties", "trigger_signature", "required")).not.toContain("side_effect");
+    expect(at(factSchema, "properties", "horizon", "enum")).not.toContain("forever");
+    expect(at(factSchema, "properties", "trigger_signature", "properties", "side_effect", "enum")).not.toContain("maybe");
+    // additionalProperties: false — the provider rejects a field outside the listed ones.
+    expect(at(factSchema, "additionalProperties")).toBe(false);
+    expect(at(factSchema, "properties", "trigger_signature", "additionalProperties")).toBe(false);
+  });
+
+  test("through validateRawExtraction a recorded output carrying the fields is accepted and never leaks an unknown value", () => {
+    const rawFor = (signature: Record<string, unknown>, horizon: unknown) =>
+      JSON.stringify({
+        episode_summary: "wrong remote",
+        nothing_to_learn: false,
+        facts: [{ ...wrongRemoteFact(), trigger_signature: signature, horizon }],
+      });
+    const input = { ...baseInput(descriptorFor(wrongRemoteLines), seqMapOf(wrongRemoteLines)) };
+    const known = validateRawExtraction({ ...input, raw: rawFor({ ...cmd("git push upstream"), side_effect: "write" }, "task") });
+    expect(known.suspect).toBe(false);
+    expect(known.accepted).toHaveLength(1);
+    expect(SIDE_EFFECTS).toContain(known.accepted[0]!.side_effect);
+    expect(HORIZONS).toContain(known.accepted[0]!.horizon);
+    expect(known.accepted[0]?.signature_precision).toBe("mistake_exact");
+    const unknown = validateRawExtraction({ ...input, raw: rawFor({ ...cmd("git push upstream"), side_effect: "maybe" }, "forever") });
+    expect(unknown.suspect).toBe(false);
+    for (const accepted of unknown.accepted) {
+      expect(SIDE_EFFECTS).toContain(accepted.side_effect);
+      expect(HORIZONS).toContain(accepted.horizon);
+    }
+  });
+
+  test.todo("raw-path passthrough: side_effect \"write\" / horizon \"task\" survive parseExtractionOutput (needs src/dream/extract/schema.ts to copy the two fields)");
 });
 
 describe("intersection-set precedence (§5.6)", () => {

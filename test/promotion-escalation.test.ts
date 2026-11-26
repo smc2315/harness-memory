@@ -1,7 +1,9 @@
 /**
  * A′ ladder and remember-as-human helpers (src/promotion/escalation.ts, src/promotion/remember.ts): the pure
  * decisions as a table, the notice text the SessionStart hook renders, and the database-level escalation
- * (enforcement, history transition, audit row, downgrade / session-age lookups) on a fresh v22 database.
+ * (enforcement, history transition, audit row, downgrade / session-age lookups) on a fresh v23 database.
+ * 0.6.0-rc.2: the ladder runs under `standard` and `full` and adds two gates — signature_precision must be
+ * `mistake_exact` (null / noun never climb) and a `task` horizon never exceeds advise.
  */
 
 import { beforeEach, describe, expect, test } from "vitest";
@@ -15,6 +17,7 @@ import { TransitionRepository } from "../src/db/repositories/transitions";
 import { InvalidMemoryTransitionError, MemoryNotFoundError, MemoryRepository } from "../src/memory/repository";
 import {
   ESCALATION_AUDIT_EVENT,
+  ESCALATION_AUTONOMY_LEVELS,
   OVERRIDE_DOWNGRADE_EVENT,
   decideEscalation,
   escalateOnReinforce,
@@ -49,6 +52,8 @@ function candidate(overrides: Partial<EscalationCandidate> = {}): EscalationCand
     type: "pitfall",
     knowledgeKind: "correction",
     hasSignature: true,
+    signaturePrecision: "mistake_exact",
+    horizon: "durable",
     distinctSessionCount: 2,
     ...overrides,
   };
@@ -71,13 +76,21 @@ describe("decideEscalation (A′ ladder: advise → soft_deny)", () => {
     expect(DEFAULT_CONFIG.before_tool.auto_escalation).toEqual({ enabled: true, sessions: 2 });
   });
 
-  test("an active auto advise pitfall with a signature, correction kind and two sessions climbs", () => {
+  test("an active auto advise pitfall with a mistake_exact signature, correction kind and two sessions climbs under standard and full", () => {
+    expect(DEFAULT_CONFIG.autonomy_level).toBe("full");
+    expect(ESCALATION_AUTONOMY_LEVELS).toEqual(["standard", "full"]);
     expect(decideEscalation(input())).toEqual({ escalate: true, sessions: 2 });
+    expect(decideEscalation(input({ config: withConfig({ autonomy: "standard" }) }))).toEqual({ escalate: true, sessions: 2 });
+    expect(decideEscalation(input({ config: withConfig({ autonomy: "full" }) }))).toEqual({ escalate: true, sessions: 2 });
     expect(decideEscalation(input({}, { knowledgeKind: "failure_resolution", distinctSessionCount: 5 }))).toEqual({ escalate: true, sessions: 5 });
+    // A null horizon is unknown = durable (a row from before migration 023 whose precision was computed later).
+    expect(decideEscalation(input({}, { horizon: null }))).toEqual({ escalate: true, sessions: 2 });
+    expect(decideEscalation(input({ config: withConfig({ autonomy: "standard" }) }, { horizon: null }))).toEqual({ escalate: true, sessions: 2 });
   });
 
   test.each<[string, DecideEscalationInput, string]>([
     ["escalation disabled", input({ config: withConfig({ escalation: { enabled: false } }) }), "disabled"],
+    ["escalation disabled under standard", input({ config: withConfig({ autonomy: "standard", escalation: { enabled: false } }) }), "disabled"],
     ["autonomy shadow never exceeds advise", input({ config: withConfig({ autonomy: "shadow" }) }), "autonomy"],
     ["autonomy off", input({ config: withConfig({ autonomy: "off" }) }), "autonomy"],
     ["human rows are never touched", input({}, { authority: "human" }), "human"],
@@ -88,8 +101,17 @@ describe("decideEscalation (A′ ladder: advise → soft_deny)", () => {
     ["policies do not climb", input({}, { type: "policy" }), "type"],
     ["workflows do not climb", input({}, { type: "workflow" }), "type"],
     ["no compiled signature", input({}, { hasSignature: false }), "signature"],
+    ["no compiled signature beats a stored precision", input({}, { hasSignature: false, signaturePrecision: "mistake_exact" }), "signature"],
+    ["noun-level signature never climbs", input({}, { signaturePrecision: "noun" }), "precision"],
+    ["noun-level signature never climbs however often it is reinforced", input({}, { signaturePrecision: "noun", distinctSessionCount: 40 }), "precision"],
+    ["null precision (before migration 023) never climbs", input({}, { signaturePrecision: null }), "precision"],
+    ["noun under standard either", input({ config: withConfig({ autonomy: "standard" }) }, { signaturePrecision: "noun" }), "precision"],
+    ["null precision under standard either", input({ config: withConfig({ autonomy: "standard" }) }, { signaturePrecision: null }), "precision"],
     ["convention kind", input({}, { knowledgeKind: "convention" }), "knowledge_kind"],
     ["null kind", input({}, { knowledgeKind: null }), "knowledge_kind"],
+    ["task horizon never climbs", input({}, { horizon: "task" }), "horizon"],
+    ["task horizon never climbs however many sessions", input({}, { horizon: "task", distinctSessionCount: 40 }), "horizon"],
+    ["task horizon under standard either", input({ config: withConfig({ autonomy: "standard" }) }, { horizon: "task" }), "horizon"],
     ["one session only", input({}, { distinctSessionCount: 1 }), "sessions"],
     ["threshold raised to 3", input({ config: withConfig({ escalation: { sessions: 3 } }) }), "sessions"],
     ["downgraded by overrides and the same session reinforces", input({ downgradedAt: T0, reinforcingSessionIsNew: false }), "override_downgraded"],
@@ -354,6 +376,8 @@ describe("escalateOnReinforce on the database", () => {
         knowledgeKind: "correction",
         triggerSignature: signature,
         signatureKey: "bash|command|cmd|npm test",
+        // The rc.2 ladder needs the validator's verdict on the row; the legacy (NULL) case is tested explicitly below.
+        signaturePrecision: "mistake_exact",
         summary: "Run pnpm test instead of npm test in this repository.",
         ...overrides,
       })
@@ -401,6 +425,8 @@ describe("escalateOnReinforce on the database", () => {
     setSessions(one.id, 3);
     const shadow: Pick<HarnessConfig, "before_tool" | "autonomy_level"> = { autonomy_level: "shadow", before_tool: DEFAULT_CONFIG.before_tool };
     expect(escalateOnReinforce(db, { memoryId: one.id, sessionId: "s", runId: null, config: shadow, now: NOW }).decision).toMatchObject({ escalate: false, reason: "autonomy" });
+    const off: Pick<HarnessConfig, "before_tool" | "autonomy_level"> = { autonomy_level: "off", before_tool: DEFAULT_CONFIG.before_tool };
+    expect(escalateOnReinforce(db, { memoryId: one.id, sessionId: "s", runId: null, config: off, now: NOW }).decision).toMatchObject({ escalate: false, reason: "autonomy" });
     expect(memories.getById(one.id)?.enforcement).toBe("advise");
 
     const human = memories.create(humanMemory({ type: "pitfall", status: "active", enforcement: "advise", knowledgeKind: "correction", triggerSignature: signature, signatureKey: "bash|command|cmd|npm test", scopeGlob: "**/*", lifecycleTriggers: ["before_tool"] }));
@@ -411,6 +437,38 @@ describe("escalateOnReinforce on the database", () => {
     expect(new TransitionRepository(db).listForMemory(human.id)).toEqual([]);
 
     expect(escalateOnReinforce(db, { memoryId: "nope", sessionId: "s", runId: null, config: DEFAULT_CONFIG, now: NOW })).toMatchObject({ applied: false, memory: null });
+  });
+
+  test("the stored precision and horizon gate the database path: NULL / noun precision and a task horizon never climb however many sessions; mistake_exact climbs under standard and full alike", () => {
+    const standard: Pick<HarnessConfig, "before_tool" | "autonomy_level"> = { autonomy_level: "standard", before_tool: DEFAULT_CONFIG.before_tool };
+    // Distinct summaries: the live-uniqueness index is on the semantic key (type | scope | signature_key | summary).
+    const legacy = ladderRow({ signaturePrecision: null, summary: "Legacy row from before migration 023 (precision unknown)." });
+    const noun = ladderRow({ signaturePrecision: "noun", summary: "Noun-level signature: the pattern names the operation." });
+    const task = ladderRow({ horizon: "task", summary: "Task-horizon knowledge about the current change." });
+    for (const row of [legacy, noun, task]) setSessions(row.id, 9);
+    expect(memories.getById(legacy.id)).toMatchObject({ signaturePrecision: null, horizon: null });
+    expect(memories.getById(task.id)).toMatchObject({ signaturePrecision: "mistake_exact", horizon: "task" });
+
+    expect(escalateOnReinforce(db, { memoryId: legacy.id, sessionId: "s", runId: "run-p", config: DEFAULT_CONFIG, now: NOW }).decision).toMatchObject({ escalate: false, reason: "precision" });
+    expect(escalateOnReinforce(db, { memoryId: noun.id, sessionId: "s", runId: "run-p", config: DEFAULT_CONFIG, now: NOW }).decision).toMatchObject({ escalate: false, reason: "precision" });
+    expect(escalateOnReinforce(db, { memoryId: noun.id, sessionId: "s", runId: "run-p", config: standard, now: NOW }).decision).toMatchObject({ escalate: false, reason: "precision" });
+    expect(escalateOnReinforce(db, { memoryId: task.id, sessionId: "s", runId: "run-p", config: DEFAULT_CONFIG, now: NOW }).decision).toMatchObject({ escalate: false, reason: "horizon" });
+    expect(escalateOnReinforce(db, { memoryId: task.id, sessionId: "s", runId: "run-p", config: standard, now: NOW }).decision).toMatchObject({ escalate: false, reason: "horizon" });
+    for (const row of [legacy, noun, task]) {
+      expect(memories.getById(row.id)).toMatchObject({ enforcement: "advise", status: "active", authority: "auto" });
+      expect(new TransitionRepository(db).listForMemory(row.id)).toEqual([]);
+    }
+    expect(db.exec(`SELECT count(*) FROM audit_log WHERE event_type = '${ESCALATION_AUDIT_EVENT}'`)[0]?.values[0]?.[0]).toBe(0);
+
+    const exactStandard = ladderRow({ summary: "Exact row climbing under standard." });
+    const exactFull = ladderRow({ horizon: null, summary: "Exact row climbing under full with an unknown horizon." });
+    setSessions(exactStandard.id, 2);
+    setSessions(exactFull.id, 2);
+    expect(escalateOnReinforce(db, { memoryId: exactStandard.id, sessionId: "s2", runId: "run-s", config: standard, now: NOW })).toMatchObject({ applied: true, decision: { escalate: true, sessions: 2 } });
+    expect(escalateOnReinforce(db, { memoryId: exactFull.id, sessionId: "s2", runId: "run-f", config: DEFAULT_CONFIG, now: NOW })).toMatchObject({ applied: true, decision: { escalate: true, sessions: 2 } });
+    expect(memories.getById(exactStandard.id)?.enforcement).toBe("soft_deny");
+    expect(memories.getById(exactFull.id)?.enforcement).toBe("soft_deny");
+    expect(new TransitionRepository(db).listForMemory(exactFull.id)).toHaveLength(1);
   });
 
   test("the override downgrade marker and the session-age lookup gate re-escalation", () => {

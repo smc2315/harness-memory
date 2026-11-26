@@ -58,7 +58,7 @@
         "lifecycle_triggers": [
           "before_tool"
         ],
-        "confidence": 0.85,
+        "confidence": 0.65,
         "evidence_refs": [
           "e9202"
         ],

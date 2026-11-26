@@ -19,8 +19,10 @@ import { defineScenario } from "../scenario";
 
 export const s13 = defineScenario({
   id: "s13",
-  title: "a remember turn yields an immediately active human rule; the next session is told and asked",
+  title: "a remember turn yields an immediately active human rule; the next session is told and asked (standard review gate)",
   asserts: ["A′:remember", "13.1:human-untouched"],
+  // The tool-only constraint's activate_global proposal is standard behaviour; remember-as-human itself is level-agnostic.
+  config: { autonomy_level: "standard" },
   async run(run) {
     const turn = await run.turn("A", "s13-remember.jsonl");
     run.checkTurn(turn);
