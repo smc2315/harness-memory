@@ -89,7 +89,7 @@ harness-memory 0.6.0-rc.1 installed for Claude Code
   hooks       9 events → C:\src\my-app\.claude\settings.local.json (exec form)
   node        C:\Program Files\nodejs\node.exe  (claude 2.1.172)
   hook script C:\Users\me\AppData\Roaming\npm\node_modules\harness-memory\dist\hook.js
-  database    C:\src\my-app\.harness-memory\memory.sqlite v22 (created)
+  database    C:\src\my-app\.harness-memory\memory.sqlite v23 (created)
   snapshot    built (active 0, candidates 0)
   config      C:\src\my-app\.harness-memory\config.json (created); embeddings off
   git         .claude/settings.local.json added to C:\src\my-app\.git\info\exclude
@@ -100,7 +100,7 @@ harness-memory 0.6.0-rc.1 installed for Claude Code
 Open Claude Code in this project; `hm status` shows what the hooks learn.
 ```
 
-v0.5 데이터베이스가 이미 있는 프로젝트는 대신 `v22 (migrated from v9, backup …\memory.sqlite.bak-v9)`를 보여 준다; [0.5에서 업그레이드](#05에서-업그레이드)를 먼저 읽을 것.
+v0.5 데이터베이스가 이미 있는 프로젝트는 대신 `v23 (migrated from v9, backup …\memory.sqlite.bak-v9)`를 보여 준다; [0.5에서 업그레이드](#05에서-업그레이드)를 먼저 읽을 것.
 
 재시작은 필요 없다: Claude Code의 파일 감시자가 새 훅 항목을 읽는다(첫 프롬프트 뒤에도 `hm doctor`의 `hooks.calls`가 `never`면 새 세션을 연다). 프로젝트를 Claude Code에서 열고 평소처럼 작업하면서 `hm status`를 보면 된다. 프로젝트에 `CLAUDE.md`나 `AGENTS.md`가 있으면 설치 출력이 `hm import --from CLAUDE.md`를 제안한다; 확인 표를 거쳐 그 bullet들을 사람 메모리로 만든다.
 
@@ -457,7 +457,7 @@ hm install --host claude --with-embeddings   # 패키지 루트에서 npm instal
 
 v0.5는 다른 쓰기 경로(대화 버퍼 → evidence 행 → dream consolidation → 사람이 리뷰하는 승격)를 가진 OpenCode 플러그인이었다. v0.6은 당신의 `memory.sqlite`와 다섯 타입 / 네 트리거를 유지하면서 그 주위를 모두 다시 짓는다:
 
-- `hm install --host claude`는 `user_version` 9 / 10 / 16 → **22**로 마이그레이션한다(마이그레이션 017–022), 파일을 `memory.sqlite.bak-v<N>`으로 복사한 뒤에. 메모리 행은 하나도 삭제되지 않는다. 모든 행은 `authority`를 받는다: `candidate` 행과 자동 승격된 행은 `auto`, 그 외는 `human`; scope `**/*`에 `before_model`만 있는 v0.5 LLM 행은 `needs_scope = 1`과 `hm review`의 `fix_scope` 제안(90 d)을 받는다; v0.5 dream 테이블은 `legacy_*`로 이름이 바뀌고(한 릴리스 동안 `hm memory:history`가 읽는다), 템플릿 후보는 거부되며, 중복된 살아 있는 행은 `merge` 제안을 받는다.
+- `hm install --host claude`는 `user_version` 9 / 10 / 16 → **23**으로 마이그레이션한다(마이그레이션 017–023), 파일을 `memory.sqlite.bak-v<N>`으로 복사한 뒤에. 메모리 행은 하나도 삭제되지 않는다. 모든 행은 `authority`를 받는다: `candidate` 행과 자동 승격된 행은 `auto`, 그 외는 `human`; scope `**/*`에 `before_model`만 있는 v0.5 LLM 행은 `needs_scope = 1`과 `hm review`의 `fix_scope` 제안(90 d)을 받는다; v0.5 dream 테이블은 `legacy_*`로 이름이 바뀌고(한 릴리스 동안 `hm memory:history`가 읽는다), 템플릿 후보는 거부되며, 중복된 살아 있는 행은 `merge` 제안을 받는다.
 - OpenCode는 **0.6.0에서 지원되지 않는다**(V2 플러그인은 0.6.2; Codex 훅은 0.6.1). `opencode.json`의 v0.5 플러그인 항목(그리고 `.opencode/package.json`, `.opencode/commands/harness-memory-*.md`)은 직접 제거할 것; `hm uninstall --purge`가 레거시 `.conversation-buffer.json` / `.dream-extract-state.json` 파일을 제거한다.
 - `hm db:rollback`은 마이그레이션 전 백업을 복원한다; 다음 writer가 다시 앞으로 마이그레이션하므로 0.5로 돌아갈 생각이면 먼저 `hm uninstall` 할 것.
 

@@ -26,6 +26,12 @@ export interface HarnessConfig {
      * the ladder below raises it; `soft_deny` restores the pre-A′ behaviour of blocking on the first evidence.
      */
     auto_enforcement: "soft_deny" | "advise";
+    /**
+     * 0.6.0-rc.2: enforcement an auto pitfall / policy is born with when its signature is `mistake_exact`, the matched
+     * call is a `write` into a shared system, the knowledge came from a correction or a failure → resolution pair and
+     * the evidence score is ≥ 2 — a mistake that succeeds silently. `advise` turns the rule off.
+     */
+    auto_enforcement_silent_write: "soft_deny" | "advise";
     /** Enforcement for approved hard policies with a signature. */
     hard_policy: "confirm" | "advise" | "deny";
     /**
@@ -58,6 +64,10 @@ export interface HarnessConfig {
     max_runs_per_day: number;
     max_auto_activations_per_day: number;
     max_auto_activations_per_episode: number;
+    /** 0.6.0-rc.2 (`autonomy_level` full): daily cap on decision / architecture_constraint rows activated at advise. */
+    max_auto_knowledge_activations_per_day: number;
+    /** 0.6.0-rc.2: episodes eligible only through the decision marker (evidence 0) extracted per day; the rest skip with `decision_cap`. */
+    decision_only_per_day: number;
     timeout_ms: number;
     probe_timeout_ms: number;
     /** Lease duration for a queued episode taken by a worker. */
@@ -72,6 +82,8 @@ export interface HarnessConfig {
   };
   dream: {
     interval_hours: number;
+    /** 0.6.0-rc.2 (`autonomy_level` full): auto candidates re-evaluated by decideTier per dream run (backlog drain). */
+    full_sweep_per_run: number;
   };
   recall: {
     /** False skips everything: no summaries in the snapshot, nothing injected, `hm recall` reports it off. */
@@ -95,8 +107,15 @@ export interface HarnessConfig {
 
 export const DEFAULT_CONFIG: HarnessConfig = {
   schema: "config.v1",
-  autonomy_level: "standard",
-  before_tool: { max_items: 3, max_bytes: 2_048, auto_enforcement: "advise", hard_policy: "confirm", auto_escalation: { enabled: true, sessions: 2 } },
+  autonomy_level: "full",
+  before_tool: {
+    max_items: 3,
+    max_bytes: 2_048,
+    auto_enforcement: "advise",
+    auto_enforcement_silent_write: "soft_deny",
+    hard_policy: "confirm",
+    auto_escalation: { enabled: true, sessions: 2 },
+  },
   before_model: {
     max_items: 5,
     max_bytes: 3_072,
@@ -113,6 +132,8 @@ export const DEFAULT_CONFIG: HarnessConfig = {
     max_runs_per_day: 40,
     max_auto_activations_per_day: 10,
     max_auto_activations_per_episode: 3,
+    max_auto_knowledge_activations_per_day: 10,
+    decision_only_per_day: 5,
     timeout_ms: 120_000,
     probe_timeout_ms: 20_000,
     lease_seconds: 180,
@@ -123,7 +144,7 @@ export const DEFAULT_CONFIG: HarnessConfig = {
     idle_exit_minutes: 15,
     cache_dir: null,
   },
-  dream: { interval_hours: 6 },
+  dream: { interval_hours: 6, full_sweep_per_run: 50 },
   recall: { enabled: false, keep_episodes: 300 },
   retention: { ledger_days: 14, raw_hours: 24, audit_days: 30, candidate_days: 45, proposal_days: 30 },
   log: { debug: false, max_bytes: 5 * 1024 * 1024, rotations: 3 },
@@ -172,6 +193,7 @@ export function mergeConfig(base: HarnessConfig, override: unknown): HarnessConf
     before_tool: {
       ...pickBudget(override.before_tool, base.before_tool),
       auto_enforcement: pickEnum(beforeTool.auto_enforcement, ["soft_deny", "advise"] as const, base.before_tool.auto_enforcement),
+      auto_enforcement_silent_write: pickEnum(beforeTool.auto_enforcement_silent_write, ["soft_deny", "advise"] as const, base.before_tool.auto_enforcement_silent_write),
       hard_policy: pickEnum(beforeTool.hard_policy, ["confirm", "advise", "deny"] as const, base.before_tool.hard_policy),
       auto_escalation: {
         enabled: pickBoolean(autoEscalation.enabled, base.before_tool.auto_escalation.enabled),
@@ -196,6 +218,8 @@ export function mergeConfig(base: HarnessConfig, override: unknown): HarnessConf
       max_runs_per_day: pickNumber(extraction.max_runs_per_day, base.extraction.max_runs_per_day),
       max_auto_activations_per_day: pickNumber(extraction.max_auto_activations_per_day, base.extraction.max_auto_activations_per_day),
       max_auto_activations_per_episode: pickNumber(extraction.max_auto_activations_per_episode, base.extraction.max_auto_activations_per_episode),
+      max_auto_knowledge_activations_per_day: pickNumber(extraction.max_auto_knowledge_activations_per_day, base.extraction.max_auto_knowledge_activations_per_day),
+      decision_only_per_day: pickNumber(extraction.decision_only_per_day, base.extraction.decision_only_per_day),
       timeout_ms: pickNumber(extraction.timeout_ms, base.extraction.timeout_ms, 1_000),
       probe_timeout_ms: pickNumber(extraction.probe_timeout_ms, base.extraction.probe_timeout_ms, 1_000),
       lease_seconds: pickNumber(extraction.lease_seconds, base.extraction.lease_seconds, 10),
@@ -206,7 +230,10 @@ export function mergeConfig(base: HarnessConfig, override: unknown): HarnessConf
       idle_exit_minutes: pickNumber(embeddings.idle_exit_minutes, base.embeddings.idle_exit_minutes, 1),
       cache_dir: typeof embeddings.cache_dir === "string" && embeddings.cache_dir.length > 0 ? embeddings.cache_dir : base.embeddings.cache_dir,
     },
-    dream: { interval_hours: pickNumber(dream.interval_hours, base.dream.interval_hours) },
+    dream: {
+      interval_hours: pickNumber(dream.interval_hours, base.dream.interval_hours),
+      full_sweep_per_run: pickNumber(dream.full_sweep_per_run, base.dream.full_sweep_per_run),
+    },
     recall: {
       enabled: pickBoolean(recall.enabled, base.recall.enabled),
       keep_episodes: pickNumber(recall.keep_episodes, base.recall.keep_episodes),

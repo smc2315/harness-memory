@@ -13,7 +13,7 @@ import { dirname, join, posix, resolve, sep } from "node:path";
 
 export const HARNESS_DIR_NAME = ".harness-memory";
 export const DB_FILE_NAME = "memory.sqlite";
-export const TARGET_USER_VERSION = 22;
+export const TARGET_USER_VERSION = 23;
 
 export interface HarnessPaths {
   /** Project root (directory that contains .harness-memory). */

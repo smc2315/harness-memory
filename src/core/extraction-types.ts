@@ -4,10 +4,10 @@
  */
 
 import type { LifecycleTrigger, MemoryType } from "../db/schema/types";
-import type { CanonicalToolFamily, ExtractedKnowledgeKind, TriggerSignature } from "./vocabulary";
+import type { CanonicalToolFamily, ExtractedKnowledgeKind, Horizon, TriggerSignature } from "./vocabulary";
 
 /** Bump when the prompt or schema changes in a way that should re-run old episodes. */
-export const EXTRACTOR_VERSION = "2026.11.v1";
+export const EXTRACTOR_VERSION = "2026.11.v2";
 
 export const EXTRACTION_LIMITS = {
   max_facts: 8,
@@ -39,6 +39,8 @@ export interface ExtractionFact {
   rationale: string;
   /** Short synonyms / other-language keywords (e.g. Korean) indexed for lexical recall. */
   aliases: string[];
+  /** 0.6.0-rc.2 (optional): `task` = the current task's state — 7-day TTL, never above advise; `durable` when absent. */
+  horizon?: Horizon;
 }
 
 export interface ExtractionOutput {
@@ -98,6 +100,7 @@ export const EXTRACTION_SCHEMA: Readonly<Record<string, unknown>> = {
               pattern_kind: { enum: ["cmd", "glob", "regex", "substring"] },
               pattern: { type: "string", minLength: 1, maxLength: 200 },
               negate: { type: "boolean" },
+              side_effect: { enum: ["read", "write"] },
             },
           },
           lifecycle_triggers: {
@@ -116,6 +119,7 @@ export const EXTRACTION_SCHEMA: Readonly<Record<string, unknown>> = {
           knowledge_kind: { enum: ["correction", "failure_resolution", "convention", "decision"] },
           rationale: { type: "string", maxLength: 300 },
           aliases: { type: "array", maxItems: 8, items: { type: "string", minLength: 2, maxLength: 40 } },
+          horizon: { enum: ["durable", "task"] },
         },
       },
     },

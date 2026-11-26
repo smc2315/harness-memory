@@ -583,14 +583,28 @@ describe("migrator safety harness", () => {
     expect(hasColumn(db, "episodes", "summary_kind")).toBe(false);
 
     const report = runMigrationsOnDb(db);
-    expect(report).toEqual({ from: 21, to: 22, applied: ["022_episode_summaries.sql"] });
+    expect(report).toEqual({ from: 21, to: 23, applied: ["022_episode_summaries.sql", "023_signature_precision.sql"] });
     expect(getCurrentVersion(db)).toBe(TARGET_USER_VERSION);
     expect(hasColumn(db, "episodes", "summary")).toBe(true);
     expect(hasColumn(db, "episodes", "summary_kind")).toBe(true);
     expect(readFirstValue(db, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_episodes_recall';")).toBe(1);
     expect(readFirstValue(db, "PRAGMA integrity_check;")).toBe("ok");
 
-    expect(runMigrationsOnDb(db)).toEqual({ from: 22, to: 22, applied: [] });
+    expect(runMigrationsOnDb(db)).toEqual({ from: 23, to: 23, applied: [] });
+  });
+
+  test("023 adds signature_precision, side_effect and horizon to memories as nullable checked columns", async () => {
+    db.close();
+    db = await createTestDbAtVersion(22);
+    for (const column of ["signature_precision", "side_effect", "horizon"]) expect(hasColumn(db, "memories", column)).toBe(false);
+
+    const report = runMigrationsOnDb(db);
+    expect(report).toEqual({ from: 22, to: 23, applied: ["023_signature_precision.sql"] });
+    expect(getCurrentVersion(db)).toBe(TARGET_USER_VERSION);
+    for (const column of ["signature_precision", "side_effect", "horizon"]) expect(hasColumn(db, "memories", column)).toBe(true);
+    expect(String(readFirstValue(db, "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memories';"))).toContain("signature_precision IN ('mistake_exact', 'noun')");
+    expect(readFirstValue(db, "PRAGMA integrity_check;")).toBe("ok");
+    expect(runMigrationsOnDb(db)).toEqual({ from: 23, to: 23, applied: [] });
   });
 
   test("migrations are idempotent in ordering", async () => {

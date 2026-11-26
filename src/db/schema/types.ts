@@ -26,6 +26,9 @@ import type {
   SignatureTarget,
   SourceKind,
   TransitionActor,
+  Horizon,
+  SideEffect,
+  SignaturePrecision,
 } from "../../core/vocabulary";
 
 /**
@@ -79,6 +82,9 @@ export interface Memory {
   needs_scope: 0 | 1;
   import_unconfirmed: 0 | 1;
   aliases_json: string; // JSON array of extractor-provided synonyms, default '[]'
+  signature_precision: SignaturePrecision | null; // migration 023: mistake_exact | noun, NULL without a signature or before 023
+  side_effect: SideEffect | null; // migration 023: read | write (extractor-emitted), NULL before 023
+  horizon: Horizon | null; // migration 023: durable | task, NULL before 023 (= durable)
 }
 
 /**

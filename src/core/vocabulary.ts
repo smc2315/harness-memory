@@ -226,15 +226,34 @@ export const PATTERN_KINDS = ["cmd", "glob", "regex", "substring"] as const;
 export type PatternKind = (typeof PATTERN_KINDS)[number];
 
 /** Stored form of memories.trigger_signature_json (§4.6). `tool` is a glob over canonical tools. */
+/** 0.6.0-rc.2: does the call a signature matches write to a shared system? Extractor-emitted; `read` when absent. */
+export const SIDE_EFFECTS = ["read", "write"] as const;
+export type SideEffect = (typeof SIDE_EFFECTS)[number];
+
+/**
+ * 0.6.0-rc.2: computed once by the validator. `mistake_exact` = the compiled signature matched no tool_ok line of
+ * the source episode other than the cited mistaken call; `noun` = it also matched a legitimate call (the pattern
+ * names the operation — a host, a table, a tool — not the mistake). Only `mistake_exact` rows may be born at or
+ * climb to soft_deny; NULL (rows from before migration 023, or no signature) counts as `noun`.
+ */
+export const SIGNATURE_PRECISIONS = ["mistake_exact", "noun"] as const;
+export type SignaturePrecision = (typeof SIGNATURE_PRECISIONS)[number];
+
+/** 0.6.0-rc.2: `task` = the current task's state (7-day TTL, never above advise); `durable` is the default. */
+export const HORIZONS = ["durable", "task"] as const;
+export type Horizon = (typeof HORIZONS)[number];
+
 export interface TriggerSignature {
   tool: string;
   target: SignatureTarget;
   pattern_kind: PatternKind;
   pattern: string;
   negate?: boolean;
+  /** 0.6.0-rc.2, extractor-emitted (optional): `write` when the matched call changes data in a shared system. */
+  side_effect?: SideEffect;
 }
 
-export const AUTONOMY_LEVELS = ["off", "shadow", "standard"] as const;
+export const AUTONOMY_LEVELS = ["off", "shadow", "standard", "full"] as const;
 export type AutonomyLevel = (typeof AUTONOMY_LEVELS)[number];
 
 export const SHELL_DIALECTS = ["bash", "powershell", "cmd", "unknown"] as const;

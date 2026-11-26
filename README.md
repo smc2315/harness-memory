@@ -89,7 +89,7 @@ harness-memory 0.6.0-rc.1 installed for Claude Code
   hooks       9 events → C:\src\my-app\.claude\settings.local.json (exec form)
   node        C:\Program Files\nodejs\node.exe  (claude 2.1.172)
   hook script C:\Users\me\AppData\Roaming\npm\node_modules\harness-memory\dist\hook.js
-  database    C:\src\my-app\.harness-memory\memory.sqlite v22 (created)
+  database    C:\src\my-app\.harness-memory\memory.sqlite v23 (created)
   snapshot    built (active 0, candidates 0)
   config      C:\src\my-app\.harness-memory\config.json (created); embeddings off
   git         .claude/settings.local.json added to C:\src\my-app\.git\info\exclude
@@ -100,7 +100,7 @@ harness-memory 0.6.0-rc.1 installed for Claude Code
 Open Claude Code in this project; `hm status` shows what the hooks learn.
 ```
 
-A project that already has a v0.5 database shows `v22 (migrated from v9, backup …\memory.sqlite.bak-v9)` instead; read [Upgrading from 0.5](#upgrading-from-05) first.
+A project that already has a v0.5 database shows `v23 (migrated from v9, backup …\memory.sqlite.bak-v9)` instead; read [Upgrading from 0.5](#upgrading-from-05) first.
 
 No restart is needed: Claude Code's file watcher picks up the new hook entries (if `hm doctor` → `hooks.calls` still says `never` after your first prompt, start a new session). Open the project in Claude Code, work normally, and watch `hm status`. If the project has a `CLAUDE.md` or `AGENTS.md`, the install output also suggests `hm import --from CLAUDE.md`, which turns its bullets into human memories after a confirmation table.
 
@@ -457,7 +457,7 @@ Names and flags are taken from the dispatcher (`src/cli/registry.ts` and the com
 
 v0.5 was an OpenCode plugin with a different write path (conversation buffer → evidence rows → dream consolidation → human-reviewed promotion). v0.6 keeps your `memory.sqlite` and the five types / four triggers, and rebuilds everything around it:
 
-- `hm install --host claude` migrates `user_version` 9 / 10 / 16 → **22** (migrations 017–022), after copying the file to `memory.sqlite.bak-v<N>`. No memory row is deleted. Every row gets an `authority`: `candidate` rows and auto-promoted rows become `auto`, every other row `human`; v0.5 LLM rows with scope `**/*` and only `before_model` get `needs_scope = 1` and a `fix_scope` proposal (90 d) in `hm review`; the v0.5 dream tables are renamed `legacy_*` (read by `hm memory:history` for one release), template candidates are rejected, duplicate live rows get `merge` proposals.
+- `hm install --host claude` migrates `user_version` 9 / 10 / 16 → **23** (migrations 017–023), after copying the file to `memory.sqlite.bak-v<N>`. No memory row is deleted. Every row gets an `authority`: `candidate` rows and auto-promoted rows become `auto`, every other row `human`; v0.5 LLM rows with scope `**/*` and only `before_model` get `needs_scope = 1` and a `fix_scope` proposal (90 d) in `hm review`; the v0.5 dream tables are renamed `legacy_*` (read by `hm memory:history` for one release), template candidates are rejected, duplicate live rows get `merge` proposals.
 - OpenCode is **not supported by 0.6.0** (V2 plugin in 0.6.2; Codex hooks in 0.6.1). Remove the v0.5 plugin entry from `opencode.json` (and `.opencode/package.json`, `.opencode/commands/harness-memory-*.md`) yourself; `hm uninstall --purge` removes the legacy `.conversation-buffer.json` / `.dream-extract-state.json` files.
 - `hm db:rollback` restores the pre-migration backup; the next writer migrates forward again, so `hm uninstall` first when you mean to go back to 0.5.
 
