@@ -17,8 +17,9 @@ For anyone with an existing `.harness-memory/memory.sqlite` written by 0.3–0.5
 
 ## Upgrading from 0.6.0-rc.1 to 0.6.0-rc.2
 
-- The default `autonomy_level` changes from `standard` to `full`: waiting candidates and `activate_*` proposals are activated at `advise` by the next `dream` runs (`dream.full_sweep_per_run` = 50 per run) and the daily review digest disappears. To keep the review gate, set `"autonomy_level": "standard"` in `.harness-memory/config.json` before upgrading the package.
-- Migration 023 adds `signature_precision`, `side_effect`, `horizon` to `memories` (backup `memory.sqlite.bak-v22`). Existing rows keep NULL, which the new `soft_deny` rule reads as "not mistake-exact": nothing you already have becomes blocking.
+- The default `autonomy_level` is `full`. rc.1's `hm install` wrote `"autonomy_level": "standard"` into every `.harness-memory/config.json`, so the new default alone changes nothing for an existing project: run `hm install --host claude` (the upgrade step below) — when the install manifest says the previous install was rc.1 and the file still says `standard`, it rewrites that one value to `full` and prints it on the `config` line. From then on waiting candidates are activated at `advise` by the next `dream` runs (oldest first, up to `dream.full_sweep_per_run` = 50 activations per run), their `activate_*` proposals close as `expired(full_autonomy)`, and the daily review digest disappears. To keep the review gate, set `"autonomy_level": "standard"` again after the install; a project with no manifest (a hand-written config, or a `config.json` copied from another machine) is never rewritten — delete the `standard` line there yourself.
+- A proposal you rejected under rc.1 keeps its meaning: a candidate whose `activate_policy` / `activate_global` proposal you rejected is never activated by the automatic path; it meets the 45-day candidate expiry instead.
+- Migration 023 adds `signature_precision`, `side_effect`, `horizon` to `memories` (backup `memory.sqlite.bak-v22`). Existing rows keep NULL, which the new `soft_deny` rule and the ladder read as "not mistake-exact": with the default `before_tool.auto_enforcement: advise`, nothing you already have becomes blocking.
 - `EXTRACTOR_VERSION` is 2026.11.v2; episodes already extracted are not re-run.
 
 ## Before you upgrade
@@ -30,8 +31,8 @@ For anyone with an existing `.harness-memory/memory.sqlite` written by 0.3–0.5
 ## Upgrade steps (Claude Code)
 
 ```bash
-# 0.6.0-rc.1 is a GitHub pre-release, not on npm yet: plain `npm install -g harness-memory` still installs 0.5.1
-npm install -g https://github.com/smc2315/harness-memory/releases/download/v0.6.0-rc.1/harness-memory-0.6.0-rc.1.tgz
+# 0.6.0-rc.2 is a GitHub pre-release, not on npm yet: plain `npm install -g harness-memory` still installs 0.5.1
+npm install -g https://github.com/smc2315/harness-memory/releases/download/v0.6.0-rc.2/harness-memory-0.6.0-rc.2.tgz
 #   (once published: npm install -g harness-memory@next; or update the project devDependency the same way)
 cd <project>
 hm install --host claude                   # migrates memory.sqlite → v23 (backup first), builds the snapshot, registers 9 hooks
@@ -104,8 +105,8 @@ On the author's real v0.5 databases: v9 (13 memories, 142 evidence rows, 75 lega
 
 `hm uninstall --purge` keeps the `memory.sqlite.bak-v<N>` files for the same reason.
 
-## Known gaps in 0.6.0-rc.1
+## Known gaps (0.6.0-rc.2)
 
-- Live `claude -p` extraction has run in two synthetic sessions only (six calls on the `sonnet` alias; see docs/redesign/phase-e-notes.md); the replay provider covers the tests and the dogfood weeks have not started. The first live probe failed with `api 404` because the interactive default model was a gateway id — the claude provider now passes `--model sonnet` unless `extraction.model` is set, and such failures show as `probe provider_error` with the API message. Report any probe result other than `ok` / `not_logged_in` with `hm doctor --json`.
+- Live `claude -p` extraction has run in two synthetic sessions only (six calls on the `sonnet` alias; see docs/redesign/phase-e-notes.md); the replay provider covers the tests; the first dogfood run (17 days, one Java/Spring project, Claude Code on WSL) is summarised in CHANGELOG.md and docs/redesign/full-autonomy-0.6.0-rc.2.md. The first live probe failed with `api 404` because the interactive default model was a gateway id — the claude provider now passes `--model sonnet` unless `extraction.model` is set, and such failures show as `probe provider_error` with the API message. Report any probe result other than `ok` / `not_logged_in` with `hm doctor --json`.
 - Exec-form hooks are written when `claude --version` ≥ 2.1.139 or unknown; the minimum is inferred from release mirrors. If Claude Code reports hook errors on every call, re-run `hm install --host claude --hook-form shell`.
 - `fix_scope` proposals carry their payload (scope, triggers, signature) in the proposal rationale; the interactive editor for it is part of `hm review` (Phase C).

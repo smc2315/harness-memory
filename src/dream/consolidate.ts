@@ -41,7 +41,7 @@ import { selectAll } from "../db/sql";
 import type { WriteOp } from "../db/store";
 import { MemoryRepository, type MemoryRecord } from "../memory/repository";
 import { decideTier, type DecideTierInput } from "../promotion/authority";
-import { expireProposals, openOrSupportProposal } from "../promotion/proposals";
+import { expireProposals, humanRejectedActivation, openOrSupportProposal } from "../promotion/proposals";
 import { extendTtlOnFire } from "../promotion/revalidate";
 import { transitionMemory } from "../promotion/transitions";
 import { scanMemoryContent } from "../security/scanner";
@@ -166,9 +166,11 @@ function refreshOpenProposalFlag(repository: MemoryRepository, proposals: Propos
 }
 
 /**
- * Backlog drain (design §1, `autonomy_level: "full"` only). Every auto `candidate` row that is not a replacement row
+ * Backlog drain (design §1, `autonomy_level: "full"` only). Auto `candidate` rows that are not replacement rows
  * — no live `supersedes_memory_id` target and not the candidate of an open proposal, the same test as reconcile's
- * decideTiers — is re-evaluated with decideTier under `full`, oldest first, and activated when it passes. The sweep
+ * decideTiers, and whose activate_* proposal no human rejected (humanRejectedActivation: the automatic path never
+ * enacts a claim a human declined) — are re-evaluated with decideTier under `full`, oldest first, and activated when
+ * they pass, until the budget is spent. The sweep
  * has its own budget, `dream.full_sweep_per_run` activations per run: `capsRemaining` and `knowledgeCapsRemaining`
  * are both the activations left here, never the extraction day caps, and a row that does not pass costs nothing,
  * so unpassable old rows cannot stall the drain. An activation transitions the row by `auto_rule` (reason
@@ -191,6 +193,8 @@ function fullSweep(db: SqlJsDatabase, repository: MemoryRepository, config: Harn
     if (remaining <= 0) break;
     const supersedesLive = memory.supersedesMemoryId !== null && resolveTargetRow(repository, memory.supersedesMemoryId) !== null;
     if (supersedesLive || proposals.listOpen({ candidateId: memory.id }).length > 0) continue;
+    // A human who rejected this row's activate_* proposal (rc.1 / `standard`) said no: the sweep never reverses it.
+    if (humanRejectedActivation(proposals, memory.id)) continue;
 
     const hasSignature = memory.triggerSignature !== null && memory.signatureKey.length > 0;
     const input: DecideTierInput = {

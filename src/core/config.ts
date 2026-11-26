@@ -82,7 +82,10 @@ export interface HarnessConfig {
   };
   dream: {
     interval_hours: number;
-    /** 0.6.0-rc.2 (`autonomy_level` full): auto candidates re-evaluated by decideTier per dream run (backlog drain). */
+    /**
+     * 0.6.0-rc.2 (`autonomy_level` full): auto candidates activated by decideTier per dream run (waiting candidates are
+     * re-evaluated oldest first until this many have activated; a row that does not pass costs nothing) — the backlog drain.
+     */
     full_sweep_per_run: number;
   };
   recall: {

@@ -17,10 +17,11 @@ import { LIVE_STATUSES, type MemoryType } from "../src/core/vocabulary";
 import { getDbGeneration, hasWriteOp, insertWriteOp, setDbGeneration } from "../src/db/meta";
 import { EpisodeRepository } from "../src/db/repositories/episodes";
 import { TransitionRepository } from "../src/db/repositories/transitions";
-import { buildExtractionPrompt } from "../src/dream/extract/prompt";
+import { buildExtractionPrompt, eventIdMap } from "../src/dream/extract/prompt";
 import { validateExtraction, type ValidatedFact } from "../src/dream/extract/validate";
 import {
   ERROR_CODE_STOPLIST,
+  NEIGHBOUR_CORROBORATION_JACCARD,
   NEIGHBOUR_JACCARD,
   NEIGHBOUR_MIN_SHARED_ALIASES,
   errorCodeTokens,
@@ -121,9 +122,10 @@ interface ApplyObjectOptions {
 }
 
 /**
- * `applyRun`'s twin for recorded outputs that carry the rc.2 fields: the OBJECT is validated (validateExtraction), not
- * re-parsed through src/dream/extract/schema.ts, whose hand-written V1 still drops `trigger_signature.side_effect` and
- * `horizon` (area B's report) — the raw path would store read / durable whatever the output said.
+ * `applyRun`'s twin for recorded outputs given as OBJECTS: validateExtraction over the object, no JSON round trip
+ * through src/dream/extract/schema.ts. The raw parser carries `trigger_signature.side_effect` and `horizon` too — the
+ * silent-write birth case below runs through `applyRun` to exercise that path — so this helper only keeps the other
+ * birth-column cases independent of the parser.
  */
 function applyObjectRun(options: ApplyObjectOptions): ReconcileWriteOp {
   const now = options.now ?? REPLAY_NOW;
@@ -135,6 +137,9 @@ function applyObjectRun(options: ApplyObjectOptions): ReconcileWriteOp {
     output: options.output,
     descriptor: options.descriptor,
     seqMap: built.seqMap,
+    // As the worker does: every line of the episode for the precision rule, no corrected turn here.
+    precisionLines: eventIdMap(options.lines),
+    contextLines: null,
     existingMemoryIds: new Set(repository.list({ status: LIVE_STATUSES }).map((memory) => memory.id)),
     nowIso: now,
   });
@@ -187,18 +192,53 @@ describe("errorCodeTokens (design §4)", () => {
 });
 
 describe("signatureKeysTwin (design §2 / §4)", () => {
-  test("equal keys, substring keys of one tool; nothing across tools, empty keys or sibling patterns", () => {
+  test("equal keys, and cmd patterns the same matcher fires on; nothing across tools, targets, kinds, negation, empty or unparsable keys", () => {
     expect(signatureKeysTwin(NPM_TEST_KEY, NPM_TEST_KEY)).toBe("signature_key");
+    // `npm test` ⊂ `npm test --coverage`: a stored `npm test` already fires on the coverage run (the matcher is
+    // order-insensitive after the program token), so the two keys name one mistake.
     expect(signatureKeysTwin(NPM_TEST_KEY, "bash|command|cmd|npm test --coverage")).toBe("signature_substring");
     expect(signatureKeysTwin("bash|command|cmd|npm test --coverage", NPM_TEST_KEY)).toBe("signature_substring");
-    // `sh|command|cmd|npm test` is a substring of the bash key but names another tool.
+    expect(signatureKeysTwin("bash|command|cmd|npm test --coverage", "bash|command|cmd|npm --coverage test")).toBe("signature_substring");
+    // Sibling scripts are two mistakes although the raw key text of one contains the other's.
+    expect(signatureKeysTwin(NPM_TEST_KEY, "bash|command|cmd|npm test:e2e")).toBeNull();
+    expect(signatureKeysTwin(NPM_TEST_KEY, "bash|command|cmd|npm test:latency")).toBeNull();
+    expect(signatureKeysTwin(NPM_TEST_KEY, "bash|command|cmd|npm build")).toBeNull();
+    // A negated key is never the twin of a plain one.
+    expect(signatureKeysTwin(NPM_TEST_KEY, `${NPM_TEST_KEY}|!`)).toBeNull();
+    expect(signatureKeysTwin(`${NPM_TEST_KEY}|!`, `${NPM_TEST_KEY}|!`)).toBe("signature_key");
+    // `sh|command|cmd|npm test` is a substring of the bash key but names another tool; `pnpm test` another manager;
+    // the family word `pm test` pins no manager while `npm test` does (the matchers differ: null vs a pinned program).
     expect(signatureKeysTwin("sh|command|cmd|npm test", NPM_TEST_KEY)).toBeNull();
-    // Whole keys are compared: `npm test` is not a twin of `pnpm test` although the pattern text is a substring.
     expect(signatureKeysTwin(NPM_TEST_KEY, "bash|command|cmd|pnpm test")).toBeNull();
+    expect(signatureKeysTwin(NPM_TEST_KEY, "bash|command|cmd|pm test")).toBeNull();
+    expect(signatureKeysTwin(NPM_TEST_KEY, "bash|any|cmd|npm test")).toBeNull();
+    // A pinned two-token program is one program, not program + argument: `pnpm dlx vitest run` fires on no `pnpm
+    // vitest run` call and the other way round (compileSignatureKey: program `pnpm dlx` / `pnpm`, tokens `bin …` /
+    // `pm …`), likewise `npm exec` / `npm`, `yarn dlx` / `yarn`, and `npx` is not `pnpm dlx`.
+    expect(signatureKeysTwin("bash|command|cmd|pnpm dlx vitest run", "bash|command|cmd|pnpm vitest run")).toBeNull();
+    expect(signatureKeysTwin("bash|command|cmd|pnpm vitest run", "bash|command|cmd|pnpm dlx vitest run")).toBeNull();
+    expect(signatureKeysTwin("bash|command|cmd|npm exec vitest", "bash|command|cmd|npm vitest")).toBeNull();
+    expect(signatureKeysTwin("bash|command|cmd|yarn dlx vitest", "bash|command|cmd|yarn vitest")).toBeNull();
+    expect(signatureKeysTwin("bash|command|cmd|npx vitest run", "bash|command|cmd|pnpm dlx vitest run")).toBeNull();
+    // The same pinned two-token program with a flag added is still one mistake (the stored matcher fires on it).
+    expect(signatureKeysTwin("bash|command|cmd|pnpm dlx vitest run", "bash|command|cmd|pnpm dlx vitest run --coverage")).toBe("signature_substring");
+    // Unfolded programs pin nothing on either side: `git push` fires on `git push --force` too.
+    expect(signatureKeysTwin("bash|command|cmd|git push", "bash|command|cmd|git push --force")).toBe("signature_substring");
+    expect(signatureKeysTwin("bash|command|cmd|git push origin main", "bash|command|cmd|git push origin master")).toBeNull();
     expect(signatureKeysTwin("", NPM_TEST_KEY)).toBeNull();
     expect(signatureKeysTwin(NPM_TEST_KEY, "")).toBeNull();
     expect(signatureKeysTwin("", "")).toBeNull();
     expect(signatureKeysTwin(NPM_TEST_KEY, "edit|path|glob|**/.env")).toBeNull();
+    expect(signatureKeysTwin("npm test", NPM_TEST_KEY)).toBeNull();
+  });
+
+  test("substring keys are twins when one contains the other; glob and regex keys only when equal", () => {
+    expect(signatureKeysTwin("bash|command|substring|select emial", "bash|command|substring|select emial from users")).toBe("signature_substring");
+    expect(signatureKeysTwin("bash|command|substring|set nmae", "bash|command|substring|select emial")).toBeNull();
+    expect(signatureKeysTwin("edit|path|glob|**/.env", "edit|path|glob|**/.env")).toBe("signature_key");
+    expect(signatureKeysTwin("edit|path|glob|**/.env", "edit|path|glob|**/.env.example")).toBeNull();
+    expect(signatureKeysTwin("bash|command|regex|^git push", "bash|command|regex|^git push")).toBe("signature_key");
+    expect(signatureKeysTwin("bash|command|regex|^git push", "bash|command|regex|^git push --force")).toBeNull();
   });
 });
 
@@ -239,6 +279,8 @@ describe("findNeighbourMatch over a seeded repository (§5.7 step 3, design §4)
     expect(findNeighbourMatch(memories, normalizedFixture({ summary: "Coverage runs are pnpm-only in this repository.", signatureKey: "bash|command|cmd|npm test --coverage" }))).toMatchObject({ memory: { id: seed.id }, rules: ["signature_substring"] });
     expect(findNeighbour(memories, normalizedFixture({ summary: "Coverage runs are pnpm-only in this repository.", signatureKey: "sh|command|cmd|npm test" }))).toBeNull();
     expect(findNeighbour(memories, normalizedFixture({ summary: "Coverage runs are pnpm-only in this repository.", signatureKey: "bash|command|cmd|pnpm test" }))).toBeNull();
+    // A sibling script (`npm test:e2e`) is another mistake: the raw key contains `…|npm test` but the tokens differ.
+    expect(findNeighbour(memories, normalizedFixture({ summary: "End-to-end runs are pnpm-only in this repository.", signatureKey: "bash|command|cmd|npm test:e2e" }))).toBeNull();
   });
 
   test("two shared aliases (case-folded, trimmed) make a twin; one does not", () => {
@@ -248,12 +290,77 @@ describe("findNeighbourMatch over a seeded repository (§5.7 step 3, design §4)
     expect(findNeighbour(memories, normalizedFixture({ summary: "The package scripts of this repository are registered for pnpm only.", aliases: ["pnpm test", "lint"] }))).toBeNull();
   });
 
-  test("a shared error-code token over summary + details makes a twin; a shared year or SHA256 does not", () => {
+  test("a shared error-code token over summary + details makes a twin when the wording corroborates it; a shared year or SHA256 does not", () => {
     const seed = memories.create(autoMemory({ summary: "The connector rejects a call when the tenant header is missing.", details: "The API answers G006; seen on the orders endpoint in FY2026.", aliases: [] }));
     const twin = normalizedFixture({ summary: "Send the tenant header on every connector call; the API answers G006 without it." });
-    expect(findNeighbourMatch(memories, twin)).toMatchObject({ memory: { id: seed.id }, rules: ["error_code"] });
+    // Jaccard 0.294: under the twin threshold, over the corroboration one.
+    const score = jaccard(summaryTokens(twin.fact.summary), summaryTokens(seed.summary));
+    expect(score).toBeGreaterThanOrEqual(NEIGHBOUR_CORROBORATION_JACCARD);
+    expect(score).toBeLessThan(NEIGHBOUR_JACCARD);
+    expect(findNeighbourMatch(memories, twin)).toMatchObject({ memory: { id: seed.id }, rules: ["error_code"], score });
     expect(findNeighbour(memories, normalizedFixture({ summary: "Budget planning for FY2026 happens in the finance sheet." }))).toBeNull();
     expect(findNeighbour(memories, normalizedFixture({ summary: "Hash uploads with SHA256 before the connector call." }))).toBeNull();
+  });
+
+  test("an error-code shape shared by two unrelated rows (a Jira key, a JWT algorithm) is no match on its own; one shared alias corroborates it", () => {
+    expect(NEIGHBOUR_CORROBORATION_JACCARD).toBe(0.2);
+    const decision = (summary: string, details: string, aliases: string[] = []) => autoMemory({ type: "decision", status: "active", summary, details, aliases, lifecycleTriggers: ["session_start", "before_model"] });
+    const jira = memories.create(decision("The API contract is versioned in the openapi folder, not in code comments.", "Tracked as PROJ-1234 in the backlog.", ["backlog"]));
+    const probe = normalizedFixture({ type: "decision", summary: "Database migrations run in CI before the application image is built.", details: "Agreed under PROJ-1234 during the platform review." });
+    expect([...errorCodeTokens(probe.fact.details)]).toEqual(["PROJ-1234"]);
+    const score = jaccard(summaryTokens(probe.fact.summary), summaryTokens(jira.summary));
+    expect(score).toBeGreaterThan(0);
+    expect(score).toBeLessThan(NEIGHBOUR_CORROBORATION_JACCARD);
+    expect(findNeighbour(memories, probe)).toBeNull();
+    expect(neighbourRules(probe, jira)).toEqual([]);
+    // One shared alias (under NEIGHBOUR_MIN_SHARED_ALIASES, so no "aliases" rule) is enough corroboration for the code.
+    const corroborated = normalizedFixture({ type: "decision", summary: probe.fact.summary, details: probe.fact.details, aliases: ["Backlog"] });
+    expect(findNeighbourMatch(memories, corroborated)).toMatchObject({ memory: { id: jira.id }, rules: ["error_code"] });
+
+    const jwt = memories.create(decision("Access tokens are signed with RS256; the public key is served at the JWKS endpoint.", "Chosen over HS256 so services never share a secret."));
+    const unrelated = normalizedFixture({ type: "decision", summary: "Release notes are generated from the merged pull request titles.", details: "The signing step uses RS256 for the provenance attestation." });
+    expect(errorCodeTokens(`${jwt.summary}\n${jwt.details}`).has("RS256")).toBe(true);
+    expect(findNeighbour(memories, unrelated)).toBeNull();
+    expect(neighbourRules(unrelated, jwt)).toEqual([]);
+  });
+
+  test("two distinct signatures of one kind are never folded by shared aliases (P1: the npm build row is its own claim)", () => {
+    const seed = memories.create(autoMemory({ status: "active", summary: SUMMARY, aliases: ["pnpm", "패키지 매니저"], triggerSignature: NPM_TEST_SIGNATURE, signatureKey: NPM_TEST_KEY }));
+    const build = normalizedFixture({ summary: "Build with pnpm build; npm run build breaks without the workspace flags.", aliases: ["PNPM", "패키지 매니저"], signatureKey: "bash|command|cmd|npm build" });
+    expect(sharedAliasCount(build.fact.aliases, seed.aliases)).toBe(NEIGHBOUR_MIN_SHARED_ALIASES);
+    expect(signatureKeysTwin(build.signatureKey, seed.signatureKey)).toBeNull();
+    expect(findNeighbour(memories, build)).toBeNull();
+    expect(neighbourRules(build, seed)).toEqual([]);
+    // The same aliases still fold a signature-less restatement into the row (§5.7), and still count next to a twin key.
+    expect(findNeighbourMatch(memories, normalizedFixture({ summary: "The package scripts of this repository are registered for pnpm only.", aliases: ["pnpm", "패키지 매니저"] }))).toMatchObject({ memory: { id: seed.id }, rules: ["aliases"] });
+    expect(findNeighbourMatch(memories, normalizedFixture({ summary: "Coverage runs are pnpm-only in this repository.", aliases: ["pnpm", "패키지 매니저"], signatureKey: "bash|command|cmd|npm test --coverage" }))).toMatchObject({ memory: { id: seed.id }, rules: ["signature_substring", "aliases"] });
+  });
+
+  test("two distinct signatures of one kind are never folded by a shared error code either (P3: two SQL typos quoting ERROR 1054)", () => {
+    const seed = memories.create(
+      autoMemory({
+        status: "active",
+        summary: "The UPDATE must SET name; column nmae does not exist in users.",
+        details: "MySQL answers ERROR 1054 (42S22): Unknown column 'nmae' in 'field list'.",
+        aliases: [],
+        triggerSignature: { tool: "bash", target: "command", pattern_kind: "substring", pattern: "set nmae" },
+        signatureKey: "bash|command|substring|set nmae",
+      })
+    );
+    const probe = normalizedFixture({
+      summary: "The SELECT must read email; column emial does not exist in users.",
+      details: "MySQL answers ERROR 1054 (42S22): Unknown column 'emial' in 'field list'.",
+      signatureKey: "bash|command|substring|select emial",
+    });
+    expect(errorCodeTokens(probe.fact.details).has("ERROR 1054")).toBe(true);
+    // The wording alone would corroborate the code (0.5 ≥ 0.2) — the two signatures are what keeps the rows apart.
+    const score = jaccard(summaryTokens(probe.fact.summary), summaryTokens(seed.summary));
+    expect(score).toBeGreaterThanOrEqual(NEIGHBOUR_CORROBORATION_JACCARD);
+    expect(score).toBeLessThan(NEIGHBOUR_JACCARD);
+    expect(findNeighbour(memories, probe)).toBeNull();
+    expect(neighbourRules(probe, seed)).toEqual([]);
+    // Without a signature on the fact the corroborated code still folds the restatement into the row.
+    expect(findNeighbourMatch(memories, normalizedFixture({ summary: probe.fact.summary, details: probe.fact.details }))).toMatchObject({ memory: { id: seed.id }, rules: ["error_code"] });
   });
 
   test("§5.7: a signature-bearing fact is never absorbed by a signature-less row, whatever matched", () => {
@@ -285,9 +392,11 @@ describe("findNeighbourMatch over a seeded repository (§5.7 step 3, design §4)
     expect(neighbourRules(normalized, workflow)).toEqual([]);
     expect(neighbourRules(normalized, elsewhere)).toEqual([]);
     expect(neighbourRules(normalized, rejected)).toEqual([]);
-    // Human rows are neighbours like any live row of the type (the reinforce then only touches their counters).
+    // Human rows are neighbours like any live row of the type (the reinforce then only touches their counters). Probed
+    // under src/** so the docs/** row above is out of scope: with a global probe both would score 1.0 and the tie
+    // would fall to id order, which the file's fixture counter decides.
     const human = memories.create(humanMemory({ type: "pitfall", summary: SUMMARY, scopeGlob: "**/*" }));
-    expect(findNeighbour(memories, normalizedFixture({ summary: SUMMARY }))?.id).toBe(human.id);
+    expect(findNeighbour(memories, normalizedFixture({ summary: SUMMARY, scopeGlob: "src/**" }))?.id).toBe(human.id);
   });
 });
 
@@ -354,6 +463,41 @@ describe("the write path: a neighbour twin is reinforced, and the outcome names 
     expect(result.op.report.outcomes[0]?.detail).toContain("neighbour=error_code");
   });
 
+  test("a second mistake of the same kind (npm run build) becomes its own row instead of reinforcing the npm test row through shared aliases (P1)", () => {
+    const seed = applyRun(db, { descriptor: descriptorFromLines(s01), lines: s01, output: outputFixture([factFixture({ evidence_refs: ["e1"], aliases: ["pnpm", "패키지 매니저"] })]) });
+    const testId = seed.op.report.created[0]!;
+    expect(memories.getById(testId)).toMatchObject({ status: "active", signatureKey: NPM_TEST_KEY });
+
+    const lines: LedgerLine[] = [
+      promptLine("build it", { seq: 2200, turn_key: "p22" }),
+      toolFailLine("npm run build", "Exit code 1\nnpm ERR! Missing script: \"build\"", { seq: 2201, turn_key: "p22", program_token: "pm build", exit_code: 1, failure_class: "exit_1" }),
+      assistantLine("npm run build failed; the build script is registered for pnpm.", { seq: 2202, turn_key: "p22" }),
+    ];
+    const result = applyRun(db, {
+      descriptor: descriptorFromLines(lines, { sessionId: "session-d", turnKey: "p22" }),
+      lines,
+      output: outputFixture([
+        factFixture({
+          summary: "Build with pnpm build; npm run build breaks without the workspace flags.",
+          details: "npm run build exits with a missing-script error; the build script is registered for pnpm.",
+          trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "npm run build" },
+          knowledge_kind: "failure_resolution",
+          evidence_refs: ["e2"],
+          aliases: ["PNPM", "패키지 매니저"],
+        }),
+      ]),
+      now: isoPlus(REPLAY_NOW, { hours: 1 }),
+    });
+    expect(result.op.report.reinforced).toEqual([]);
+    expect(result.op.report.created).toHaveLength(1);
+    const buildId = result.op.report.created[0]!;
+    expect(buildId).not.toBe(testId);
+    expect(result.op.report.outcomes[0]?.detail ?? "").not.toContain("neighbour=");
+    expect(memories.getById(buildId)).toMatchObject({ signatureKey: "bash|command|cmd|npm build" });
+    expect(memories.getById(testId)).toMatchObject({ signatureKey: NPM_TEST_KEY, evidenceCount: 1 });
+    expect(memories.list({ status: LIVE_STATUSES })).toHaveLength(2);
+  });
+
   test("a create that is its own claim (no rule matches) stays a new row", () => {
     memories.create(autoMemory({ status: "active", summary: "Deploy only through the release workflow; manual pushes to production are forbidden.", aliases: [] }));
     const result = applyRun(db, { descriptor: descriptorFromLines(s01), lines: s01, output: outputFixture([factFixture({ evidence_refs: ["e1"] })]) });
@@ -403,8 +547,9 @@ describe("rc.2 birth columns (design §2–§3): precision, side effect and hori
     const descriptor = descriptorFromLines(lines, { sessionId: "session-w", turnKey: "p31" });
     expect(descriptor.flags.resolution).toBe(1);
     expect(descriptor.evidence_weight).toBe(2);
-    // Each variant is its own claim — its own pattern (no equal / substring key), its own wording, no shared alias or
-    // error code — or the rc.2 neighbour rule would fold it into the first row instead of creating it.
+    // Each variant is its own mistake: a cmd pattern that is no twin of the others (signatureKeysTwin — `git push
+    // --force origin main` would be one, the first row's matcher fires on it) and its own wording. The fixture's shared
+    // aliases and the GH006 code they all quote no longer fold two distinct signatures into one row.
     const pushFact = (summary: string, extra: { pattern?: string; details?: string; side_effect?: "read" | "write"; horizon?: "durable" | "task" } = {}) =>
       factFixture({
         summary,
@@ -412,11 +557,11 @@ describe("rc.2 birth columns (design §2–§3): precision, side effect and hori
         trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: extra.pattern ?? "git push origin main", side_effect: extra.side_effect ?? "write" },
         knowledge_kind: "failure_resolution",
         evidence_refs: ["e2", "e3"],
-        aliases: [],
         ...(extra.horizon === undefined ? {} : { horizon: extra.horizon }),
       });
 
-    const op = applyObjectRun({ descriptor, lines, output: outputFixture([pushFact("Never push straight to main in this repository; push the branch and open a pull request.")]) });
+    // Through the raw path (applyRun → validateRawExtraction → schema.ts): the parser carries side_effect, so the row is born `write`.
+    const op = applyRun(db, { descriptor, lines, output: outputFixture([pushFact("Never push straight to main in this repository; push the branch and open a pull request.")]) }).op;
     const id = op.report.created[0]!;
     expect(op.report.activated).toEqual([id]);
     expect(op.report.escalated).toEqual([]);
@@ -447,7 +592,7 @@ describe("rc.2 birth columns (design §2–§3): precision, side effect and hori
         turnKey: "p34",
         seqBase: 3400,
         session: "session-w4",
-        fact: pushFact("Force pushes to main are refused in this repository; open a pull request from the fix branch.", { pattern: "git push --force origin main", details: "Branch protection rejects non-fast-forward updates." }),
+        fact: pushFact("Pushes to the release branch are refused in this repository; open a pull request from the fix branch.", { pattern: "git push origin release", details: "Branch protection covers release as well as main." }),
         config: { ...DEFAULT_CONFIG, before_tool: { ...DEFAULT_CONFIG.before_tool, auto_enforcement_silent_write: "advise" as const } },
         ttlDays: 30,
       },

@@ -300,6 +300,36 @@ describe("full sweep (0.6.0-rc.2 §1 backlog drain)", () => {
     expect(again.report.sweptProposalsClosed).toEqual([]);
   });
 
+  test("never activates a candidate whose activate_* proposal a human rejected; it waits for the candidate expiry (INV-2)", async () => {
+    // Under rc.1 / `standard` the only "no" for a policy or repo-wide candidate was rejecting its activate_* proposal.
+    const policy = sweepCandidate({ type: "policy", knowledgeKind: "convention", createdAt: T0, updatedAt: T0 }, 1);
+    const global = sweepCandidate({ scopeGlob: "**/*", triggerSignature: null, createdAt: isoPlus(T0, { hours: 1 }), updatedAt: isoPlus(T0, { hours: 1 }) });
+    const expired = sweepCandidate({ createdAt: isoPlus(T0, { hours: 2 }), updatedAt: isoPlus(T0, { hours: 2 }) });
+    const activatePolicy = openOrSupportProposal(db, { kind: "activate_policy", targetMemoryId: policy.id, rationale: "activate_policy: policy row", confidence: 0.85, createdBy: "extractor", now: T0, expiresInDays: 30 });
+    const activateGlobal = openOrSupportProposal(db, { kind: "activate_global", targetMemoryId: global.id, rationale: "activate_global: repo-wide row", confidence: 0.85, createdBy: "extractor", now: T0, expiresInDays: 30 });
+    const expiredProposal = openOrSupportProposal(db, { kind: "activate_policy", targetMemoryId: expired.id, rationale: "activate_policy: expired, not rejected", confidence: 0.85, createdBy: "extractor", now: T0, expiresInDays: 30 });
+    decideProposal(db, { proposalId: activatePolicy.proposalId!, decidedBy: "human", accept: false, now: isoPlus(T0, { hours: 1 }) });
+    decideProposal(db, { proposalId: activateGlobal.proposalId!, decidedBy: "human", accept: false, now: isoPlus(T0, { hours: 1 }) });
+    const proposals = new ProposalRepository(db);
+    // An expired (not rejected) activate_* proposal is no human decision: the sweep closes it and activates the row.
+    expect(proposals.expire(isoPlus(T0, { days: 31 }))).toEqual([expiredProposal.proposalId]);
+    for (const row of [policy, global, expired]) expect(memories.getById(row.id)).toMatchObject({ status: "candidate", authority: "auto" });
+
+    const result = await dream(isoPlus(T0, { days: 31, hours: 1 }), { config: FULL });
+    expect(result.report.sweptActivated).toEqual([expired.id]);
+    expect(result.report.sweptProposalsClosed).toEqual([]);
+    expect(memories.getById(policy.id)).toMatchObject({ status: "candidate", authority: "auto" });
+    expect(memories.getById(global.id)).toMatchObject({ status: "candidate", authority: "auto" });
+    expect(proposals.getById(activatePolicy.proposalId!)).toMatchObject({ status: "rejected", decidedBy: "human" });
+    expect(new TransitionRepository(db).listForMemory(policy.id)).toEqual([]);
+
+    // The reject holds for the row's life: at 45 d the candidate expiry (not the sweep) ends it, as under rc.1.
+    const later = await dream(isoPlus(T0, { days: 46 }), { config: FULL });
+    expect(later.report.sweptActivated).toEqual([]);
+    expect([...later.report.rejectedCandidates].sort()).toEqual([policy.id, global.id].sort());
+    expect(memories.getById(policy.id)).toMatchObject({ status: "rejected", statusReason: "expiry" });
+  });
+
   test("a decision candidate activates against the sweep's own knowledge budget with the 30-day TTL; a task-horizon row gets 7 days", async () => {
     const now = isoPlus(T0, { days: 1 });
     const decision = memories.create(

@@ -5,18 +5,22 @@
  * - baseTtlDays(kind) = 30 for correction / failure_resolution, else 7
  * - a reinforce never shrinks a TTL: ttl_expires_at = max(existing, now + max(ttlDays(v), baseTtlDays(kind)))
  * - a fire extends it: ttl_expires_at = max(existing, last_fired_at + 14 d)
+ * - 0.6.0-rc.2 (design §2): a `task`-horizon row never gets more than TASK_HORIZON_TTL_DAYS from a reinforce or a fire
+ *   (the ceiling decideTier gave it at activation); the TTL still never shrinks
  * - human rows carry no TTL and are never touched here.
  */
 
 import type { Database as SqlJsDatabase } from "sql.js";
 
-import type { Authority, KnowledgeKind } from "../core/vocabulary";
+import type { Authority, Horizon, KnowledgeKind } from "../core/vocabulary";
 import { MemoryRepository, type MemoryRecord } from "../memory/repository";
 
 export const TTL_BASE_DAYS = 7;
 export const TTL_MAX_DAYS = 90;
 export const CORRECTION_TTL_DAYS = 30;
 export const FIRE_TTL_EXTENSION_DAYS = 14;
+/** 0.6.0-rc.2 (design §2): TTL ceiling of a `task`-horizon row, from reinforce and fire alike (= authority.ts TASK_TTL_DAYS). */
+export const TASK_HORIZON_TTL_DAYS = 7;
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -69,11 +73,13 @@ export interface RevalidationPlan {
 
 /** Pure part of revalidateMemory: what the TTL columns become for an auto row reinforced at `now`. */
 export function computeRevalidation(
-  memory: Pick<MemoryRecord, "evidenceCount" | "knowledgeKind" | "ttlExpiresAt" | "revalidateAfter">,
+  memory: Pick<MemoryRecord, "evidenceCount" | "knowledgeKind" | "ttlExpiresAt" | "revalidateAfter"> & { horizon?: Horizon | null },
   now: string
 ): RevalidationPlan {
   const validationCount = Math.max(0, memory.evidenceCount - 1);
-  const days = Math.max(ttlDays(validationCount), baseTtlDays(memory.knowledgeKind));
+  // A `task` row is knowledge about the current task's state (design §2): a reinforce never takes it past
+  // now + TASK_HORIZON_TTL_DAYS whatever its kind or validation count. A null / undefined horizon is durable.
+  const days = memory.horizon === "task" ? TASK_HORIZON_TTL_DAYS : Math.max(ttlDays(validationCount), baseTtlDays(memory.knowledgeKind));
   const ttlExpiresAt = laterIso(memory.ttlExpiresAt, addDays(now, days));
   const revalidateAfter = laterIso(memory.revalidateAfter, midpointIso(now, ttlExpiresAt));
 
@@ -96,7 +102,7 @@ export interface RevalidateOptions {
 
 /**
  * §5.7 step 5 for an authority='auto' row in status active or stale: validation_count = evidence_count − 1,
- * ttl_expires_at = max(existing, now + max(ttlDays(v), baseTtlDays(kind))), revalidate_after moves to the
+ * ttl_expires_at = max(existing, now + max(ttlDays(v), baseTtlDays(kind))) (a `task` row: now + 7 d), revalidate_after moves to the
  * midpoint of now and the TTL (never earlier than before), last_verified_at = closedAt. The caller decides
  * whether a stale(ttl_expired) row goes back to active (transitionMemory, actor auto_rule).
  */
@@ -133,7 +139,8 @@ export interface ExtendTtlOnFireOptions {
 }
 
 /**
- * §5.8 (4): an auto active row that fired is "in use": ttl_expires_at = max(existing, last_fired_at + 14 d).
+ * §5.8 (4): an auto active row that fired is "in use": ttl_expires_at = max(existing, last_fired_at + 14 d) — a
+ * `task`-horizon row gets last_fired_at + TASK_HORIZON_TTL_DAYS instead, so a fire never lifts it above its ceiling.
  * revalidate_after follows to the midpoint of the fire and the new TTL (never earlier than before).
  * `applied` is false when nothing changed.
  */
@@ -153,7 +160,8 @@ export function extendTtlOnFire(db: SqlJsDatabase, memoryId: string, options: Ex
     return { applied: false, skipped: "status", memory };
   }
 
-  const ttlExpiresAt = laterIso(memory.ttlExpiresAt, addDays(options.lastFiredAt, FIRE_TTL_EXTENSION_DAYS));
+  const extensionDays = memory.horizon === "task" ? Math.min(FIRE_TTL_EXTENSION_DAYS, TASK_HORIZON_TTL_DAYS) : FIRE_TTL_EXTENSION_DAYS;
+  const ttlExpiresAt = laterIso(memory.ttlExpiresAt, addDays(options.lastFiredAt, extensionDays));
 
   if (ttlExpiresAt === memory.ttlExpiresAt) {
     return { applied: false, skipped: null, memory };

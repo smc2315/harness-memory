@@ -465,9 +465,15 @@ export class EpisodeRepository {
 
   /**
    * Decision-marker-only episodes (`evidence_weight = 0`, session hosts) that reached the extractor since `startIso`:
-   * one per episode with an extraction run started at or after that time, whatever the run's status — the same
-   * accounting as `max_runs_per_day` (a retry reuses the run id). Pass the start of the UTC day for the
-   * `extraction.decision_only_per_day` cap (0.6.0-rc.2, design §5).
+   * one per episode with an extraction run started at or after that time whose status is `extracted`, `failed`, `dead`
+   * or `leased` — never `queued` or `skipped`. A probe or provider outage records a run row with the failure status and
+   * requeues the episode (recordExtractionFailure, providerUnavailable); such a ghost run must not consume the day's
+   * `extraction.decision_only_per_day` budget, or the requeued episodes would be skipped as `decision_cap` when the
+   * provider is back. A `skipped` episode never reached the provider either (markSkipped happens at lease time, before
+   * any call), so a run row under it is that ghost or an earlier attempt's: counting it would hold a slot for the rest
+   * of the day; not counting it costs at most one extra extraction that day, never a loss. Extracted, failed and dead
+   * episodes count whatever the run's status (a retry reuses the run id); a leased one counts from the moment its run
+   * starts. Pass the start of the UTC day (0.6.0-rc.2, design §5).
    */
   countDecisionOnlyExtractedSince(startIso: string): number {
     const row = selectOne(
@@ -476,7 +482,7 @@ export class EpisodeRepository {
         SELECT COUNT(DISTINCT e.id) AS n
         FROM episodes e
         JOIN extraction_runs r ON r.episode_id = e.id
-        WHERE e.evidence_weight = 0 AND e.host <> 'import' AND r.started_at >= $start
+        WHERE e.evidence_weight = 0 AND e.host <> 'import' AND e.status NOT IN ('queued', 'skipped') AND r.started_at >= $start
       `,
       { $start: startIso }
     );

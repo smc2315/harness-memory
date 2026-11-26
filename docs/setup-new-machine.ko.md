@@ -1,4 +1,4 @@
-# 새 컴퓨터에서 harness-memory 0.6.0-rc.1 설치하기
+# 새 컴퓨터에서 harness-memory 0.6.0-rc.2 설치하기
 
 두 번째 컴퓨터(Windows 11, macOS, Linux 또는 WSL)에서 dogfood를 시작할 때 위에서부터 따라 하는 체크리스트다. [README.ko.md](../README.ko.md)의 요약이 아니라, 새 기계에서만 생기는 문제를 모아 둔 것이다. 설치·훅·집행 경로(§2–§4, §6의 `memory:why`, §9의 uninstall)는 2026-11-09에 rc.1 tarball을 Windows 11(Node 24)과 WSL Ubuntu 22.04(Node 24, 20)의 새 npm prefix에 설치해 실제로 확인했다; §7의 sudo 없는 우회 경로와 macOS는 확인하지 않았다(`docs/redesign/phase-f-notes.md`의 "Fresh-machine verification" 절).
 
@@ -21,8 +21,8 @@ npm uninstall -g harness-memory
 ## 2. rc 설치
 
 ```bash
-npm install -g https://github.com/smc2315/harness-memory/releases/download/v0.6.0-rc.1/harness-memory-0.6.0-rc.1.tgz
-hm --version      # 0.6.0-rc.1
+npm install -g https://github.com/smc2315/harness-memory/releases/download/v0.6.0-rc.2/harness-memory-0.6.0-rc.2.tgz
+hm --version      # 0.6.0-rc.2
 ```
 
 - npm의 `latest`는 아직 0.5.1이다. `npm install -g harness-memory`, `npx harness-memory …`는 옛 플러그인을 가져오니 쓰지 않는다. git에서 설치(`github:smc2315/harness-memory#redesign/v0.6`)도 안 된다: `dist/`가 없고 빌드는 `prepack`에서만 돈다.
@@ -48,13 +48,13 @@ hm status
 ```
 
 - **일반 터미널에서** 실행한다. Claude Code 안의 셸에서 돌리면 probe가 `nested_refusal`로 끝날 수 있다(README 문제 해결 표); 그러면 일반 터미널에서 `hm install --host claude`를 다시 실행하거나 `--skip-probe`로 넘기고 나중에 다시 probe한다. WSL에서 Claude Code를 쓰면 WSL 안에서 설치한다: 훅 명령은 리눅스 node 경로여야 하고, `/mnt/c` 아래 체크아웃은 `.claude/settings.local.json`이 하나뿐이라 한쪽만 고른다.
-- 출력에서 확인할 것: `hooks 9 events → .claude/settings.local.json (exec form)`, `node <절대경로>  (claude x.y.z)`(버전이 없으면 CLI를 못 찾은 것), `database … v22 (created)` — v0.5 DB가 있던 프로젝트면 `v22 (migrated from v9, backup …bak-v9)`, `provider claude — probe ok` 또는 `not_logged_in`, `self-test session-start ok`.
+- 출력에서 확인할 것: `hooks 9 events → .claude/settings.local.json (exec form)`, `node <절대경로>  (claude x.y.z)`(버전이 없으면 CLI를 못 찾은 것), `database … v23 (created)` — v0.5 DB가 있던 프로젝트면 `v23 (migrated from v9, backup …bak-v9)`, `provider claude — probe ok` 또는 `not_logged_in`, `self-test session-start ok`.
 - `hm doctor`: FAIL 0이어야 한다. 로그인 전의 정상 WARN은 `extraction.probe probe not_logged_in`(첫 Stop 뒤에는 `extraction.waiting`도)과 Git Bash 없는 Windows의 `env.git_bash`뿐이다. INFO 줄(`queue.depth`, `extraction.last_run`, `extraction.worker`, `embeddings off`, `hooks.p95`)은 정상이다.
 - v0.5 DB가 있던 프로젝트: 설치 전에 `memory.sqlite` 사본을 하나 더 두고(설치도 `memory.sqlite.bak-v<N>`을 만든다), 설치 뒤 `hm review`에서 `fix_scope`·`merge` 제안을 본다. 자세한 것은 [docs/redesign/upgrade-from-0.5.md](redesign/upgrade-from-0.5.md).
 - 설치 출력이 제안하면 `hm import --from CLAUDE.md`, `hm import --from auto-memory`(Claude Code의 자동 메모리 노트를 사람 규칙으로). 확인 표에서 골라 승인한다.
-- 옛 기계에서 가져올 것은 없다. 메모리를 옮기려면 Claude Code를 닫은 상태에서 그 프로젝트의 `memory.sqlite`(와 `config.json`)만 복사해 여기서 `hm install --host claude`를 실행한다. `.claude/settings.local.json`과 `install-manifest.json`은 옛 기계의 node·hook 경로를 담고 있으니 복사하지 않는다.
+- 옛 기계에서 가져올 것은 없다. 메모리를 옮기려면 Claude Code를 닫은 상태에서 그 프로젝트의 `memory.sqlite`(와 `config.json`)만 복사해 여기서 `hm install --host claude`를 실행한다. 복사한 `config.json`이 rc.1이 쓴 것이면 안의 `"autonomy_level": "standard"` 줄은 지운다(새 기계에는 install-manifest가 없어 `hm install`이 고쳐 쓰지 않는다). `.claude/settings.local.json`과 `install-manifest.json`은 옛 기계의 node·hook 경로를 담고 있으니 복사하지 않는다.
 - 같은 프로젝트에 `hm install`을 다시 실행해도 된다(멱등; `.claude/settings.local.json`에서는 harness-memory 훅 항목만 교체하고 다른 훅은 그대로 둔다. DB 마이그레이션·재probe·self-test는 다시 돈다).
-- 0.6.0-rc.2부터 기본 `autonomy_level`은 `full`이다: 리뷰 없이 돌아가고 `hm review`는 보고 싶을 때만 여는 로그다. 리뷰 게이트를 원하면 `.harness-memory/config.json`에 `"autonomy_level": "standard"`.
+- 0.6.0-rc.2부터 기본 `autonomy_level`은 `full`이다: 리뷰 없이 돌아가고 `hm review`는 보고 싶을 때만 여는 큐다. rc.1이 설치한 프로젝트의 `config.json`에는 `"autonomy_level": "standard"`가 적혀 있는데(rc.1이 기본값을 파일에 썼다), install-manifest가 이전 설치를 rc.1로 기록하고 있으면 `hm install --host claude`가 그 값을 `full`로 고쳐 쓰고 `config` 줄에 알린다. 리뷰 게이트를 원하면 설치 뒤 `.harness-memory/config.json`에 `"autonomy_level": "standard"`를 다시 적는다.
 
 ## 5. 로그인 (학습 켜기)
 
@@ -114,7 +114,7 @@ hm install --host claude --with-embeddings
 ```bash
 npm login
 npm publish --tag next          # prepack이 빌드한다; 깨끗한 트리에서
-npm dist-tag ls harness-memory  # latest 0.5.1, next 0.6.0-rc.1
+npm dist-tag ls harness-memory  # latest 0.5.1, next 0.6.0-rc.2
 ```
 
 `latest`는 dogfood 뒤 0.6.0 정식 때 옮긴다. 그때까지 README의 설치 명령은 프리릴리스 tarball이다.

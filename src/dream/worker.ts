@@ -699,7 +699,16 @@ export interface ExtractedWork {
   work: LeasedWork;
   descriptor: EpisodeDescriptor;
   runId: string;
+  /** Citable event id → line: the rendered lines on the fresh path, every event id on the raw-cache path. */
   seqMap: Map<string, LedgerLine>;
+  /**
+   * Every event id of the episode → line, dropped-for-the-cap lines included (`eventIdMap(lines)`), on both paths:
+   * signature precision (validate.ts, design §2) is judged over all `tool_ok` lines, so a sibling call the render
+   * dropped still makes the signature a noun and a cached run labels the same output like a fresh one.
+   */
+  precisionLines: Map<string, LedgerLine>;
+  /** Tool lines of the corrected episode (correction_for) — the prompt's non-citable context and precision rule 2 — else null. */
+  contextLines: LedgerLine[] | null;
   run: ReconcileRunInfo;
   result: ProviderResult;
   fromCache: boolean;
@@ -761,10 +770,15 @@ export async function unlockedPhase(batch: readonly LeasedWork[], options: Unloc
     const { lines } = readEpisodeLines(paths, work.record, work.queued);
     const descriptor = hydrateDescriptor(work.record, work.queued, lines);
     const derivedSummary = buildRecallSummary(descriptor, lines);
+    // Computed once per episode: the corrected turn's tool lines feed the prompt and precision rule 2; the full event-id
+    // map feeds precision (and is the raw-cache path's citable map). Every push site below carries both, whatever path
+    // the episode takes.
+    const precisionLines = eventIdMap(lines);
+    const contextLines = toolLinesOf(paths, work.correctionFor);
     const built = buildExtractionPrompt({
       descriptor,
       lines,
-      contextLines: toolLinesOf(paths, work.correctionFor),
+      contextLines,
       existingMemories: work.existingMemories,
       host: descriptor.host,
     });
@@ -786,7 +800,7 @@ export async function unlockedPhase(batch: readonly LeasedWork[], options: Unloc
       try {
         const raw = readFileSync(cached, "utf8");
         if (parseExtractionOutput(raw).ok) {
-          extracted.push({ work, descriptor, runId, seqMap: eventIdMap(lines), run: { ...run, rawOutputRef: `raw/${basename(cached)}` }, result: { status: "ok", raw, model: "cache" }, fromCache: true, providerUnavailable: false, derivedSummary });
+          extracted.push({ work, descriptor, runId, seqMap: precisionLines, precisionLines, contextLines, run: { ...run, rawOutputRef: `raw/${basename(cached)}` }, result: { status: "ok", raw, model: "cache" }, fromCache: true, providerUnavailable: false, derivedSummary });
           logger.line("cache_reuse", { episode: descriptor.id, run: runId });
           continue;
         }
@@ -805,7 +819,7 @@ export async function unlockedPhase(batch: readonly LeasedWork[], options: Unloc
       // A failed probe says nothing about this episode: it is recorded for `doctor` but waits like `no_provider`
       // (§9.4 F3 "N episodes waiting") instead of consuming one of its three attempts.
       const status = probeFailureStatus(probeResult.result);
-      extracted.push({ work, descriptor, runId, seqMap: built.seqMap, run, result: { status, raw: "", error: `probe: ${probeResult.result}${probeResult.detail === null ? "" : ` — ${probeResult.detail}`}` }, fromCache: false, providerUnavailable: true, derivedSummary });
+      extracted.push({ work, descriptor, runId, seqMap: built.seqMap, precisionLines, contextLines, run, result: { status, raw: "", error: `probe: ${probeResult.result}${probeResult.detail === null ? "" : ` — ${probeResult.detail}`}` }, fromCache: false, providerUnavailable: true, derivedSummary });
       continue;
     }
 
@@ -841,7 +855,7 @@ export async function unlockedPhase(batch: readonly LeasedWork[], options: Unloc
       ...(result.model === undefined ? {} : { model: result.model }),
       ...(result.costUsd === undefined ? {} : { cost_usd: result.costUsd }),
     });
-    extracted.push({ work, descriptor, runId, seqMap: built.seqMap, run: { ...run, rawOutputRef, model: result.model ?? run.model }, result, fromCache: false, providerUnavailable: false, derivedSummary });
+    extracted.push({ work, descriptor, runId, seqMap: built.seqMap, precisionLines, contextLines, run: { ...run, rawOutputRef, model: result.model ?? run.model }, result, fromCache: false, providerUnavailable: false, derivedSummary });
   }
 
   return { extracted, probeResult };
@@ -885,6 +899,8 @@ export function reconcileSession(db: SqlJsDatabase, ctx: WriteContext, item: Ext
     raw: item.result.raw,
     descriptor: item.descriptor,
     seqMap: item.seqMap,
+    precisionLines: item.precisionLines,
+    contextLines: item.contextLines,
     existingMemoryIds,
     nowIso: now,
     correctionForEpisode: item.work.correctionFor === null ? null : { scope_refs: item.work.correctionFor.scopeRefs, tools: item.work.correctionFor.tools },

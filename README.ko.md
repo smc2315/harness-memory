@@ -7,7 +7,7 @@
 
 [claude-mem](https://github.com/thedotmack/claude-mem)과 보완 관계다: claude-mem은 무슨 일이 있었는지 기억하고, harness-memory는 에이전트가 알려진 실수를 반복하려는 순간에 멈춰 세운다. 계정도, 텔레메트리도, 데몬도, 툴 호출당 LLM 호출도 없다 — 핫패스는 미리 계산된 JSON 파일 하나를 읽는다.
 
-> **0.6.0-rc.1 — Claude Code 전용.** Codex 훅은 0.6.1, OpenCode(V2 플러그인)는 0.6.2에 들어온다. v0.5는 OpenCode 플러그인이었다; 기존 `.harness-memory/` 위에 0.6을 설치하기 전에 [0.5에서 업그레이드](#05에서-업그레이드)를 먼저 읽을 것. 아직 npm에 없다: 프리릴리스 tarball로 설치한다, [설치](#설치) 참고.
+> **0.6.0-rc.2 — Claude Code 전용.** Codex 훅은 0.6.1, OpenCode(V2 플러그인)는 0.6.2에 들어온다. v0.5는 OpenCode 플러그인이었다; 기존 `.harness-memory/` 위에 0.6을 설치하기 전에 [0.5에서 업그레이드](#05에서-업그레이드)를 먼저 읽을 것. 아직 npm에 없다: 프리릴리스 tarball로 설치한다, [설치](#설치) 참고.
 
 - [한 턴으로 보는 동작](#한-턴으로-보는-동작)
 - [요구 사항](#요구-사항)
@@ -62,13 +62,13 @@ claude:  Bash: pnpm test
 
 ### 릴리스 후보 설치
 
-0.6.0-rc.1은 아직 npm에 없다: `npm install -g harness-memory`는 여전히 **0.5.1, OpenCode 플러그인**을 설치하며 거기에는 `hm` 바이너리가 없다. 대신 GitHub 프리릴리스에 붙은 tarball을 설치한다:
+0.6.0-rc.2는 아직 npm에 없다: `npm install -g harness-memory`는 여전히 **0.5.1, OpenCode 플러그인**을 설치하며 거기에는 `hm` 바이너리가 없다. 대신 GitHub 프리릴리스에 붙은 tarball을 설치한다:
 
 ```bash
 node --version                      # ≥ 20; nvm이면 계속 쓸 버전으로 (nvm alias default <v>)
 npm uninstall -g harness-memory     # 남아 있는 0.5.1 제거; 설치된 것이 없으면 아무 일도 없다
-npm install -g https://github.com/smc2315/harness-memory/releases/download/v0.6.0-rc.1/harness-memory-0.6.0-rc.1.tgz
-hm --version                        # 0.6.0-rc.1
+npm install -g https://github.com/smc2315/harness-memory/releases/download/v0.6.0-rc.2/harness-memory-0.6.0-rc.2.tgz
+hm --version                        # 0.6.0-rc.2
 cd <your project>
 hm install --host claude            # Claude Code 세션 안의 셸이 아니라 일반 터미널에서
 hm status
@@ -79,19 +79,19 @@ hm status
 - **전역 대신 프로젝트별로:** `npm install -D <같은 URL>` 뒤 `npx hm install --host claude`; 훅은 `node_modules/harness-memory/dist/hook.js`를 가리킨다. npm `latest`가 0.5.1인 동안 `npx harness-memory …`는 쓰지 말 것(옛 플러그인의 `install`이 돈다). git에서 설치도 안 된다(`github:smc2315/harness-memory#redesign/v0.6`에는 `dist/`가 없다; 빌드는 `prepack`에서만 돈다).
 - **나중에:** rc가 `next` 태그로 공개되면 `npm install -g harness-memory@next`, 0.6.0이 `latest`가 되면 그냥 `harness-memory`. 어떤 업데이트든 뒤에는 각 프로젝트에서 `hm install --host claude`를 다시 실행한다: 데이터베이스를 마이그레이션하고(백업 먼저) 훅 항목을 교체하고 다시 probe하고 self-test를 돌린다. 전역 설치는 훅 경로가 그대로이므로 그 사이에 깨지는 것은 없다.
 - **학습에는 터미널에서 로그인한 `claude` CLI가 필요하다:** `claude auth login`(구버전 CLI: `claude` 실행 후 `/login`). 데스크톱 앱 로그인은 해당되지 않고, 데스크톱 앱만으로는 PATH에 `claude`가 생기지 않는다 — CLI를 설치할 것; 없으면 `hm install`은 `provider none found`를 보고하고 그래도 성공한다. import한 규칙과 손으로 추가한 규칙의 집행은 로그인 없이 동작한다; 그때까지 `probe not_logged_in` / `queue N (waiting: not_logged_in)`은 정상이고, 로그인 직후 `hm install --host claude`가 바로 다시 probe한다.
-- **다른 컴퓨터로 옮기기:** 복사할 것은 없다. `.harness-memory/`는 프로젝트별이고 git이 무시하므로 새 clone은 비어서 시작한다; 메모리를 가져가려면 Claude Code를 닫은 상태에서 그 프로젝트의 `memory.sqlite`(와 `config.json`)만 복사하고 거기서 `hm install --host claude`를 실행한다. `.claude/settings.local.json`과 `install-manifest.json`은 절대 복사하지 말 것: 다른 기계의 node·hook 경로가 들어 있다. 단계별 체크리스트: [docs/setup-new-machine.ko.md](docs/setup-new-machine.ko.md).
+- **다른 컴퓨터로 옮기기:** 복사할 것은 없다. `.harness-memory/`는 프로젝트별이고 git이 무시하므로 새 clone은 비어서 시작한다; 메모리를 가져가려면 Claude Code를 닫은 상태에서 그 프로젝트의 `memory.sqlite`(와 `config.json`)만 복사하고 거기서 `hm install --host claude`를 실행한다 — 그 `config.json`이 0.6.0-rc.1이 쓴 것이면 안의 `"autonomy_level": "standard"` 줄을 지운다(rc.1이 기본값으로 적어 둔 값이고, 새 기계에는 install-manifest가 없어 `hm install`이 그대로 둔다). `.claude/settings.local.json`과 `install-manifest.json`은 절대 복사하지 말 것: 다른 기계의 node·hook 경로가 들어 있다. 단계별 체크리스트: [docs/setup-new-machine.ko.md](docs/setup-new-machine.ko.md).
 
 새 프로젝트에서 `hm install --host claude`의 출력(요약):
 
 ```text
-harness-memory 0.6.0-rc.1 installed for Claude Code
+harness-memory 0.6.0-rc.2 installed for Claude Code
   project     C:\src\my-app
   hooks       9 events → C:\src\my-app\.claude\settings.local.json (exec form)
   node        C:\Program Files\nodejs\node.exe  (claude 2.1.172)
   hook script C:\Users\me\AppData\Roaming\npm\node_modules\harness-memory\dist\hook.js
   database    C:\src\my-app\.harness-memory\memory.sqlite v23 (created)
   snapshot    built (active 0, candidates 0)
-  config      C:\src\my-app\.harness-memory\config.json (created); embeddings off
+  config      C:\src\my-app\.harness-memory\config.json (created); embeddings off; autonomy_level full
   git         .claude/settings.local.json added to C:\src\my-app\.git\info\exclude
   git         C:\src\my-app\.harness-memory\.gitignore written (nothing under .harness-memory/ is ever committed)
   provider    claude — probe not_logged_in (Not logged in · Please run /login); the hooks enforce rules without the login — …; learning from sessions … starts after `claude auth login` …
@@ -202,10 +202,10 @@ hm uninstall --purge   # memory.sqlite.bak-v<N> 백업을 제외한 .harness-mem
 `Stop`, `PreCompact`, `SessionEnd`는 열린 세그먼트(`[turn_start_offset, EOF)`, ≤ 4 MB)를 `queue/<episode_id>.json`으로 닫는다: scope ref, 사용한 툴, 실패 시그니처와 그 해결, 플래그, 어떤 메모리가 발화했고 에이전트가 `soft_deny`를 **override**했는지 **heed**했는지, 그리고
 
 ```text
-evidence_weight = correction 2 + remember 3 + (실패마다 resolution 2 | 미해결 failure 1)   (상한 10)
+evidence_weight = correction 2 (맨 교정 큐, 즉 교정된 툴 턴이 없으면 1) + remember 3 + (실패마다 resolution 2 | 미해결 failure 1)   (상한 10)
 ```
 
-`evidence_weight ≥ 1`이거나 결정 마커가 있는 에피소드만 LLM으로 간다; 읽기 전용 턴은 `no_signal`로 건너뛴다. 다음 `UserPromptSubmit`은 호스트가 끝내지 못한 턴을 닫고(`interrupted`), `SessionStart` 훅과 `hm dream`은 한 시간 넘게 멈춘 턴을 스윕한다(`idle`). 에피소드 id는 결정적이라(`host:session:turn_key:segment`) 같은 세그먼트를 다시 닫는 것은 no-op이고, 중간에 압축된 턴은 두 개의 에피소드가 된다.
+`evidence_weight ≥ 1`이거나 결정 마커가 있는 에피소드만 LLM으로 간다; 읽기 전용 턴은 `no_signal`로 건너뛰고, ledger 라인이 2개 이하(프롬프트 + 이벤트 1개)인 `interrupted` 종료도 마찬가지다. 교정 큐는 이전 턴에 툴 호출이 있는 턴을 교정할 때(`correction_for` + 툴 라인)만 2이고 그 외에는 1이다. 결정 마커만으로 적격인 에피소드는 하루 `extraction.decision_only_per_day` = 5건까지만 추출한다(`decision_cap`; provider 장애로 다시 큐에 들어간 것은 세지 않는다). 다음 `UserPromptSubmit`은 호스트가 끝내지 못한 턴을 닫고(`interrupted`), `SessionStart` 훅과 `hm dream`은 한 시간 넘게 멈춘 턴을 스윕한다(`idle`). 에피소드 id는 결정적이라(`host:session:turn_key:segment`) 같은 세그먼트를 다시 닫는 것은 no-op이고, 중간에 압축된 턴은 두 개의 에피소드가 된다.
 
 ### 3. 추출 — 분리된 worker와 당신의 CLI
 
@@ -231,9 +231,9 @@ evidence_weight = correction 2 + remember 3 + (실패마다 resolution 2 | 미�
 
 ### 5. Reconcile — 트랜잭션 하나, 그다음 스냅샷
 
-`locks/db.lock` 아래(수 초만 보유하며 LLM 호출을 감싸지 않는다)에서 worker는 fact를 하나씩(`SAVEPOINT`마다) 적용한다: `create`는 `authority = 'auto'`, `status = 'candidate'`, `source_ref = 'episode:<id>'`인 새 행이 되고; 동일하거나 거의 같은 살아 있는 행(`semantic_key`, 또는 정규화된 summary의 Jaccard ≥ 0.6)이 있으면 대신 **강화**된다; `propose_*`는 **제안**을 열거나 지지한다. 모든 fact는 `memory_provenance`(에피소드, 인용 라인, confidence)를 남기고, 파생 카운터(`evidence_count`, `evidence_score` = 에피소드 가중치 합, `distinct_session_count`, auto `confidence`)가 즉시 재계산된 뒤 `decideTier`가 `active`인지 `candidate`인지 결정한다([자동 티어](#자동-티어--메모리가-스스로-활성화되는-조건) 참고). run id는 `write_ops`에 기록되어 같은 run을 재생해도 no-op이다; `policy_rules`는 active policy 메모리에서 다시 파생되고; `db_generation`이 증가하고; 데이터베이스는 원자적으로 저장되며(`.tmp-<pid>` → fsync → `.prev` → rename) `snapshot/*.v1.*`이 재빌드된다. 손상된 본 파일은 `.prev`에서 복구된다.
+`locks/db.lock` 아래(수 초만 보유하며 LLM 호출을 감싸지 않는다)에서 worker는 fact를 하나씩(`SAVEPOINT`마다) 적용한다: `create`는 `authority = 'auto'`, `status = 'candidate'`, `source_ref = 'episode:<id>'`인 새 행이 되고; 동일하거나 거의 같은 살아 있는 행이 있으면 대신 **강화**된다 — 같은 `semantic_key`; 정규화된 summary의 Jaccard ≥ 0.6; 같은 툴·대상·종류·부정의 같거나 더 좁거나 더 넓은 시그니처 키(`npm test` ~ `npm test --coverage`, `npm test:e2e`는 아님); 공유 별칭 ≥ 2개; 또는 겹치는 문구(Jaccard ≥ 0.2)나 공유 별칭 하나가 뒷받침하는 공유 오류 코드 토큰. 별칭과 오류 코드는 서로 다른 실수를 가리키는 두 시그니처를 절대 합치지 않고, 시그니처가 있는 fact는 시그니처 없는 이웃에 흡수되지 않는다: 타입·텍스트·scope·트리거가 같으면(identity key) 시그니처 없는 auto 행이 그 시그니처를 받아들이고(`adopted=signature`; 정밀도는 미지로 남아 사다리를 오르지 않는다; 그 행에 `activate_*` 제안이 열려 있거나 거부된 적이 있으면 받아들이지 않는다 — 기억 턴은 사용자의 말이 승인이므로 그래도 받아들인다), human 행은 강화만 받는다(`collapsed=identity_key`); `propose_*`는 **제안**을 열거나 지지한다. 모든 fact는 `memory_provenance`(에피소드, 인용 라인, confidence)를 남기고, 파생 카운터(`evidence_count`, `evidence_score` = 에피소드 가중치 합, `distinct_session_count`, auto `confidence`)가 즉시 재계산된 뒤 `decideTier`가 `active`인지 `candidate`인지 결정한다([자동 티어](#자동-티어--메모리가-스스로-활성화되는-조건) 참고). run id는 `write_ops`에 기록되어 같은 run을 재생해도 no-op이다; `policy_rules`는 active policy 메모리에서 다시 파생되고; `db_generation`이 증가하고; 데이터베이스는 원자적으로 저장되며(`.tmp-<pid>` → fsync → `.prev` → rename) `snapshot/*.v1.*`이 재빌드된다. 손상된 본 파일은 `.prev`에서 복구된다.
 
-**Consolidation**(`worker dream`; 마지막 실행이 `dream.interval_hours` = 6보다 오래됐을 때 `SessionEnd`에서 스폰되거나 `hm dream`)은 절대 메모리를 발명하지 않는다: TTL 만료(교정/실패 유래 행은 먼저 `revalidate` 제안을 받는다), 45 d가 지난 auto 후보 → `rejected`, 30 d가 지난 제안 → `expired`, 최근 발화한 행의 TTL 연장, **override 강등**(`evidence_score < 3`인 auto 행이 3번 이상 override되면 `advise`로 내려간다), auto 근중복의 `merge` 제안, 임베딩 백필, idle 턴 스윕, GC(ledger 세그먼트 14 d, `raw/` 24 h, tmp 파일 10분, audit 로그 30 d).
+**Consolidation**(`worker dream`; 마지막 실행이 `dream.interval_hours` = 6보다 오래됐을 때 `SessionEnd`에서 스폰되거나 `hm dream`)은 절대 메모리를 발명하지 않는다: `full` 스윕(`autonomy_level: full`에서: 대기 중인 auto 후보를 오래된 순으로 다시 평가해 통과한 것을 실행마다 `dream.full_sweep_per_run` = 50개까지 활성화하고 그 `activate_*` 제안을 `expired(full_autonomy)`로 닫는다; 당신이 `activate_*` 제안을 거부한 행은 절대 스윕되지 않는다), TTL 만료(교정/실패 유래 행은 먼저 `revalidate` 제안을 받는다), 45 d가 지난 auto 후보 → `rejected`, 30 d가 지난 제안 → `expired`, 최근 발화한 행의 TTL 연장, **override 강등**(`evidence_score < 3`인 auto 행이 3번 이상 override되면 `advise`로 내려간다), auto 근중복의 `merge` 제안, 임베딩 백필, idle 턴 스윕, GC(ledger 세그먼트 14 d, `raw/` 24 h, tmp 파일 10분, audit 로그 30 d).
 
 ### `.harness-memory/` 레이아웃 — 무엇을 백업할 것인가
 
@@ -276,34 +276,34 @@ evidence_weight = correction 2 + remember 3 + (실패마다 resolution 2 | 미�
 | 시그니처가 있는 hard `policy`; `never` / `must not` / `always` / `do not` / `절대` / `반드시` / `항상`과 시그니처를 가진 **확인된** import 규칙 | human | `confirm`(`before_tool.hard_policy`) |
 | soft policy, 시그니처 없는 policy, `hm import --yes` 행(`import_unconfirmed = 1`), 그 외 import | human | `advise` |
 | 시그니처가 **실수-정확**(원천 에피소드에서 정당한 호출과는 한 번도 일치하지 않음)이고, 일치하는 호출이 공유 시스템에 **쓰기**이며, 교정 또는 실패 → 해결 쌍에서 증거 ≥ 2로 배운(`horizon`이 `task`가 아닌) auto `pitfall` / `policy` | auto | `soft_deny`(`before_tool.auto_enforcement_silent_write`; `advise`로 끄기). dogfood 데이터가 뒷받침한 유일한 경우: 조용히 성공하는 실수, 결과와 함께 오는 advise로는 막을 수 없는 것 |
-| 구체적 시그니처와 `knowledge_kind ∈ {correction, failure_resolution}`을 가진 auto `pitfall` | auto | `advise`(`before_tool.auto_enforcement`); 두 번째 세션이 다시 확인하면 `soft_deny`로 올라간다(`before_tool.auto_escalation`, 기본 `{ enabled: true, sessions: 2 }`; `autonomy_level: shadow`는 올라가지 않음; override로 내려간 행은 새 세션이 다시 확인해야 다시 올라감). `hm memory:history`에 `active (enforcement) by auto_rule`로 기록 |
+| 구체적 시그니처와 `knowledge_kind ∈ {correction, failure_resolution}`을 가진 auto `pitfall` | auto | `advise`(`before_tool.auto_enforcement`); 두 번째 세션(또는 같은 세션의 다른 4시간 블록)이 다시 확인하고 **그리고** 시그니처가 실수-정확일 때만 `soft_deny`로 올라간다(`before_tool.auto_escalation`, 기본 `{ enabled: true, sessions: 2 }`; `autonomy_level: shadow`는 올라가지 않음; override로 내려간 행은 새 세션이 다시 확인해야 다시 올라감). `hm memory:history`에 `active (enforcement) by auto_rule`로 기록 |
 | 명시적 기억 요청(`remember this`, `기억해`, `앞으로` + 규칙)이 있는 턴에서 그 프롬프트 줄을 인용한 규칙 | human(`status_reason remember`, 즉시 active, 턴당 최대 2개) | 시그니처 있는 policy → `confirm`(`before_tool.hard_policy`); 시그니처 있는 pitfall → `soft_deny`; 그 외 → `advise`. `SessionStart`가 24시간 동안 되돌리기(`hm memory:demote <id>`)와 함께 알려 준다; 이후 자동 경로는 손대지 않는다 |
 | 그 외 모든 auto 행(시그니처 없는 `pitfall`, `workflow`, `decision`, `architecture_constraint`) | auto | `advise` |
 
 ### 자동 티어 — 메모리가 스스로 활성화되는 조건
 
-`decideTier`는 생성되거나 강화된 모든 auto 후보에 대해, 카운터가 재계산된 직후 실행된다. 기본값 `autonomy_level: full`(0.6.0-rc.2)에서는 기계적으로 묶을 수 있는 것은 전부 `advise`로 활성화한다: `confidence ≥ 0.7`인 `decision`·`architecture_constraint` 행(에피소드 증거 불필요 — decision 표지가 증거다; `extraction.max_auto_knowledge_activations_per_day` = 10), 저장소 전체 행과 policy(`advise`로만, `confirm` / `deny`로는 절대), `evidence_score ≥ 1`인 `pitfall` / `workflow` 행. 제안은 열리지 않고, `dream` 실행마다 대기 중인 후보를 `dream.full_sweep_per_run` = 50개까지 다시 평가해 밀린 것을 스스로 소진한다. 신뢰도 기준에 못 미치는 행은 강화로 올라오거나 `retention.candidate_days` 뒤 만료될 때까지 후보로 남는다. `standard`(0.6.0-rc.1 동작)의 규칙은:
+`decideTier`는 생성되거나 강화된 모든 auto 후보에 대해, 카운터가 재계산된 직후 실행된다. 기본값 `autonomy_level: full`(0.6.0-rc.2)에서는 기계적으로 묶을 수 있는 것은 전부 `advise`로 활성화한다: `confidence ≥ 0.7`인 `decision`·`architecture_constraint` 행(에피소드 증거 불필요 — decision 표지가 증거다; `extraction.max_auto_knowledge_activations_per_day` = 10), 저장소 전체 행과 policy(`advise`로만, `confirm` / `deny`로는 절대), `evidence_score ≥ 1`인 `pitfall` / `workflow` 행. 제안은 열리지 않고, `dream` 실행마다 대기 중인 후보를 오래된 순으로 다시 평가해 통과한 것을 `dream.full_sweep_per_run` = 50개까지 활성화한다(통과하지 못한 행은 예산을 쓰지 않고, 당신이 `activate_*` 제안을 거부한 행은 스윕되지 않는다) — 밀린 것은 스스로 소진된다. 규칙에는 여전히 닿을 수 있는 트리거(시그니처 또는 `relevant_tools`)가, 정보성 행에는 lifecycle 트리거가 필요하다. 신뢰도 기준에 못 미치는 행은 강화로 올라오거나 `retention.candidate_days` 뒤 만료될 때까지 후보로 남는다. `standard`(0.6.0-rc.1 동작)의 규칙은:
 
 - 다음이 모두 성립하면 **active**: `type ∈ {pitfall, workflow}`, 유효한 저장소 상대 scope, 트리거 시그니처 또는 `relevant_tools`, 훅이 닿을 수 있는 트리거, `confidence ≥ 0.7`, `evidence_score ≥ 2`, 스캐너 통과, 열린 제안의 대체 행이 아님, 캡 미달(`extraction.max_auto_activations_per_episode` = 3, `max_auto_activations_per_day` = 10), `autonomy_level = standard`. 행은 교정/실패→해결 지식이면 `ttl_expires_at = now + 30 d`(관습은 7 d), `revalidate_after`는 그 절반, `validation_count = evidence_count − 1`을 받는다.
 - 그 외에는 **candidate** — 이유(`evidence`, `cap`, `confidence`, `type`, `replacement`, `autonomy`, `knowledge_cap`, …)와 함께; `standard`에서는 `policy`면 `activate_policy` 제안, 시그니처 없는 전역 행이면 `activate_global` 제안이 열리고 `decision`과 `architecture_constraint`는 당신을 기다린다. `full`에서는 이 셋 중 어느 것도 기다리지 않는다.
 
-"충분한 증거"는 **에피소드 수가 아니라 가중치 합**이다: 교정 하나(2) 또는 실패 → 해결 쌍 하나(2)면 즉시 활성화된다. 비용 쪽은 TTL, 첫 활성화의 신뢰 배수 0.65, 강등에만 적용되는 2-세션 규칙, V10 구체성, override 강등, 일일 캡이다. 강화는 TTL을 줄이지 않는다(`ttl = max(기존, now + max(7·2^validations, base))`, 최대 90 d); 발화한 메모리는 14 d 연장된다.
+"충분한 증거"는 **에피소드 수가 아니라 가중치 합**이다: 이전 툴 턴에 대한 교정 하나(2) 또는 실패 → 해결 쌍 하나(2)면 `standard`에서 즉시 활성화된다; 맨 교정 큐(1)는 `full`에서만 활성화된다. 비용 쪽은 TTL, 첫 활성화의 신뢰 배수 0.65, 강등에만 적용되는 2-세션 규칙, V10 구체성, override 강등, 일일 캡이다. 강화는 TTL을 줄이지 않는다(`ttl = max(기존, now + max(7·2^validations, base))`, 최대 90 d); 발화한 메모리는 14 d 연장된다. `task` horizon 행은 둘 다에서 7 d 상한을 유지한다.
 
 ### 제안과 리뷰
 
-제안 종류 여덟 가지: `supersede`, `stale`, `activate_policy`, `activate_global`, `fix_scope`(v0.5 마이그레이션에서), `fix_signature`, `revalidate`, `merge`. (kind, target, candidate)당 열린 제안은 하나이며, 같은 주장이 반복되면 `support_count` / `support_sessions`만 오른다. 추출기의 `propose_stale` / `propose_supersede`는 **human** 행에 대해서는 제안을 열고 행을 `contested`로 표시할 뿐이고, **auto** active 행에 대해서는 ≥ 2 세션의 지지가 있고 그중 하나가 사람 신호(교정 또는 *remember*)나 결정적 관찰을 가질 때만 자동 적용된다 — 에이전트는 자기 턴 두 번으로 당신의 교정을 지울 수 없다. 제안을 거부하면 같은 주장이 30일 동안 억제된다; 제안은 30일 뒤 만료된다(`fix_scope`는 90일).
+제안 종류 여덟 가지: `supersede`, `stale`, `activate_policy`, `activate_global`, `fix_scope`(v0.5 마이그레이션에서), `fix_signature`, `revalidate`, `merge`. (kind, target, candidate)당 열린 제안은 하나이며, 같은 주장이 반복되면 `support_count` / `support_sessions`만 오른다. 추출기의 `propose_stale` / `propose_supersede`는 **human** 행에 대해서는 제안을 열고 행을 `contested`로 표시할 뿐이고, **auto** active 행에 대해서는 ≥ 2 세션의 지지가 있고 그중 하나가 사람 신호(교정 또는 *remember*)나 결정적 관찰을 가질 때만 자동 적용된다 — 에이전트는 자기 턴 두 번으로 당신의 교정을 지울 수 없다. 제안을 거부하면 같은 주장이 30일 동안 억제된다; 제안은 30일 뒤 만료된다(`fix_scope`는 90일). `full`에서 `activate_policy` / `activate_global` 제안을 거부한 후보는 자동 경로가 절대 활성화하지 않는다 — 강화에서도, `dream` 스윕에서도; 대신 45일 후보 만료를 맞는다.
 
 `autonomy_level: full`에서 리뷰는 선택이다: `activate_*` 제안은 열리지 않고, `supersede` / `revalidate`는 스스로 결정되며(2세션 규칙, 만료), 세션 시작의 일일 다이제스트도 표시되지 않는다 — 첫 dogfood에서 아무도 열지 않는 큐는 안전장치가 아니라 누수라는 것이 드러났다. `standard`에서 리뷰는 예외 처리이며 예산이 있다(활성 일당 ≤ 3건이 dogfood 게이트): `hm review`는 사람 메모리에 대한 제안 → `revalidate` → policy 후보 → 전역 후보 → `fix_scope` / `fix_signature` → `merge` → 미확인 import → 사람 후보 순으로 걷고, 키는 `a`ccept, `r`eject, `s`kip, `t`race, `p`romote다. `supersede`를 수락하면 대체 행이 `human`이 되고, `activate_*`를 수락하면 `hm memory:promote`처럼 행이 승격된다. `SessionStart` 훅은 하루 한 번 `systemMessage` 다이제스트 한 줄을 보여 준다(`harness-memory: N proposal(s) open, M expiring within 7 days — run hm review`). 리뷰 텍스트는 모델의 컨텍스트에 절대 들어가지 않는다.
 
 ### `autonomy_level`
 
-`full`(0.6.0-rc.2부터 기본) — 무개입: 스캐너와 신뢰도 기준을 넘는 것은 위의 상한 안에서 전부 `advise`로 활성화되고, `soft_deny`는 실수-정확한 조용한 쓰기에만 태어나며 실수-정확 시그니처만 올라간다; 어떤 제안도 당신을 기다리지 않는다. `standard` — 0.6.0-rc.1의 리뷰 게이트: policy, 저장소 전체 행, 정보성 타입이 `hm review`에서 기다린다. `shadow` — 결정을 `audit_log`(`auto_activation_shadow`)에만 기록하고 아무것도 활성화하지 않는다. `off` — `decideTier`가 아무것도 활성화하지 않는다. `.harness-memory/config.json`에서 설정하며 worker가 다음 실행부터 적용한다.
+`full`(0.6.0-rc.2부터 기본) — 무개입: 스캐너와 신뢰도 기준을 넘고, 닿을 수 있는 트리거(시그니처 또는 `relevant_tools`; 정보성 타입은 lifecycle 트리거)가 있으며, 규칙이면 증거 ≥ 1인 것은 위의 상한 안에서 전부 `advise`로 활성화되고(기본 `before_tool.auto_enforcement: advise` 기준), `soft_deny`는 실수-정확한 조용한 쓰기에만 태어나며 실수-정확 시그니처만 올라간다; 어떤 제안도 당신을 기다리지 않는다. 0.6.0-rc.1이 설치한 프로젝트의 `config.json`에는 `"autonomy_level": "standard"`가 적혀 있다(rc.1이 기본값을 파일에 썼다); install-manifest가 이전 설치를 rc.1로 기록하고 있으면 `hm install --host claude`가 그 값 하나를 `full`로 고쳐 쓰고 출력에 알린다. `standard` — 0.6.0-rc.1의 리뷰 게이트: policy, 저장소 전체 행, 정보성 타입이 `hm review`에서 기다린다. `shadow` — 결정을 `audit_log`(`auto_activation_shadow`)에만 기록하고 아무것도 활성화하지 않는다. `off` — `decideTier`가 아무것도 활성화하지 않는다. `.harness-memory/config.json`에서 설정하며 worker가 다음 실행부터 적용한다.
 
 ## 무엇이 언제 주입되는가
 
 | 트리거 | Claude Code 훅 | 무엇 | 예산 |
 |---|---|---|---|
-| `session_start` | `SessionStart` | 트리거에 `session_start`가 있고 타입이 baseline / `decision` / `architecture_constraint` / `workflow`인 active 행; 더해서 일일 다이제스트 `systemMessage` | 5개 / 3 KB |
+| `session_start` | `SessionStart` | 트리거에 `session_start`가 있고 타입이 baseline / `decision` / `architecture_constraint` / `workflow`인 active 행; 더해서 `autonomy_level`이 `full`이 아니면 일일 다이제스트 `systemMessage` | 5개 / 3 KB |
 | `before_model` | `UserPromptSubmit`(사용자 턴당 한 번) | baseline 행은 항상; 그 외 행은 scope가 프롬프트의 경로 토큰(또는 마지막으로 건드린 파일)과 교차하고 **그리고** summary / details / aliases에 대한 BM25 ≥ `before_model.min_score`일 때 — 또는 임베딩 helper가 있으면 코사인 ≥ 0.80; 그 다음 `recall.enabled`이면 다른 세션의 과거 에피소드 요약을 최대 `before_model.recall.max_items`개(`[harness-memory] RECALL <날짜>: …`, `snapshot/recall.v1.json`에 대한 BM25 ≥ `before_model.recall.min_score`, 맥락일 뿐 강제 아님) | 5개 / 3 KB(+ 회상 2개 / 1 KB) |
 | `before_tool` | `PreToolUse` | 위의 사다리 | 3개 / 2 KB |
 | `after_tool` | `PostToolUseFailure` | `failure_index[failure_class]` 힌트(예: 이 툴의 `enoent`에 관한 메모리)를 `additionalContext`로 | 2개 / 1 KB |
@@ -335,10 +335,10 @@ hm install --host claude --with-embeddings   # 패키지 루트에서 npm instal
 | `before_tool.auto_enforcement_silent_write` | `soft_deny` | 실수-정확하고 쓰기 쪽인 시그니처를 가진 auto pitfall / policy(교정·실패 유래, 증거 ≥ 2)가 태어나는 단계; `advise`면 규칙 끔 |
 | `extraction.max_auto_knowledge_activations_per_day` | 10 | `full`: 하루에 advise로 활성화되는 `decision` / `architecture_constraint` 행의 상한 |
 | `extraction.decision_only_per_day` | 5 | decision 표지만으로 적격인 에피소드(교정·실패·기억 없음)의 하루 추출 상한; 나머지는 `decision_cap`으로 건너뜀 |
-| `dream.full_sweep_per_run` | 50 | `full`: `dream` 실행마다 `decideTier`로 다시 평가하는 대기 후보 수(밀린 것 소진) |
+| `dream.full_sweep_per_run` | 50 | `full`: `dream` 실행마다 `decideTier`가 활성화하는 auto 후보 수(대기 후보를 오래된 순으로 이만큼 활성화될 때까지 다시 평가한다; 통과하지 못한 행은 예산을 쓰지 않는다) — 밀린 것 소진 |
 | `before_tool.max_items` / `max_bytes` | 3 / 2048 | `PreToolUse` 주입 예산 |
 | `before_tool.auto_enforcement` | `advise` | 시그니처가 있는 교정/실패 유래 auto 피트폴이 태어나는 수준(`advise` 또는 `soft_deny`) |
-| `before_tool.auto_escalation.enabled` / `sessions` | true / 2 | 자율성 사다리: auto `advise` 피트폴의 증거가 이만큼의 세션에 걸치면 `soft_deny`가 된다 |
+| `before_tool.auto_escalation.enabled` / `sessions` | true / 2 | 자율성 사다리: 실수-정확 시그니처를 가진 auto `advise` 피트폴의 증거가 이만큼의 세션에 걸치면 `soft_deny`가 된다(한 세션의 4시간 블록도 각각 센다) |
 | `before_tool.hard_policy` | `confirm` | 시그니처가 있는 hard human policy의 기본값(`confirm`, `advise`, `deny`) |
 | `before_model.max_items` / `max_bytes` | 5 / 3072 | `UserPromptSubmit` 주입 예산 |
 | `before_model.min_score` | 0.35 | non-baseline 행의 정규화 BM25 임계(`s / (s + 1)`) |
@@ -403,7 +403,7 @@ hm install --host claude --with-embeddings   # 패키지 루트에서 npm instal
 | **파이프라인** | |
 | `hm queue [list\|show <id>\|retry <id>\|drop <id>]` | 추출 큐(`queued`, `leased`, `failed`, `dead` 에피소드)를 조회하거나 편집한다. |
 | `hm extract [--now] [--provider <name>] [--dry-run]` | 추출 worker를 전경에서 실행한다; `--dry-run`은 provider를 호출하지 않고 프롬프트만 렌더한다. |
-| `hm dream` | consolidation을 지금 실행한다(TTL, 만료, override 강등, merge 제안, 임베딩 백필, GC). |
+| `hm dream` | consolidation을 지금 실행한다(`autonomy_level: full`의 `full` 스윕, TTL, 만료, override 강등, merge 제안, 임베딩 백필, GC). |
 | `hm trace <session_key>` | 세션의 ledger 타임라인: 프롬프트, 발화한 메모리, 툴 호출, 실패와 해결. |
 | `hm recall <query> [--limit <n>] [--since <iso>]` | 과거 에피소드를 요약으로 검색한다 — `recall.enabled`일 때 `before_model`이 회상하는 바로 그것: 날짜, 세션(`<host>-<key>`, 그대로 `hm trace`에 쓸 수 있음), 종류(`extracted` = 추출기의 요약, `derived` = worker의 결정론적 요약), 요약을 관련도 높은 최신순으로 출력한다. 스냅샷이 신선하면 `snapshot/recall.v1.json`을, 아니면 데이터베이스를 읽는다(어느 쪽인지 말해 준다). `--since`는 `closed_at` 기준; 점수 임계는 적용하지 않는다. recall이 꺼져 있으면 그렇다고 알리고 exit 0. |
 | **Import** | |
