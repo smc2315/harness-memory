@@ -48,9 +48,15 @@ repo-wide rows, informational types wait for review). `full`:
 | SessionStart digest (`N proposals open — run hm review`) | shown once a day | not shown; the remember notice stays |
 
 `decideTier` gets the level and the knowledge cap in its input and returns `reason: "type" | "scope"` only under
-`standard`. Order under `full`: replacement → scope valid → scanner → confidence → (informational: knowledge cap) →
-(pitfall/workflow: trigger reachable, evidence ≥ 1, activation caps) → active. `shadow` still reports what `full`
-would have done without applying it.
+`standard`. Order under `full`: replacement → scope valid → scanner → confidence → (informational: at least one
+lifecycle trigger, knowledge cap) → (pitfall/workflow/policy: trigger reachable, evidence ≥ 1, activation caps) →
+active. `shadow` keeps its rc.1 meaning — a dry run of `standard` logged to `audit_log` — and `off` activates
+nothing. The two daily counters are separate: knowledge activations never consume the rule caps, and the `dream`
+sweep's activations (transition reason `full_sweep`) consume neither, so a sweep of 50 does not starve the day's
+extractions.
+
+The silent-write rule (§3) and the neighbour rules (§4) are level-agnostic: a `standard` project also gets them,
+and `before_tool.auto_enforcement_silent_write: "advise"` is the switch back to rc.1 births.
 
 Backlog drain: the consolidator (`dream`) gains a `full` sweep — every auto `candidate` row is re-evaluated with
 `decideTier` under the running level and activated when it passes, up to `dream.full_sweep_per_run` (default 50) rows

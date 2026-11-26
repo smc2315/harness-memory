@@ -2,6 +2,25 @@
 
 All notable changes to `harness-memory`. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project uses [Semantic Versioning](https://semver.org/) (0.x: minor versions may break).
 
+## 0.6.0-rc.2 — unreleased
+
+Full autonomy after the first dogfood run (17 days, one work project): 153 proposals and 356 candidates waited for a review that never happened, 0 `ask` / `deny` decisions in 13,685 `PreToolUse` calls, one ladder escalation. The author's verdict — a tool that needs human intervention will not be used — becomes the default. Design and numbers: [docs/redesign/full-autonomy-0.6.0-rc.2.md](docs/redesign/full-autonomy-0.6.0-rc.2.md).
+
+### Changed
+
+- **`autonomy_level: full` is the new default.** `decideTier` activates at `advise` every row the mechanics can bound: `decision` / `architecture_constraint` with `confidence ≥ 0.7` (no episode evidence needed; `extraction.max_auto_knowledge_activations_per_day` = 10), repo-wide rows and policies (never `confirm` / `deny` automatically), `pitfall` / `workflow` at `evidence_score ≥ 1`. No `activate_policy` / `activate_global` proposal is opened and the daily `SessionStart` digest is not shown; `supersede` / `revalidate` keep resolving on their own. `standard` is the 0.6.0-rc.1 behaviour and stays selectable; `shadow` and `off` are unchanged.
+- **The ladder climbs only for mistake-exact signatures**, under `standard` and `full`, and `distinct_session_count` counts distinct `(session, 4-hour block)` pairs so a session resumed for days can reinforce a rule. Fire counts never promote a row: in the dogfood data the most-fired rules carried signatures naming the legitimate operation.
+- **`soft_deny` at birth for silent writes.** `enforcementDefault` gives `before_tool.auto_enforcement_silent_write` (default `soft_deny`) to an auto pitfall / policy whose signature is `mistake_exact`, whose matched call has `side_effect: write`, learned from a correction or a failure → resolution pair with evidence ≥ 2 and `horizon` not `task`. Everything else is born at `advise` as before. The dogfood set contained exactly two such rows.
+- **Extraction eligibility.** An `interrupted` episode with at most one event besides the prompt is `no_signal` whatever its flags; a correction cue counts 2 only when the episode corrects a previous turn that had tool calls (a bare cue counts 1); decision-marker-only episodes are extracted at most `extraction.decision_only_per_day` = 5 times a day (`decision_cap`).
+- **Extraction prompt (`EXTRACTOR_VERSION` 2026.11.v2).** The signature must be the token that was wrong, never the command, table, host or tool the fix also uses; MCP calls name the MCP tool, CLI wrappers in bash name the subcommand; `trigger_signature.side_effect` (`read` / `write`) and `horizon` (`durable` / `task`) are emitted; code-review findings are `architecture_constraint` / `decision`, not `pitfall`.
+- **Duplicates reinforce instead of multiplying.** A live row of the same type with an intersecting scope is the twin when the summaries overlap, the signature keys are equal or one contains the other (same tool), ≥ 2 aliases are shared, or an error-code token is shared; a signature-bearing fact is still never absorbed by a signature-less neighbour.
+
+### Added
+
+- Migration 023 (`user_version` 23): `memories.signature_precision` (`mistake_exact` / `noun`, computed once by the validator against the source episode's `tool_ok` lines), `side_effect`, `horizon`; NULL for existing rows (treated as `noun` / `read` / `durable`, so no pre-023 row reaches `soft_deny` through the new rule without a re-extraction). `hm memory:show` prints the three fields.
+- `dream` full sweep: under `full`, up to `dream.full_sweep_per_run` = 50 waiting auto candidates are re-evaluated per run; a row that activates closes its `activate_*` proposals (`expired`, note `full_autonomy`). The 0.6.0-rc.1 backlog drains without a command.
+- Config keys `before_tool.auto_enforcement_silent_write`, `extraction.max_auto_knowledge_activations_per_day`, `extraction.decision_only_per_day`, `dream.full_sweep_per_run`; `TierReason` `knowledge_cap`; skip reason `decision_cap`.
+
 ## 0.6.0-rc.1 — 2026-11-08
 
 Release candidate of the v0.6 redesign (branch `redesign/v0.6`). Design: [docs/redesign/spec-v0.6.md](docs/redesign/spec-v0.6.md); build plan: [docs/redesign/implementation-plan.md](docs/redesign/implementation-plan.md); upgrade notes: [docs/redesign/upgrade-from-0.5.md](docs/redesign/upgrade-from-0.5.md).

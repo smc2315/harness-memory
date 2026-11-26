@@ -275,16 +275,17 @@ Under `locks/db.lock` (held for seconds, never around the LLM call) the worker a
 |---|---|---|
 | hard `policy` with a signature; a **confirmed** import rule with `never` / `must not` / `always` / `do not` / `절대` / `반드시` / `항상` and a signature | human | `confirm` (`before_tool.hard_policy`) |
 | soft policy, policy without a signature, `hm import --yes` rows (`import_unconfirmed = 1`), other imports | human | `advise` |
-| auto `pitfall` with a specific signature and `knowledge_kind ∈ {correction, failure_resolution}` | auto | `advise` (`before_tool.auto_enforcement`); climbs to `soft_deny` when a second session reinforces it (`before_tool.auto_escalation`, default `{ enabled: true, sessions: 2 }`; `autonomy_level: shadow` never climbs; a row downgraded by overrides climbs again only after a new session reinforces it). Shown in `hm memory:history` as `active (enforcement) by auto_rule` |
+| auto `pitfall` or `policy` whose signature is **mistake-exact** (it matched no legitimate call in its source episode), whose matched call **writes** to a shared system, learned from a correction or a failure → resolution pair with evidence ≥ 2 (`horizon` not `task`) | auto | `soft_deny` (`before_tool.auto_enforcement_silent_write`; `advise` turns the rule off). The one case the dogfood data supported: a mistake that succeeds silently and that advise-with-the-result cannot prevent |
+| auto `pitfall` with a specific signature and `knowledge_kind ∈ {correction, failure_resolution}` | auto | `advise` (`before_tool.auto_enforcement`); climbs to `soft_deny` when a second session reinforces it **and** its signature is mistake-exact (`before_tool.auto_escalation`, default `{ enabled: true, sessions: 2 }`; a 4-hour block of a resumed session counts as a session; `autonomy_level: shadow` never climbs; a row downgraded by overrides climbs again only after a new session reinforces it). Shown in `hm memory:history` as `active (enforcement) by auto_rule` |
 | a rule from a turn with an explicit remember request (`remember this`, `기억해`, `from now on` + a rule) whose fact cites that prompt line | human (`status_reason remember`, active at once, at most 2 per turn) | policy with a signature → `confirm` (`before_tool.hard_policy`); pitfall with a signature → `soft_deny`; everything else → `advise`. Named at `SessionStart` for 24 h with its undo (`hm memory:demote <id>`); the automatic path never touches it afterwards |
 | every other auto row (`pitfall` without signature, `workflow`, `decision`, `architecture_constraint`) | auto | `advise` |
 
 ### Auto tier — when a memory activates on its own
 
-`decideTier` runs for every created or reinforced auto candidate, right after its counters are recomputed:
+`decideTier` runs for every created or reinforced auto candidate, right after its counters are recomputed. Under the default `autonomy_level: full` (0.6.0-rc.2) it activates at `advise` everything the mechanics can bound: `decision` and `architecture_constraint` rows with `confidence ≥ 0.7` (no episode evidence needed — the decision marker is the evidence; `extraction.max_auto_knowledge_activations_per_day` = 10), repo-wide rows and policies (at `advise`, never `confirm` / `deny`), and `pitfall` / `workflow` rows with `evidence_score ≥ 1`; nothing opens a proposal, and a `dream` run re-evaluates up to `dream.full_sweep_per_run` = 50 waiting candidates so the backlog drains by itself. Rows below the confidence bar stay candidates until reinforcement lifts them or `retention.candidate_days` expires them. Under `standard` (the 0.6.0-rc.1 behaviour) the rules are:
 
 - **active** when all hold: `type ∈ {pitfall, workflow}`, a valid repository-relative scope, a trigger signature or `relevant_tools`, a trigger a hook can reach, `confidence ≥ 0.7`, `evidence_score ≥ 2`, the scanner is clean, the row is not a replacement row of an open proposal, the caps are not hit (`extraction.max_auto_activations_per_episode` = 3, `max_auto_activations_per_day` = 10) and `autonomy_level = standard`. The row gets `ttl_expires_at = now + 30 d` for correction / failure-resolution knowledge (7 d for conventions), `revalidate_after` at half that, `validation_count = evidence_count − 1`.
-- **candidate** otherwise — with a reason (`evidence`, `cap`, `confidence`, `type`, `replacement`, `autonomy`, …) and, for `policy`, an `activate_policy` proposal; for a signature-less global row, an `activate_global` proposal. `decision` and `architecture_constraint` always wait for you.
+- **candidate** otherwise — with a reason (`evidence`, `cap`, `confidence`, `type`, `replacement`, `autonomy`, `knowledge_cap`, …) and, under `standard`, for `policy` an `activate_policy` proposal; for a signature-less global row an `activate_global` proposal; `decision` and `architecture_constraint` wait for you. Under `full` none of these three wait.
 
 "Enough evidence" is a **weight sum, not an episode count**: one correction (2) or one failure → resolution pair (2) activates immediately. The cost side is the TTL, the 0.65 trust multiplier at first activation, the 2-session rule for demotion, V10 specificity, the override downgrade and the daily cap. Reinforcement never shrinks a TTL (`ttl = max(existing, now + max(7·2^validations, base))`, capped at 90 d); a fired memory is extended by 14 d.
 
@@ -292,11 +293,11 @@ Under `locks/db.lock` (held for seconds, never around the LLM call) the worker a
 
 Eight proposal kinds: `supersede`, `stale`, `activate_policy`, `activate_global`, `fix_scope` (from the v0.5 migration), `fix_signature`, `revalidate`, `merge`. One open proposal per (kind, target, candidate); repeated claims only raise `support_count` / `support_sessions`. The extractor's `propose_stale` / `propose_supersede` against a **human** row only opens a proposal and marks the row `contested`; against an **auto** active row it is applied automatically only with support from ≥ 2 sessions, at least one of which carries a human signal (a correction or *remember*) or a deterministic observation — an agent cannot erase your correction in two of its own turns. Rejecting a proposal suppresses the same claim for 30 days; proposals expire after 30 days (`fix_scope`: 90).
 
-Review is exception handling, with a budget (≤ 3 items per active day is the dogfood gate): `hm review` walks proposals on human memories → `revalidate` → policy candidates → global candidates → `fix_scope` / `fix_signature` → `merge` → unconfirmed imports → human candidates, with keys `a`ccept, `r`eject, `s`kip, `t`race, `p`romote. Accepting a `supersede` makes the replacement row `human`; accepting `activate_*` promotes the row as `hm memory:promote` would. The `SessionStart` hook shows a one-line `systemMessage` digest once a day (`harness-memory: N proposal(s) open, M expiring within 7 days — run hm review`). No review text ever reaches the model's context.
+Under `autonomy_level: full` review is optional: no `activate_*` proposal is opened, `supersede` / `revalidate` resolve on their own (the two-session rule, expiry) and the daily `SessionStart` digest is not shown — the first dogfood run showed that a queue nobody opens is a leak, not a safety valve. Under `standard`, review is exception handling, with a budget (≤ 3 items per active day is the dogfood gate): `hm review` walks proposals on human memories → `revalidate` → policy candidates → global candidates → `fix_scope` / `fix_signature` → `merge` → unconfirmed imports → human candidates, with keys `a`ccept, `r`eject, `s`kip, `t`race, `p`romote. Accepting a `supersede` makes the replacement row `human`; accepting `activate_*` promotes the row as `hm memory:promote` would. The `SessionStart` hook shows a one-line `systemMessage` digest once a day (`harness-memory: N proposal(s) open, M expiring within 7 days — run hm review`). No review text ever reaches the model's context.
 
 ### `autonomy_level`
 
-`standard` (default) — the table above. `shadow` — decisions are only logged to `audit_log` (`auto_activation_shadow`); nothing activates. `off` — `decideTier` never activates anything.
+`full` (default since 0.6.0-rc.2) — zero-touch: everything that passes the scanner and the confidence bar activates at `advise` under the caps above; `soft_deny` is born only for mistake-exact silent writes and climbs only for mistake-exact signatures; no proposal waits for you. `standard` — the 0.6.0-rc.1 review gate: policies, repo-wide rows and informational types wait in `hm review`. `shadow` — decisions are only logged to `audit_log` (`auto_activation_shadow`); nothing activates. `off` — `decideTier` never activates anything. Set it in `.harness-memory/config.json`; the worker applies it on its next run.
 
 ## What gets injected, when
 
@@ -330,10 +331,11 @@ hm install --host claude --with-embeddings   # npm install @xenova/transformers 
 
 | key | default | meaning |
 |---|---|---|
-| `autonomy_level` | `standard` | `off` / `shadow` / `standard` (see above) |
+| `autonomy_level` | `full` | `off` / `shadow` / `standard` / `full` (see above) |
 | `before_tool.max_items` / `max_bytes` | 3 / 2048 | injection budget at `PreToolUse` |
 | `before_tool.auto_enforcement` | `advise` | where correction / failure-derived auto pitfalls with a signature are born (`advise` or `soft_deny`) |
-| `before_tool.auto_escalation.enabled` / `sessions` | true / 2 | the autonomy ladder: an auto `advise` pitfall becomes `soft_deny` once its evidence spans this many sessions |
+| `before_tool.auto_enforcement_silent_write` | `soft_deny` | where an auto pitfall / policy with a mistake-exact, write-side signature (correction or failure-derived, evidence ≥ 2) is born; `advise` turns the rule off |
+| `before_tool.auto_escalation.enabled` / `sessions` | true / 2 | the autonomy ladder: an auto `advise` pitfall with a mistake-exact signature becomes `soft_deny` once its evidence spans this many sessions (4-hour blocks of one session count) |
 | `before_tool.hard_policy` | `confirm` | default for hard human policies with a signature (`confirm`, `advise`, `deny`) |
 | `before_model.max_items` / `max_bytes` | 5 / 3072 | injection budget at `UserPromptSubmit` |
 | `before_model.min_score` | 0.35 | normalized BM25 threshold (`s / (s + 1)`) for non-baseline rows |
@@ -346,9 +348,12 @@ hm install --host claude --with-embeddings   # npm install @xenova/transformers 
 | `extraction.provider` | `auto` | `auto`, `claude`, `codex`, `replay` (`HARNESS_MEMORY_PROVIDER` overrides) |
 | `extraction.model` | `null` | `--model` for the headless CLI. `null` makes the claude provider pass the `sonnet` alias (your interactive default in `~/.claude/settings.json` may be a gateway id the headless first-party call cannot reach) and lets codex use its own default |
 | `extraction.max_runs_per_day` | 40 | LLM calls per day; correction episodes are exempt |
+| `extraction.max_auto_knowledge_activations_per_day` | 10 | `full`: daily cap on `decision` / `architecture_constraint` rows activated at advise |
+| `extraction.decision_only_per_day` | 5 | episodes eligible only through the decision marker (no correction, failure or remember) extracted per day; the rest skip with `decision_cap` |
 | `extraction.max_auto_activations_per_day` / `_per_episode` | 10 / 3 | auto activation caps |
 | `extraction.timeout_ms` / `probe_timeout_ms` / `lease_seconds` | 120000 / 20000 / 180 | provider wall clock, probe wall clock, episode lease |
 | `embeddings.enabled` / `model` / `idle_exit_minutes` / `cache_dir` | false / `Xenova/multilingual-e5-small` / 15 / `null` (= `~/.harness-memory/models`) | embedding helper |
+| `dream.full_sweep_per_run` | 50 | `full`: waiting auto candidates re-evaluated by `decideTier` per `dream` run (the backlog drain) |
 | `dream.interval_hours` | 6 | consolidation cadence (checked at `SessionEnd`) |
 | `retention.ledger_days` / `raw_hours` / `audit_days` / `candidate_days` / `proposal_days` | 14 / 24 / 30 / 45 / 30 | garbage collection and expiry |
 | `log.debug` / `max_bytes` / `rotations` | false / 5 MiB / 3 | hooks.log verbosity and rotation |

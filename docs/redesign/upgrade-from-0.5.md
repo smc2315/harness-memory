@@ -15,6 +15,12 @@ For anyone with an existing `.harness-memory/memory.sqlite` written by 0.3–0.5
 | Database | `user_version` 9–16 | `user_version` 23 (migrations 017–023), backups `memory.sqlite.bak-v<N>` |
 | Embeddings | installed by default | optional (`hm install --with-embeddings`), idle-exit helper |
 
+## Upgrading from 0.6.0-rc.1 to 0.6.0-rc.2
+
+- The default `autonomy_level` changes from `standard` to `full`: waiting candidates and `activate_*` proposals are activated at `advise` by the next `dream` runs (`dream.full_sweep_per_run` = 50 per run) and the daily review digest disappears. To keep the review gate, set `"autonomy_level": "standard"` in `.harness-memory/config.json` before upgrading the package.
+- Migration 023 adds `signature_precision`, `side_effect`, `horizon` to `memories` (backup `memory.sqlite.bak-v22`). Existing rows keep NULL, which the new `soft_deny` rule reads as "not mistake-exact": nothing you already have becomes blocking.
+- `EXTRACTOR_VERSION` is 2026.11.v2; episodes already extracted are not re-run.
+
 ## Before you upgrade
 
 1. **Back up** `.harness-memory/memory.sqlite` (the migrator also copies it to `memory.sqlite.bak-v<N>`, where `<N>` is the schema version it found — 9, 10 or 16 on real installs).

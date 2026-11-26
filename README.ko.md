@@ -275,16 +275,17 @@ evidence_weight = correction 2 + remember 3 + (실패마다 resolution 2 | 미�
 |---|---|---|
 | 시그니처가 있는 hard `policy`; `never` / `must not` / `always` / `do not` / `절대` / `반드시` / `항상`과 시그니처를 가진 **확인된** import 규칙 | human | `confirm`(`before_tool.hard_policy`) |
 | soft policy, 시그니처 없는 policy, `hm import --yes` 행(`import_unconfirmed = 1`), 그 외 import | human | `advise` |
+| 시그니처가 **실수-정확**(원천 에피소드에서 정당한 호출과는 한 번도 일치하지 않음)이고, 일치하는 호출이 공유 시스템에 **쓰기**이며, 교정 또는 실패 → 해결 쌍에서 증거 ≥ 2로 배운(`horizon`이 `task`가 아닌) auto `pitfall` / `policy` | auto | `soft_deny`(`before_tool.auto_enforcement_silent_write`; `advise`로 끄기). dogfood 데이터가 뒷받침한 유일한 경우: 조용히 성공하는 실수, 결과와 함께 오는 advise로는 막을 수 없는 것 |
 | 구체적 시그니처와 `knowledge_kind ∈ {correction, failure_resolution}`을 가진 auto `pitfall` | auto | `advise`(`before_tool.auto_enforcement`); 두 번째 세션이 다시 확인하면 `soft_deny`로 올라간다(`before_tool.auto_escalation`, 기본 `{ enabled: true, sessions: 2 }`; `autonomy_level: shadow`는 올라가지 않음; override로 내려간 행은 새 세션이 다시 확인해야 다시 올라감). `hm memory:history`에 `active (enforcement) by auto_rule`로 기록 |
 | 명시적 기억 요청(`remember this`, `기억해`, `앞으로` + 규칙)이 있는 턴에서 그 프롬프트 줄을 인용한 규칙 | human(`status_reason remember`, 즉시 active, 턴당 최대 2개) | 시그니처 있는 policy → `confirm`(`before_tool.hard_policy`); 시그니처 있는 pitfall → `soft_deny`; 그 외 → `advise`. `SessionStart`가 24시간 동안 되돌리기(`hm memory:demote <id>`)와 함께 알려 준다; 이후 자동 경로는 손대지 않는다 |
 | 그 외 모든 auto 행(시그니처 없는 `pitfall`, `workflow`, `decision`, `architecture_constraint`) | auto | `advise` |
 
 ### 자동 티어 — 메모리가 스스로 활성화되는 조건
 
-`decideTier`는 생성되거나 강화된 모든 auto 후보에 대해, 카운터가 재계산된 직후 실행된다:
+`decideTier`는 생성되거나 강화된 모든 auto 후보에 대해, 카운터가 재계산된 직후 실행된다. 기본값 `autonomy_level: full`(0.6.0-rc.2)에서는 기계적으로 묶을 수 있는 것은 전부 `advise`로 활성화한다: `confidence ≥ 0.7`인 `decision`·`architecture_constraint` 행(에피소드 증거 불필요 — decision 표지가 증거다; `extraction.max_auto_knowledge_activations_per_day` = 10), 저장소 전체 행과 policy(`advise`로만, `confirm` / `deny`로는 절대), `evidence_score ≥ 1`인 `pitfall` / `workflow` 행. 제안은 열리지 않고, `dream` 실행마다 대기 중인 후보를 `dream.full_sweep_per_run` = 50개까지 다시 평가해 밀린 것을 스스로 소진한다. 신뢰도 기준에 못 미치는 행은 강화로 올라오거나 `retention.candidate_days` 뒤 만료될 때까지 후보로 남는다. `standard`(0.6.0-rc.1 동작)의 규칙은:
 
 - 다음이 모두 성립하면 **active**: `type ∈ {pitfall, workflow}`, 유효한 저장소 상대 scope, 트리거 시그니처 또는 `relevant_tools`, 훅이 닿을 수 있는 트리거, `confidence ≥ 0.7`, `evidence_score ≥ 2`, 스캐너 통과, 열린 제안의 대체 행이 아님, 캡 미달(`extraction.max_auto_activations_per_episode` = 3, `max_auto_activations_per_day` = 10), `autonomy_level = standard`. 행은 교정/실패→해결 지식이면 `ttl_expires_at = now + 30 d`(관습은 7 d), `revalidate_after`는 그 절반, `validation_count = evidence_count − 1`을 받는다.
-- 그 외에는 **candidate** — 이유(`evidence`, `cap`, `confidence`, `type`, `replacement`, `autonomy`, …)와 함께; `policy`면 `activate_policy` 제안, 시그니처 없는 전역 행이면 `activate_global` 제안이 열린다. `decision`과 `architecture_constraint`는 항상 당신을 기다린다.
+- 그 외에는 **candidate** — 이유(`evidence`, `cap`, `confidence`, `type`, `replacement`, `autonomy`, `knowledge_cap`, …)와 함께; `standard`에서는 `policy`면 `activate_policy` 제안, 시그니처 없는 전역 행이면 `activate_global` 제안이 열리고 `decision`과 `architecture_constraint`는 당신을 기다린다. `full`에서는 이 셋 중 어느 것도 기다리지 않는다.
 
 "충분한 증거"는 **에피소드 수가 아니라 가중치 합**이다: 교정 하나(2) 또는 실패 → 해결 쌍 하나(2)면 즉시 활성화된다. 비용 쪽은 TTL, 첫 활성화의 신뢰 배수 0.65, 강등에만 적용되는 2-세션 규칙, V10 구체성, override 강등, 일일 캡이다. 강화는 TTL을 줄이지 않는다(`ttl = max(기존, now + max(7·2^validations, base))`, 최대 90 d); 발화한 메모리는 14 d 연장된다.
 
@@ -292,11 +293,11 @@ evidence_weight = correction 2 + remember 3 + (실패마다 resolution 2 | 미�
 
 제안 종류 여덟 가지: `supersede`, `stale`, `activate_policy`, `activate_global`, `fix_scope`(v0.5 마이그레이션에서), `fix_signature`, `revalidate`, `merge`. (kind, target, candidate)당 열린 제안은 하나이며, 같은 주장이 반복되면 `support_count` / `support_sessions`만 오른다. 추출기의 `propose_stale` / `propose_supersede`는 **human** 행에 대해서는 제안을 열고 행을 `contested`로 표시할 뿐이고, **auto** active 행에 대해서는 ≥ 2 세션의 지지가 있고 그중 하나가 사람 신호(교정 또는 *remember*)나 결정적 관찰을 가질 때만 자동 적용된다 — 에이전트는 자기 턴 두 번으로 당신의 교정을 지울 수 없다. 제안을 거부하면 같은 주장이 30일 동안 억제된다; 제안은 30일 뒤 만료된다(`fix_scope`는 90일).
 
-리뷰는 예외 처리이며 예산이 있다(활성 일당 ≤ 3건이 dogfood 게이트): `hm review`는 사람 메모리에 대한 제안 → `revalidate` → policy 후보 → 전역 후보 → `fix_scope` / `fix_signature` → `merge` → 미확인 import → 사람 후보 순으로 걷고, 키는 `a`ccept, `r`eject, `s`kip, `t`race, `p`romote다. `supersede`를 수락하면 대체 행이 `human`이 되고, `activate_*`를 수락하면 `hm memory:promote`처럼 행이 승격된다. `SessionStart` 훅은 하루 한 번 `systemMessage` 다이제스트 한 줄을 보여 준다(`harness-memory: N proposal(s) open, M expiring within 7 days — run hm review`). 리뷰 텍스트는 모델의 컨텍스트에 절대 들어가지 않는다.
+`autonomy_level: full`에서 리뷰는 선택이다: `activate_*` 제안은 열리지 않고, `supersede` / `revalidate`는 스스로 결정되며(2세션 규칙, 만료), 세션 시작의 일일 다이제스트도 표시되지 않는다 — 첫 dogfood에서 아무도 열지 않는 큐는 안전장치가 아니라 누수라는 것이 드러났다. `standard`에서 리뷰는 예외 처리이며 예산이 있다(활성 일당 ≤ 3건이 dogfood 게이트): `hm review`는 사람 메모리에 대한 제안 → `revalidate` → policy 후보 → 전역 후보 → `fix_scope` / `fix_signature` → `merge` → 미확인 import → 사람 후보 순으로 걷고, 키는 `a`ccept, `r`eject, `s`kip, `t`race, `p`romote다. `supersede`를 수락하면 대체 행이 `human`이 되고, `activate_*`를 수락하면 `hm memory:promote`처럼 행이 승격된다. `SessionStart` 훅은 하루 한 번 `systemMessage` 다이제스트 한 줄을 보여 준다(`harness-memory: N proposal(s) open, M expiring within 7 days — run hm review`). 리뷰 텍스트는 모델의 컨텍스트에 절대 들어가지 않는다.
 
 ### `autonomy_level`
 
-`standard`(기본) — 위의 표. `shadow` — 결정을 `audit_log`(`auto_activation_shadow`)에만 기록하고 아무것도 활성화하지 않는다. `off` — `decideTier`가 아무것도 활성화하지 않는다.
+`full`(0.6.0-rc.2부터 기본) — 무개입: 스캐너와 신뢰도 기준을 넘는 것은 위의 상한 안에서 전부 `advise`로 활성화되고, `soft_deny`는 실수-정확한 조용한 쓰기에만 태어나며 실수-정확 시그니처만 올라간다; 어떤 제안도 당신을 기다리지 않는다. `standard` — 0.6.0-rc.1의 리뷰 게이트: policy, 저장소 전체 행, 정보성 타입이 `hm review`에서 기다린다. `shadow` — 결정을 `audit_log`(`auto_activation_shadow`)에만 기록하고 아무것도 활성화하지 않는다. `off` — `decideTier`가 아무것도 활성화하지 않는다. `.harness-memory/config.json`에서 설정하며 worker가 다음 실행부터 적용한다.
 
 ## 무엇이 언제 주입되는가
 
@@ -330,7 +331,11 @@ hm install --host claude --with-embeddings   # 패키지 루트에서 npm instal
 
 | 키 | 기본값 | 의미 |
 |---|---|---|
-| `autonomy_level` | `standard` | `off` / `shadow` / `standard`(위 참고) |
+| `autonomy_level` | `full` | `off` / `shadow` / `standard` / `full`(위 참고) |
+| `before_tool.auto_enforcement_silent_write` | `soft_deny` | 실수-정확하고 쓰기 쪽인 시그니처를 가진 auto pitfall / policy(교정·실패 유래, 증거 ≥ 2)가 태어나는 단계; `advise`면 규칙 끔 |
+| `extraction.max_auto_knowledge_activations_per_day` | 10 | `full`: 하루에 advise로 활성화되는 `decision` / `architecture_constraint` 행의 상한 |
+| `extraction.decision_only_per_day` | 5 | decision 표지만으로 적격인 에피소드(교정·실패·기억 없음)의 하루 추출 상한; 나머지는 `decision_cap`으로 건너뜀 |
+| `dream.full_sweep_per_run` | 50 | `full`: `dream` 실행마다 `decideTier`로 다시 평가하는 대기 후보 수(밀린 것 소진) |
 | `before_tool.max_items` / `max_bytes` | 3 / 2048 | `PreToolUse` 주입 예산 |
 | `before_tool.auto_enforcement` | `advise` | 시그니처가 있는 교정/실패 유래 auto 피트폴이 태어나는 수준(`advise` 또는 `soft_deny`) |
 | `before_tool.auto_escalation.enabled` / `sessions` | true / 2 | 자율성 사다리: auto `advise` 피트폴의 증거가 이만큼의 세션에 걸치면 `soft_deny`가 된다 |

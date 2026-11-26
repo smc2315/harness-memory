@@ -246,6 +246,8 @@ ledger 라인(모두 `{ts, seq, turn_key, agent_id}` 포함, ≤ 32 KB, `appendF
 
 LLM 추출 자격: `evidence_weight ≥ 1` 또는 `last_assistant_message`의 결정 마커(`decided|we'll use|switch to|from now on|결정|이제부터|전환`); 읽기 전용 턴은 `skipped(no_signal)`. `extraction.maxRunsPerDay`(기본 40)는 교정 에피소드에는 적용하지 않는다; 그 외 게이트는 없다(R3). auto 활성화 캡: 에피소드당 3건, 하루 10건(`extraction.maxAutoActivationsPerDay`), 초과분은 `candidate(cap)`.
 
+**0.6.0-rc.2 보정** (`docs/redesign/full-autonomy-0.6.0-rc.2.md` §5, 첫 dogfood의 측정에서): `close_reason='interrupted'`이고 프롬프트 외 이벤트가 1개 이하인 에피소드는 플래그와 무관하게 `no_signal`(빈 중단 턴 41개가 fact 0건에 $2.3를 썼다); 교정 큐는 이전 턴에 툴 호출이 있는 교정(`correction_for` + 툴 라인)일 때만 가중치 2이고 맨 큐는 1(교정 감지기의 정밀도가 표본에서 18건 중 2건); 결정 마커만으로 적격인 에피소드(증거 0)는 하루 `extraction.decision_only_per_day`(기본 5)건까지만 추출하고 나머지는 `skipped(decision_cap)`. `full`에서는 그 지식이 활성화되므로 이 예산이 세션 시작 지식을 산다. 정보성 타입의 하루 활성화 캡은 별도(`extraction.max_auto_knowledge_activations_per_day`, 기본 10).
+
 ### 5.4 추출 worker
 
 `worker extract`는 §9.3의 두 짧은 lock 세션 사이에서 provider를 호출한다. 프롬프트(`extract/prompt.ts`): 에피소드 헤더(host, 플래그, 툴·파일 집합), `context_ref` 라인("이전 턴, 인용 불가"), 모든 라인을 `e<seq>`로 번호 매겨 렌더(실패·해결 라인 전문, 나머지 한 줄), 마지막 assistant 메시지, scope가 교차하는 기존 메모리 ≤ 40건(`[M:<id>] [type] [status/authority] scope sig summary`), 정규 툴 어휘, 타입 정의와 경계 규칙(§5.5), 표현 정규화 지시(명령형으로; 스캐너가 "from now on … always"를 주입으로 차단한다). 하드 캡 24,000자.
@@ -395,13 +397,15 @@ V1 스키마(소형 검증기); V2 `evidence_refs`가 이 에피소드의 `e<seq
 
 "충분한 증거"는 에피소드 수가 아니라 가중치 합이다: 교정 한 번 또는 실패→해결 쌍 하나면 즉시 활성화된다. 비용은 TTL, 신뢰 배수(§6.4, 첫 활성화 0.65), 강등에만 적용되는 2-support, V10, override 강등, 캡으로 묶인다. 교정 유래 행의 TTL이 7 d면 경고가 효과를 낸 경우에 강화 신호가 없어 잊히므로 30 d로 두고 발화로 연장하며(§5.8), 만료는 `revalidate` 제안을 거친다.
 
+**0.6.0-rc.2 `full` 모드** (`docs/redesign/full-autonomy-0.6.0-rc.2.md`): 위 표는 `autonomy_level = standard`의 규칙이다. 기본값이 된 `full`에서는 대체 행·scope 무효·스캔 실패·`confidence < 0.7`만 후보로 남기고, `decision`·`architecture_constraint`는 증거 없이(`max_auto_knowledge_activations_per_day` 상한), policy와 시그니처 없는 전역 행은 `advise`로, `pitfall`·`workflow`는 `evidenceScore ≥ 1`이면 활성화한다. 제안은 열지 않으며 `dream`이 실행마다 `full_sweep_per_run`개의 대기 후보를 다시 평가한다. §7.3의 자동 `soft_deny` 출생은 `signature_precision = mistake_exact ∧ side_effect = write ∧ knowledge_kind ∈ {correction, failure_resolution} ∧ evidenceScore ≥ 2 ∧ horizon ≠ task`일 때만이고(`before_tool.auto_enforcement_silent_write`), 사다리도 `mistake_exact`에만 적용된다. TTL: `horizon = task` 7 d, 정보성 타입 30 d, 그 외 `baseTtlDays`.
+
 ### 7.5 제안 큐
 
 종류 8개: `supersede`, `stale`, `activate_policy`, `activate_global`, `fix_scope`(마이그레이션), `fix_signature`(human 행의 잘못된 import 시그니처 수정), `revalidate`(TTL), `merge`(사람 전용). 열린 제안은 (kind, target, candidate)당 하나이며 같은 주장은 `support_count`/`support_sessions`만 올린다. **`contested` 표시 규칙**: DB·CLI·`status`·`systemMessage`에는 첫 제안부터 보이지만, 모델 주입 텍스트에 `(contested, see hm review)`가 붙는 것은 `support_sessions ≥ 2`이고 `enforcement='advise'`인 human 행뿐이다; 그 외 human 행의 주입 텍스트는 제안과 무관하게 바이트 동일하다. `proposals:accept`는 lock 안에서 `transitionMemory(actor='human', proposalId)`를 수행하고 대체 행은 `authority='human'`을 상속하며, `activate_policy`·`activate_global` 수락은 그 행을 `memory:promote`처럼 `authority='human'`으로 바꾼다. `reject`는 같은 `semantic_key`의 재제안을 30일 건너뛴다.
 
-### 7.6 `autonomy_level` (`config.json`, 기본 `standard`)
+### 7.6 `autonomy_level` (`config.json`, 기본 `full` — 0.6.0-rc.2; rc.1은 `standard`)
 
-`off`: `decideTier`가 아무것도 올리지 않음. `shadow`: 결정을 `audit_log(auto_activation_shadow)`에만. `standard`: §7.4. shadow를 기본으로 출하하면 "교정 → 다음 턴 발화" 순간이 존재하지 않는다.
+`off`: `decideTier`가 아무것도 올리지 않음. `shadow`: 결정을 `audit_log(auto_activation_shadow)`에만. `standard`: §7.4의 표(리뷰 게이트). `full`: §7.4의 rc.2 문단(무개입; 리뷰 선택). shadow를 기본으로 출하하면 "교정 → 다음 턴 발화" 순간이 존재하지 않고, standard를 기본으로 두면 첫 dogfood처럼 아무도 열지 않는 큐에 지식이 쌓인다.
 
 ---
 

@@ -54,6 +54,7 @@ hm status
 - 설치 출력이 제안하면 `hm import --from CLAUDE.md`, `hm import --from auto-memory`(Claude Code의 자동 메모리 노트를 사람 규칙으로). 확인 표에서 골라 승인한다.
 - 옛 기계에서 가져올 것은 없다. 메모리를 옮기려면 Claude Code를 닫은 상태에서 그 프로젝트의 `memory.sqlite`(와 `config.json`)만 복사해 여기서 `hm install --host claude`를 실행한다. `.claude/settings.local.json`과 `install-manifest.json`은 옛 기계의 node·hook 경로를 담고 있으니 복사하지 않는다.
 - 같은 프로젝트에 `hm install`을 다시 실행해도 된다(멱등; `.claude/settings.local.json`에서는 harness-memory 훅 항목만 교체하고 다른 훅은 그대로 둔다. DB 마이그레이션·재probe·self-test는 다시 돈다).
+- 0.6.0-rc.2부터 기본 `autonomy_level`은 `full`이다: 리뷰 없이 돌아가고 `hm review`는 보고 싶을 때만 여는 로그다. 리뷰 게이트를 원하면 `.harness-memory/config.json`에 `"autonomy_level": "standard"`.
 
 ## 5. 로그인 (학습 켜기)
 
