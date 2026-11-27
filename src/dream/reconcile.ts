@@ -1415,13 +1415,17 @@ function resolveContests(state: RunState, filter: { candidateId: string } | { ta
 }
 
 /**
- * The report side of one candidate's resolutions: every superseded target listed; each activated replacement charged
- * once and, when it is a row of this run, its outcome annotated (`tier=active; full_supersede=<targets>`) — whether its
- * own step resolved the contest or the step of a row further down the chain reached it through rule 4b.
+ * The report side of one candidate's resolutions, written here and nowhere else so that every row a resolution touched
+ * is annotated exactly once, whichever step-7 entry resolved it (the target's, the replacement's, or a lower row's
+ * through rule 4b): every superseded target is listed and, when it is a row of this run, its outcome says
+ * `tier=candidate:superseded(<replacement>)`; each activated replacement is charged once and, when it is a row of this
+ * run, its outcome says `tier=active; full_supersede=<targets>`. A row settled here is no longer `candidate`, so its
+ * own entry returns at once and never annotates it a second time.
  */
 function recordResolutions(state: RunState, resolutions: readonly ContestResolution[]): void {
   for (const { proposalId, replacement, result } of resolutions) {
     state.superseded.push(...result.superseded);
+    for (const targetId of result.superseded) appendDetail(tierOutcomeFor(state, targetId), `tier=candidate:superseded(${result.replacementId})`);
     if (!result.replacementActivated) continue;
     chargeActivation(state, replacement);
     const outcome = tierOutcomeFor(state, replacement.id);
@@ -1441,8 +1445,10 @@ function recordResolutions(state: RunState, resolutions: readonly ContestResolut
  * (`tier=candidate:superseded(<replacement>)`), so a contradicted row never activates on its own or through its own
  * contest; a contested row whose chain did not resolve here is left to the sweep (`tier=candidate:contested`);
  * otherwise a replacement row resolves the contests it is the replacement of and is activated by that resolution
- * (`tier=active; full_supersede=<targets>`, written by recordResolutions on the replacement's outcome). What no
- * resolution settles follows the rc.2 path: decideTier, the human-rejected guard, the activation or the review proposal.
+ * (`tier=active; full_supersede=<targets>`). Both annotations are recordResolutions', written for every row of this run
+ * a resolution touched when it is applied — a target decided after the entry that superseded it is already settled and
+ * returns at the status check above. What no resolution settles follows the rc.2 path: decideTier, the human-rejected
+ * guard, the activation or the review proposal.
  */
 function decideTierOf(state: RunState, memoryId: string): void {
   const { config } = state.ctx;
@@ -1459,12 +1465,9 @@ function decideTierOf(state: RunState, memoryId: string): void {
     const asReplacement = onRow.resolved.length === 0 && !onRow.held && isReplacementRow ? resolveContests(state, { candidateId: memory.id }) : null;
     const resolutions = asReplacement === null ? onRow.resolved : asReplacement.resolved;
     if (resolutions.length > 0) {
+      // The row is one of the rows these resolutions touched (superseded by the chain, or the replacement they
+      // activated): recordResolutions annotates it with the others, so nothing is appended here.
       recordResolutions(state, resolutions);
-      // Superseded by the chain, through a contest on the row or on a row above it: the row's own annotation. Otherwise
-      // the row is the replacement recordResolutions just annotated as active.
-      if (state.repository.getById(memory.id)?.status === "superseded") {
-        appendDetail(outcome, `tier=candidate:superseded(${resolutions.map((entry) => entry.result.replacementId).join(",")})`);
-      }
       return;
     }
     if (onRow.held || asReplacement?.held === true) {

@@ -5,6 +5,7 @@ import { TARGET_USER_VERSION } from "../src/core/paths";
 import { getCurrentVersion, getMigrationFiles, latestMigrationVersion, runMigrationsOnDb } from "../src/db/migrator";
 import { ProvenanceRepository } from "../src/db/repositories/provenance";
 import { MemoryRepository } from "../src/memory/repository";
+import { transitionMemory } from "../src/promotion/transitions";
 import { createTestDbAtVersion } from "./helpers/create-test-db";
 import { T0, autoMemory, humanMemory, insertEpisode, isoPlus } from "./helpers/memory-fixtures";
 
@@ -639,6 +640,30 @@ describe("migrator safety harness", () => {
     const reinforcedBySignal = memories.create(autoMemory({ knowledgeKind: "correction" }));
     cite(reinforcedBySignal.id, decided.id);
     cite(reinforcedBySignal.id, correcting.id, "reinforce");
+    // (f) reinforce-only evidence (no origin row) from a decision-only episode: evidence provenance all the same, relabelled.
+    const reinforceOnly = memories.create(autoMemory({ knowledgeKind: "failure_resolution" }));
+    cite(reinforceOnly.id, decided.id, "reinforce");
+    // (g) terminal rows: the statement reads provenance and signals, not status, so a superseded and a rejected row with a
+    // decision-only origin are relabelled like (a) — their status and superseded_by stay as they are.
+    const replacement = memories.create(autoMemory({ status: "active", knowledgeKind: "convention" }));
+    const supersededRow = memories.create(autoMemory({ knowledgeKind: "correction" }));
+    cite(supersededRow.id, decided.id);
+    transitionMemory(db, {
+      memoryId: supersededRow.id,
+      to: "superseded",
+      actor: "auto_rule",
+      reason: "proposal:supersede",
+      now: T0,
+      replacementId: replacement.id,
+    });
+    const rejectedRow = memories.create(autoMemory({ knowledgeKind: "failure_resolution" }));
+    cite(rejectedRow.id, decided.id);
+    transitionMemory(db, { memoryId: rejectedRow.id, to: "rejected", actor: "expiry", reason: "candidate_expired", now: T0 });
+    // (h) the only signal sits on a reinforce episode, as a failure flag this time (not correction_for): any signal episode keeps the label.
+    const failed = insertEpisode(db, { flags: { failure: 1 } });
+    const signalOnReinforce = memories.create(autoMemory({ knowledgeKind: "failure_resolution" }));
+    cite(signalOnReinforce.id, decided.id);
+    cite(signalOnReinforce.id, failed.id, "reinforce");
 
     const report = runMigrationsOnDb(db);
     expect(report).toEqual({ from: 23, to: 24, applied: ["024_knowledge_kind_signal.sql"] });
@@ -649,6 +674,13 @@ describe("migrator safety harness", () => {
     expect(kindOf(human.id)).toBe("correction");
     expect(kindOf(unsourced.id)).toBe("failure_resolution");
     expect(kindOf(reinforcedBySignal.id)).toBe("correction");
+    expect(kindOf(reinforceOnly.id)).toBe("convention");
+    expect(kindOf(supersededRow.id)).toBe("convention");
+    expect(kindOf(rejectedRow.id)).toBe("convention");
+    expect(kindOf(signalOnReinforce.id)).toBe("failure_resolution");
+    const statusOf = (id: string) => readFirstValue(db, `SELECT status || ':' || COALESCE(superseded_by_memory_id, '-') FROM memories WHERE id = '${id}';`);
+    expect(statusOf(supersededRow.id)).toBe(`superseded:${replacement.id}`);
+    expect(statusOf(rejectedRow.id)).toBe("rejected:-");
     // The relabel changes what happens at expiry, not when: a TTL already set is not shortened.
     expect(readFirstValue(db, `SELECT ttl_expires_at FROM memories WHERE id = '${mislabelled.id}';`)).toBe(ttl);
     expect(readFirstValue(db, "PRAGMA integrity_check;")).toBe("ok");
