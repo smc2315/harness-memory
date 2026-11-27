@@ -43,6 +43,7 @@ import type { WriteOp } from "../db/store";
 import { MemoryRepository, type MemoryRecord } from "../memory/repository";
 import { decideTier, type DecideTierInput } from "../promotion/authority";
 import { expireProposals, humanRejectedActivation, openOrSupportProposal } from "../promotion/proposals";
+import { FULL_AUTONOMY_DECISION_NOTE, FULL_SWEEP_TRANSITION_REASON } from "../promotion/replacement";
 import { extendTtlOnFire } from "../promotion/revalidate";
 import { transitionMemory } from "../promotion/transitions";
 import { scanMemoryContent } from "../security/scanner";
@@ -55,10 +56,8 @@ export const MERGE_COSINE = 0.92;
 export const OVERRIDE_DOWNGRADE_COUNT = 3;
 export const OVERRIDE_DOWNGRADE_MAX_EVIDENCE = 3;
 export const IDLE_TURN_MS = 60 * 60 * 1000;
-/** `proposals.decision_note` of an activate_* proposal the full sweep closed because its target activated on its own. */
-export const FULL_AUTONOMY_DECISION_NOTE = "full_autonomy";
-/** `memory_transitions.reason` of a candidate the full sweep activated. */
-export const FULL_SWEEP_TRANSITION_REASON = "full_sweep";
+// The sweep's decision note and transition reason are shared with the replacement resolution (0.6.0-rc.3 §2.2, §2.5).
+export { FULL_AUTONOMY_DECISION_NOTE, FULL_SWEEP_TRANSITION_REASON } from "../promotion/replacement";
 const EMBED_BATCH = 32;
 
 export type EmbedFn = (texts: string[]) => Promise<Float32Array[]>;
