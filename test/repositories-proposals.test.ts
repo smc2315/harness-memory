@@ -4,7 +4,7 @@ import type { Database as SqlJsDatabase } from "sql.js";
 import { ProposalAlreadyOpenError, ProposalRepository } from "../src/db/repositories";
 import { MemoryRepository } from "../src/memory";
 import { createTestDb } from "./helpers/create-test-db";
-import { T0, autoMemory, humanMemory, isoPlus } from "./helpers/memory-fixtures";
+import { T0, autoMemory, humanMemory, insertEpisode, isoPlus } from "./helpers/memory-fixtures";
 
 describe("ProposalRepository", () => {
   let db: SqlJsDatabase;
@@ -63,6 +63,53 @@ describe("ProposalRepository", () => {
     const refreshed = proposals.getById(created.id);
     expect(refreshed?.supportCount).toBe(3);
     expect(refreshed?.supportSessions).toBe(2);
+  });
+
+  test("recomputeDerived counts support_sessions by (session_id, 4-hour block of the episode's started_at) (0.6.0-rc.3 §2.3)", () => {
+    const supersede = proposals.create({
+      kind: "supersede",
+      targetMemoryId: targetId,
+      candidateMemoryId: candidateId,
+      rationale: "r",
+      confidence: 0.8,
+      createdBy: "extractor",
+      now: T0,
+    });
+    // T0 sits on a block boundary (unix(T0) is a multiple of 4 h): +1 h shares its block, +5 h falls in the next one.
+    const first = insertEpisode(db, { session_id: "s-long", started_at: T0 });
+    const fiveHoursLater = insertEpisode(db, { session_id: "s-long", started_at: isoPlus(T0, { hours: 5 }) });
+    proposals.addSupport(supersede.id, { episodeId: first.id, sessionId: "s-long", confidence: 0.7, createdAt: T0 });
+    proposals.addSupport(supersede.id, { episodeId: fiveHoursLater.id, sessionId: "s-long", confidence: 0.7, createdAt: isoPlus(T0, { hours: 5 }) });
+    // The same resumed session five hours later is a second session: the two-session rule becomes reachable.
+    expect(proposals.recomputeDerived(supersede.id)).toEqual({ supportCount: 2, supportSessions: 2 });
+    expect(proposals.getById(supersede.id)).toMatchObject({ supportCount: 2, supportSessions: 2 });
+
+    // One hour apart in the same session is still one session.
+    const stale = proposals.create({ kind: "stale", targetMemoryId: targetId, rationale: "s", confidence: 0.7, createdBy: "extractor", now: T0 });
+    const oneHourLater = insertEpisode(db, { session_id: "s-long", started_at: isoPlus(T0, { hours: 1 }) });
+    proposals.addSupport(stale.id, { episodeId: first.id, sessionId: "s-long", confidence: 0.7, createdAt: T0 });
+    proposals.addSupport(stale.id, { episodeId: oneHourLater.id, sessionId: "s-long", confidence: 0.7, createdAt: isoPlus(T0, { hours: 1 }) });
+    expect(proposals.recomputeDerived(stale.id)).toEqual({ supportCount: 2, supportSessions: 1 });
+
+    // Another session in the very same block is another session.
+    const otherSession = insertEpisode(db, { session_id: "s-other", started_at: isoPlus(T0, { minutes: 30 }) });
+    proposals.addSupport(stale.id, { episodeId: otherSession.id, sessionId: "s-other", confidence: 0.7, createdAt: isoPlus(T0, { minutes: 30 }) });
+    expect(proposals.recomputeDerived(stale.id)).toEqual({ supportCount: 3, supportSessions: 2 });
+
+    // A support whose episode row is unknown counts by its session_id: two such rows from one session are one session.
+    const revalidate = proposals.create({
+      kind: "revalidate",
+      targetMemoryId: targetId,
+      rationale: "ttl",
+      confidence: 0.5,
+      createdBy: "consolidator",
+      now: T0,
+    });
+    proposals.addSupport(revalidate.id, { episodeId: "ep-unknown-1", sessionId: "s-import", confidence: 0.5, createdAt: T0 });
+    proposals.addSupport(revalidate.id, { episodeId: "ep-unknown-2", sessionId: "s-import", confidence: 0.5, createdAt: T0 });
+    expect(proposals.recomputeDerived(revalidate.id)).toEqual({ supportCount: 2, supportSessions: 1 });
+    proposals.addSupport(revalidate.id, { episodeId: "ep-unknown-3", sessionId: "s-import-2", confidence: 0.5, createdAt: T0 });
+    expect(proposals.recomputeDerived(revalidate.id)).toEqual({ supportCount: 3, supportSessions: 2 });
   });
 
   test("candidate-bearing proposals are distinct per candidate", () => {

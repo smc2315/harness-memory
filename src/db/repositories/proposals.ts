@@ -34,6 +34,7 @@ import {
   requireEnum,
   selectAll,
   selectOne,
+  sessionBlockKeySql,
   type SqlParams,
   type SqlRow,
 } from "./common";
@@ -268,16 +269,23 @@ export class ProposalRepository {
     ).map(mapSupportRow);
   }
 
-  /** support_count = COUNT(*), support_sessions = COUNT(DISTINCT session_id); written back and returned. */
+  /**
+   * support_count = COUNT(*); support_sessions = COUNT(DISTINCT (session_id, 4-hour block of the episode's started_at))
+   * (0.6.0-rc.3 §2.3) — the key `distinct_session_count` counts, so a claim repeated in another block of one resumed
+   * session reaches the two-session rule of `evaluateAutoDemotion`. A support whose episode row is unknown counts by its
+   * own session_id. Written back and returned.
+   */
   recomputeDerived(proposalId: string): ProposalDerivedCounts {
     this.require(proposalId);
 
     const row = selectOne(
       this.db,
       `
-        SELECT COUNT(*) AS support_count, COUNT(DISTINCT session_id) AS support_sessions
-        FROM proposal_support
-        WHERE proposal_id = $proposalId
+        SELECT COUNT(*) AS support_count,
+               COUNT(DISTINCT ${sessionBlockKeySql("e", "ps.session_id")}) AS support_sessions
+        FROM proposal_support ps
+        LEFT JOIN episodes e ON e.id = ps.episode_id
+        WHERE ps.proposal_id = $proposalId
       `,
       { $proposalId: proposalId }
     );

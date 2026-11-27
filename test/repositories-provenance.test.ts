@@ -161,4 +161,43 @@ describe("ProvenanceRepository / recomputeDerived (R1)", () => {
     expect(recomputeDerived(db, bare.id).confidence).toBe(0.65);
     expect(() => recomputeDerived(db, "missing")).toThrow(MemoryNotFoundError);
   });
+
+  test("hasDecisionOrigin is true only for an origin provenance to a decision-flagged episode (0.6.0-rc.3 §1.1)", () => {
+    const decision = insertEpisode(db, { session_id: "s-decide", flags: { decision: 1 }, evidence_weight: 0 });
+    const born = memories.create(autoMemory({ summary: "Born from a decision" }));
+
+    // (d) No provenance at all.
+    expect(provenance.hasDecisionOrigin(born.id)).toBe(false);
+
+    // (b) The decision episode attached as reinforce or contradict does not count: origin only.
+    const reinforced = memories.create(autoMemory({ summary: "Reinforced by a decision" }));
+    provenance.insert({ memoryId: reinforced.id, episodeId: decision.id, eventSeq: 1, relation: "reinforce", confidence: 0.8, createdAt: T0 });
+    expect(provenance.hasDecisionOrigin(reinforced.id)).toBe(false);
+    const contradicted = memories.create(autoMemory({ summary: "Contradicted by a decision" }));
+    provenance.insert({ memoryId: contradicted.id, episodeId: decision.id, eventSeq: 1, relation: "contradict", confidence: 0.8, createdAt: T0 });
+    expect(provenance.hasDecisionOrigin(contradicted.id)).toBe(false);
+
+    // (a) An origin row pointing at the decision episode; the marker is found wherever it sits in flags_json.
+    provenance.insert({ memoryId: born.id, episodeId: decision.id, eventSeq: 2, relation: "origin", confidence: 0.8, createdAt: T0 });
+    expect(provenance.hasDecisionOrigin(born.id)).toBe(true);
+    const alsoRemembered = memories.create(autoMemory({ summary: "Remembered decision" }));
+    const remembered = insertEpisode(db, { session_id: "s-remember", flags: { remember: 1, decision: 1 }, evidence_weight: 3 });
+    provenance.insert({ memoryId: alsoRemembered.id, episodeId: remembered.id, eventSeq: 1, relation: "origin", confidence: 0.8, createdAt: T0 });
+    expect(provenance.hasDecisionOrigin(alsoRemembered.id)).toBe(true);
+
+    // (c) An origin episode without the marker: no flags, or the correction flag alone.
+    const plain = memories.create(autoMemory({ summary: "Plain origin" }));
+    const plainEpisode = insertEpisode(db, { session_id: "s-plain", flags: {} });
+    provenance.insert({ memoryId: plain.id, episodeId: plainEpisode.id, eventSeq: 1, relation: "origin", confidence: 0.8, createdAt: T0 });
+    expect(provenance.hasDecisionOrigin(plain.id)).toBe(false);
+    const corrected = memories.create(autoMemory({ summary: "Correction origin" }));
+    const correction = insertEpisode(db, { session_id: "s-correct", flags: { correction: 1 }, evidence_weight: 2 });
+    provenance.insert({ memoryId: corrected.id, episodeId: correction.id, eventSeq: 1, relation: "origin", confidence: 0.8, createdAt: T0 });
+    expect(provenance.hasDecisionOrigin(corrected.id)).toBe(false);
+
+    // (e) An origin row whose episode is unknown (import bullet): there is no flags_json to read the marker from.
+    const imported = memories.create(autoMemory({ summary: "Imported origin" }));
+    provenance.insert({ memoryId: imported.id, episodeId: "import:CLAUDE.md", eventSeq: 0, relation: "origin", confidence: 0.9, createdAt: T0 });
+    expect(provenance.hasDecisionOrigin(imported.id)).toBe(false);
+  });
 });
