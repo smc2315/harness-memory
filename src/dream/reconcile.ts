@@ -19,11 +19,16 @@
  *     reinforce leaves the three stored values alone
  *   5 reinforce → provenance(reinforce) + recomputeDerived + revalidateMemory (auto active/stale), stale(ttl_expired) → active
  *   6 propose_supersede / propose_stale → replacement candidate row, provenance(contradict), openOrSupportProposal,
- *     auto demotion rule (two sessions) — human rows are only flagged contested
- *   7 decideTier for every created / reinforced auto candidate (replacement rows are always candidate). Under
- *     `autonomy_level` full (design §1) nothing opens a proposal or writes the notify file; decision /
- *     architecture_constraint activations are counted against `extraction.max_auto_knowledge_activations_per_day`,
- *     separately from the pitfall / workflow / policy caps; a decision marker on the row's origin episode
+ *     auto demotion rule (two sessions — counted in 4-hour session blocks since 0.6.0-rc.3 §2.3, so a resumed
+ *     session's later claim is the second one) — human rows are only flagged contested
+ *   7 decideTier for every created / reinforced auto candidate, each in its own SAVEPOINT. A replacement row stays
+ *     candidate — except under `full`, where 0.6.0-rc.3 §2.4 resolves its open supersede contests against an auto
+ *     candidate / stale(ttl_expired) target on this one support (src/promotion/replacement.ts: decideProposal by
+ *     auto_rule supersedes the target and activates the replacement, counted against the day caps like any
+ *     activation), and a plain candidate that is the target of such a contest is superseded instead of activated.
+ *     Under `full` (design §1) nothing opens a proposal or writes the notify file; decision / architecture_constraint
+ *     activations are counted against `extraction.max_auto_knowledge_activations_per_day`, separately from the
+ *     pitfall / workflow / policy caps; a decision marker on the row's origin episode
  *     (ProvenanceRepository.hasDecisionOrigin, 0.6.0-rc.3 §1.1) counts toward the rule evidence bar
  *   8 extraction_runs.outcomes_json, episodes.status = extracted, session_summaries upsert; the WriteOp carries the run id
  *
@@ -64,16 +69,16 @@ import { normalizeRecallSummary } from "./recall-summary";
 import { createMemoryIdentityKey } from "../memory/utils";
 import {
   DuplicateMemoryContentError,
-  MemoryNotFoundError,
   MemoryRepository,
   type CreateMemoryInput,
   type DuplicateMatchKind,
   type MemoryRecord,
 } from "../memory/repository";
-import { decideTier, enforcementDefault } from "../promotion/authority";
+import { decideTier, enforcementDefault, type DecideTierInput } from "../promotion/authority";
 import { escalateOnReinforce } from "../promotion/escalation";
 import { ACTIVATION_PROPOSAL_KINDS, evaluateAutoDemotion, humanRejectedActivation, openOrSupportProposal } from "../promotion/proposals";
 import { citesRememberPrompt, REMEMBER_MAX_PER_EPISODE, REMEMBER_STATUS_REASON, rememberEnforcement, rememberTransitionReason } from "../promotion/remember";
+import { applySupersedeResolution, checkSupersedeResolution, type ApplySupersedeResult } from "../promotion/replacement";
 import { revalidateMemory } from "../promotion/revalidate";
 import { adoptActiveMemory, transitionMemory } from "../promotion/transitions";
 import { scanMemoryContent } from "../security/scanner";
@@ -152,6 +157,8 @@ export interface ReconcileReport {
   created: string[];
   reinforced: string[];
   activated: string[];
+  /** 0.6.0-rc.3 §2.4: targets superseded by the supersede resolutions of step 7 (chain hops included); empty outside `full`. */
+  superseded: string[];
   proposals: string[];
   /** A′ ladder: auto rows this run raised from advise to soft_deny (src/promotion/escalation.ts). */
   escalated: string[];
@@ -639,6 +646,7 @@ interface RunState {
   created: string[];
   reinforced: string[];
   activated: string[];
+  superseded: string[];
   proposalIds: string[];
   escalated: string[];
   remembered: string[];
@@ -1267,132 +1275,248 @@ function writeAudit(db: SqlJsDatabase, eventType: string, id: string, summary: s
   );
 }
 
-function decideTiers(state: RunState): void {
+/**
+ * The decideTier input reconcile builds from a stored row: the run's remaining caps, the row's origin marker and the
+ * stored text scanned again. `isReplacementRow` is the caller's: a row's own decision passes the §5.7 step 7 test, a
+ * replacement judged for a resolution passes `false` (0.6.0-rc.3 §2.1 rule 5: as if it were not a replacement).
+ */
+function tierInputFor(state: RunState, memory: MemoryRecord, isReplacementRow: boolean): DecideTierInput {
   const { config } = state.ctx;
-  for (const memoryId of state.tierCandidates) {
-    const memory = state.repository.getById(memoryId);
-    if (memory === null || memory.authority !== "auto" || memory.status !== "candidate") continue;
-    const supersedesLive = memory.supersedesMemoryId !== null && resolveTargetRow(state.repository, memory.supersedesMemoryId) !== null;
-    const isReplacementRow = supersedesLive || state.proposals.listOpen({ candidateId: memory.id }).length > 0;
-    const hasSignature = memory.triggerSignature !== null && memory.signatureKey.length > 0;
-    const decision = decideTier({
-      memory: {
-        type: memory.type,
-        scopeGlob: memory.scopeGlob,
-        hasSignature,
-        signatureTool: memory.triggerSignature?.tool ?? null,
-        relevantTools: memory.relevantTools,
-        lifecycleTriggers: memory.lifecycleTriggers,
-        confidence: memory.confidence,
-        authority: memory.authority,
-      },
-      evidenceScore: memory.evidenceScore,
-      // 0.6.0-rc.3 (`full`, design §1.1): a decision marker on the row's origin episode counts toward the evidence bar.
-      // The origin provenance of a row created in this run was inserted by step 4, so it is already visible here; a
-      // reinforced legacy row has no decision origin and keeps the rc.2 answer. Ignored by the `standard` chain.
-      originDecisionMarker: state.provenance.hasDecisionOrigin(memory.id),
-      capsRemaining: {
-        episode: config.extraction.max_auto_activations_per_episode - state.activatedThisRun,
-        day: config.extraction.max_auto_activations_per_day - state.activatedToday,
-      },
-      // 0.6.0-rc.2 (`full`): decision / architecture_constraint rows have their own daily budget (design §1) and the
-      // row's horizon sets the TTL (task → 7 days). Both are ignored by the `standard` / `shadow` / `off` chain.
-      knowledgeCapsRemaining: { day: config.extraction.max_auto_knowledge_activations_per_day - state.knowledgeActivatedToday },
-      horizon: memory.horizon,
-      autonomyLevel: config.autonomy_level,
-      knowledgeKind: memory.knowledgeKind,
-      isReplacementRow,
-      // The validator (V6) already rejected unsafe facts of this run; the stored text of a row that predates
-      // v0.6 (or was imported) is scanned here so a legacy candidate cannot auto-activate with unsafe text.
-      scanSafe: scanMemoryContent(memory.summary, memory.details).safe,
-      now: state.ctx.now,
-    });
+  return {
+    memory: {
+      type: memory.type,
+      scopeGlob: memory.scopeGlob,
+      hasSignature: memory.triggerSignature !== null && memory.signatureKey.length > 0,
+      signatureTool: memory.triggerSignature?.tool ?? null,
+      relevantTools: memory.relevantTools,
+      lifecycleTriggers: memory.lifecycleTriggers,
+      confidence: memory.confidence,
+      authority: memory.authority,
+    },
+    evidenceScore: memory.evidenceScore,
+    // 0.6.0-rc.3 (`full`, design §1.1): a decision marker on the row's origin episode counts toward the evidence bar.
+    // The origin provenance of a row created in this run was inserted by step 4, so it is already visible here; a
+    // reinforced legacy row has no decision origin and keeps the rc.2 answer. Ignored by the `standard` chain.
+    originDecisionMarker: state.provenance.hasDecisionOrigin(memory.id),
+    capsRemaining: {
+      episode: config.extraction.max_auto_activations_per_episode - state.activatedThisRun,
+      day: config.extraction.max_auto_activations_per_day - state.activatedToday,
+    },
+    // 0.6.0-rc.2 (`full`): decision / architecture_constraint rows have their own daily budget (design §1) and the
+    // row's horizon sets the TTL (task → 7 days). Both are ignored by the `standard` / `shadow` / `off` chain.
+    knowledgeCapsRemaining: { day: config.extraction.max_auto_knowledge_activations_per_day - state.knowledgeActivatedToday },
+    horizon: memory.horizon,
+    autonomyLevel: config.autonomy_level,
+    knowledgeKind: memory.knowledgeKind,
+    isReplacementRow,
+    // The validator (V6) already rejected unsafe facts of this run; the stored text of a row that predates
+    // v0.6 (or was imported) is scanned here so a legacy candidate cannot auto-activate with unsafe text.
+    scanSafe: scanMemoryContent(memory.summary, memory.details).safe,
+    now: state.ctx.now,
+  };
+}
 
-    const outcome =
-      state.outcomes.find((entry) => entry.memory_id === memory.id && (entry.outcome === "created" || entry.outcome === "reinforced")) ??
-      state.outcomes.find((entry) => entry.memory_id === memory.id && entry.outcome === "superseded_proposed");
+/** The outcome of this run that step 7 annotates for a row: its create / reinforce, else the superseded_proposed naming it as the replacement. */
+function tierOutcomeFor(state: RunState, memoryId: string): FactOutcome | undefined {
+  return (
+    state.outcomes.find((entry) => entry.memory_id === memoryId && (entry.outcome === "created" || entry.outcome === "reinforced")) ??
+    state.outcomes.find((entry) => entry.memory_id === memoryId && entry.outcome === "superseded_proposed")
+  );
+}
 
-    // 0.6.0-rc.2 (design §1): the automatic path never enacts a claim a human declined — a row whose activate_*
-    // proposal a human rejected stays a candidate under `full` (`standard` never returns `active` for such rows; its
-    // re-proposal path keeps the 30-day skip in openOrSupportProposal).
-    if (decision.status === "active" && humanRejectedActivation(state.proposals, memory.id)) {
-      if (outcome !== undefined) outcome.detail = outcome.detail === undefined ? "tier=candidate(human_rejected)" : `${outcome.detail}; tier=candidate(human_rejected)`;
-      continue;
-    }
+function appendDetail(outcome: FactOutcome | undefined, extra: string): void {
+  if (outcome === undefined) return;
+  outcome.detail = outcome.detail === undefined ? extra : `${outcome.detail}; ${extra}`;
+}
 
-    if (decision.status === "active") {
-      transitionMemory(state.db, { memoryId: memory.id, to: "active", actor: "auto_rule", reason: "decideTier", now: state.ctx.now, runId: state.runId });
-      state.repository.setTtl(memory.id, {
-        ttlExpiresAt: decision.ttlExpiresAt ?? null,
-        revalidateAfter: decision.revalidateAfter ?? null,
-        validationCount: Math.max(0, memory.evidenceCount - 1),
-        updatedAt: state.ctx.now,
-      });
-      state.activated.push(memory.id);
-      // Each type family draws on its own budget: a knowledge row (only ever active here under `full`) must not
-      // consume the pitfall / workflow / policy caps, nor the other way round.
-      if (isKnowledgeType(memory.type)) {
-        state.knowledgeActivatedToday += 1;
+/** An activation of this run — by decideTier or through a resolution (0.6.0-rc.3 §2.4) — charged to the budget of the row's type family. */
+function chargeActivation(state: RunState, memory: MemoryRecord): void {
+  state.activated.push(memory.id);
+  // Each type family draws on its own budget: a knowledge row (only ever active here under `full`) must not
+  // consume the pitfall / workflow / policy caps, nor the other way round.
+  if (isKnowledgeType(memory.type)) {
+    state.knowledgeActivatedToday += 1;
+  } else {
+    state.activatedThisRun += 1;
+    state.activatedToday += 1;
+  }
+}
+
+interface ContestResolution {
+  proposalId: string;
+  /** The replacement as the check read it, before its activation. */
+  replacement: MemoryRecord;
+  result: ApplySupersedeResult;
+}
+
+/**
+ * One `supersede` contest of step 7 (0.6.0-rc.3 §2.4, `full` only): §2.1 rules 1–4 through checkSupersedeResolution,
+ * rule 5 through decideTier on the replacement as if it were not one, with the run's own caps, then
+ * applySupersedeResolution (source `extraction`; the default transition reason, so unlike the sweep's this
+ * activation is counted against the day caps, §2.5). Null when the contest is left exactly as it is.
+ */
+function resolveContest(state: RunState, proposalId: string): ContestResolution | null {
+  const check = checkSupersedeResolution(state.db, proposalId);
+  if (!check.ok) return null;
+  if (check.needsTierDecision && decideTier(tierInputFor(state, check.candidate, false)).status !== "active") return null;
+  const result = applySupersedeResolution(state.db, {
+    proposalId,
+    now: state.ctx.now,
+    runId: state.runId,
+    source: "extraction",
+    sessionId: state.descriptor.session_id,
+  });
+  return { proposalId, replacement: check.candidate, result };
+}
+
+/**
+ * Every open `supersede` contest the filter selects, resolved in turn; one that an earlier resolution closed (a sibling
+ * on a dead target) or already activated (a replacement of two targets) is re-read by the check and settled without a
+ * second activation. The in-memory bookkeeping is the caller's, once the candidate's writes are all in.
+ */
+function resolveContests(state: RunState, filter: { candidateId: string } | { targetId: string }): ContestResolution[] {
+  const resolved: ContestResolution[] = [];
+  for (const proposal of state.proposals.listOpen({ kind: "supersede", ...filter })) {
+    const resolution = resolveContest(state, proposal.id);
+    if (resolution !== null) resolved.push(resolution);
+  }
+  return resolved;
+}
+
+/** The report side of one candidate's resolutions: the replacement's activation charged once, every superseded target listed. */
+function recordResolutions(state: RunState, resolutions: readonly ContestResolution[]): void {
+  for (const { replacement, result } of resolutions) {
+    if (result.replacementActivated) chargeActivation(state, replacement);
+    state.superseded.push(...result.superseded);
+  }
+}
+
+/**
+ * Step 7 for one candidate of this run. Under `full` (0.6.0-rc.3 §2.4) its open `supersede` contests come first: a
+ * replacement row resolves the contests it is the replacement of and is activated by that resolution
+ * (`tier=active; full_supersede=<targets>`); a plain row that is itself the target of a resolvable contest is
+ * superseded instead of activated (`tier=candidate:superseded(<replacement>)`). What no resolution settles follows
+ * the rc.2 path: decideTier, the human-rejected guard, the activation or the review proposal.
+ */
+function decideTierOf(state: RunState, memoryId: string): void {
+  const { config } = state.ctx;
+  const memory = state.repository.getById(memoryId);
+  if (memory === null || memory.authority !== "auto" || memory.status !== "candidate") return;
+  const supersedesLive = memory.supersedesMemoryId !== null && resolveTargetRow(state.repository, memory.supersedesMemoryId) !== null;
+  const isReplacementRow = supersedesLive || state.proposals.listOpen({ candidateId: memory.id }).length > 0;
+  const decision = decideTier(tierInputFor(state, memory, isReplacementRow));
+  const outcome = tierOutcomeFor(state, memory.id);
+
+  if (config.autonomy_level === "full") {
+    const resolutions = resolveContests(state, isReplacementRow ? { candidateId: memory.id } : { targetId: memory.id });
+    const first = resolutions[0];
+    if (first !== undefined) {
+      recordResolutions(state, resolutions);
+      if (isReplacementRow) {
+        if (outcome !== undefined) {
+          if (outcome.outcome === "created" || outcome.outcome === "reinforced") outcome.outcome = "activated";
+          outcome.proposal_id = first.proposalId;
+          appendDetail(outcome, `tier=active; full_supersede=${resolutions.flatMap((entry) => entry.result.superseded).join(",")}`);
+        }
       } else {
-        state.activatedThisRun += 1;
-        state.activatedToday += 1;
+        appendDetail(outcome, `tier=candidate:superseded(${resolutions.map((entry) => entry.result.replacementId).join(",")})`);
       }
-      if (outcome !== undefined) {
-        if (outcome.outcome === "created" || outcome.outcome === "reinforced") outcome.outcome = "activated";
-        outcome.detail = outcome.detail === undefined ? "tier=active" : `${outcome.detail}; tier=active`;
-      }
-      continue;
+      return;
     }
+  }
 
-    if (decision.shadow === "active") {
-      writeAudit(
-        state.db,
-        "auto_activation_shadow",
-        createDeterministicId(`audit:auto_activation_shadow:${state.runId}:${memory.id}`),
-        `shadow: ${memory.type} ${oneLine(memory.summary, 80)} would activate`,
-        { memoryId: memory.id, runId: state.runId, evidenceScore: memory.evidenceScore, confidence: memory.confidence },
-        state.ctx.now,
-        state.descriptor.session_id
-      );
+  // 0.6.0-rc.2 (design §1): the automatic path never enacts a claim a human declined — a row whose activate_*
+  // proposal a human rejected stays a candidate under `full` (`standard` never returns `active` for such rows; its
+  // re-proposal path keeps the 30-day skip in openOrSupportProposal).
+  if (decision.status === "active" && humanRejectedActivation(state.proposals, memory.id)) {
+    appendDetail(outcome, "tier=candidate(human_rejected)");
+    return;
+  }
+
+  if (decision.status === "active") {
+    transitionMemory(state.db, { memoryId: memory.id, to: "active", actor: "auto_rule", reason: "decideTier", now: state.ctx.now, runId: state.runId });
+    state.repository.setTtl(memory.id, {
+      ttlExpiresAt: decision.ttlExpiresAt ?? null,
+      revalidateAfter: decision.revalidateAfter ?? null,
+      validationCount: Math.max(0, memory.evidenceCount - 1),
+      updatedAt: state.ctx.now,
+    });
+    chargeActivation(state, memory);
+    if (outcome !== undefined) {
+      if (outcome.outcome === "created" || outcome.outcome === "reinforced") outcome.outcome = "activated";
+      appendDetail(outcome, "tier=active");
     }
+    return;
+  }
 
-    // `standard` (and its shadow dry run / off) only: decideTier never sets a proposal under `full`, so no activate_*
-    // proposal is opened and no notify file is written there (design §1).
-    if (decision.proposal !== undefined) {
-      const opened = openOrSupportProposal(state.db, {
-        kind: decision.proposal,
-        targetMemoryId: memory.id,
-        rationale: `${decision.proposal}: ${oneLine(memory.summary, 200)}`,
-        confidence: memory.confidence,
-        createdBy: "extractor",
-        now: state.ctx.now,
-        expiresInDays: config.retention.proposal_days,
-        support: supportFor(state, memory, memory.confidence),
-      });
-      if (opened.proposalId !== null) {
-        state.proposalIds.push(opened.proposalId);
-        if (outcome !== undefined) outcome.proposal_id = opened.proposalId;
-        if (decision.proposal === "activate_policy" && state.descriptor.flags.correction === 1 && state.ctx.paths !== undefined && state.ctx.paths !== null) {
-          try {
-            appendNotify(
-              state.ctx.paths,
-              state.descriptor.host,
-              state.descriptor.session_key,
-              `harness-memory: a policy learned from your correction awaits review (hm review): ${oneLine(memory.summary, 120)}`,
-              state.ctx.now
-            );
-          } catch (error) {
-            state.ctx.logger?.warn(`notify file not written: ${error instanceof Error ? error.message : String(error)}`);
-          }
+  if (decision.shadow === "active") {
+    writeAudit(
+      state.db,
+      "auto_activation_shadow",
+      createDeterministicId(`audit:auto_activation_shadow:${state.runId}:${memory.id}`),
+      `shadow: ${memory.type} ${oneLine(memory.summary, 80)} would activate`,
+      { memoryId: memory.id, runId: state.runId, evidenceScore: memory.evidenceScore, confidence: memory.confidence },
+      state.ctx.now,
+      state.descriptor.session_id
+    );
+  }
+
+  // `standard` (and its shadow dry run / off) only: decideTier never sets a proposal under `full`, so no activate_*
+  // proposal is opened and no notify file is written there (design §1).
+  if (decision.proposal !== undefined) {
+    const opened = openOrSupportProposal(state.db, {
+      kind: decision.proposal,
+      targetMemoryId: memory.id,
+      rationale: `${decision.proposal}: ${oneLine(memory.summary, 200)}`,
+      confidence: memory.confidence,
+      createdBy: "extractor",
+      now: state.ctx.now,
+      expiresInDays: config.retention.proposal_days,
+      support: supportFor(state, memory, memory.confidence),
+    });
+    if (opened.proposalId !== null) {
+      state.proposalIds.push(opened.proposalId);
+      if (outcome !== undefined) outcome.proposal_id = opened.proposalId;
+      if (decision.proposal === "activate_policy" && state.descriptor.flags.correction === 1 && state.ctx.paths !== undefined && state.ctx.paths !== null) {
+        try {
+          appendNotify(
+            state.ctx.paths,
+            state.descriptor.host,
+            state.descriptor.session_key,
+            `harness-memory: a policy learned from your correction awaits review (hm review): ${oneLine(memory.summary, 120)}`,
+            state.ctx.now
+          );
+        } catch (error) {
+          state.ctx.logger?.warn(`notify file not written: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
     }
-
-    if (outcome !== undefined) {
-      const reason = decision.reason ?? "candidate";
-      outcome.detail = outcome.detail === undefined ? `tier=candidate:${reason}` : `${outcome.detail}; tier=candidate:${reason}`;
-    }
   }
+
+  appendDetail(outcome, `tier=candidate:${decision.reason ?? "candidate"}`);
+}
+
+/**
+ * Step 7 over the run's candidates, each in its own SAVEPOINT (0.6.0-rc.3 §2.4): a throw — a resolution's or an
+ * activation's — rolls back that candidate's writes alone, is logged and reported as `tier=candidate(error: …)`, and
+ * the other candidates still decide. A candidate's report entries (caps, activated, superseded, outcome) are written
+ * only after its database writes succeeded, so a rolled-back candidate leaves no trace in the report either.
+ */
+function decideTiers(state: RunState): void {
+  [...state.tierCandidates].forEach((memoryId, index) => {
+    const savepoint = `sp_tier_${String(index)}`;
+    state.db.run(`SAVEPOINT ${savepoint}`);
+    try {
+      decideTierOf(state, memoryId);
+      state.db.run(`RELEASE ${savepoint}`);
+    } catch (error) {
+      state.db.run(`ROLLBACK TO ${savepoint}`);
+      state.db.run(`RELEASE ${savepoint}`);
+      const message = error instanceof Error ? error.message : String(error);
+      state.ctx.logger?.warn(`tier decision for ${memoryId} rolled back: ${message}`);
+      appendDetail(tierOutcomeFor(state, memoryId), `tier=candidate(error: ${oneLine(message, 200)})`);
+    }
+  });
 }
 
 /**
@@ -1408,7 +1532,20 @@ export function reconcileRun(db: SqlJsDatabase, input: ReconcileInput): Reconcil
   if (ctx.alreadyApplied(runId)) {
     const wrote = episode !== null && episode.status !== "extracted";
     if (wrote) episodes.markExtracted(descriptor.id, runId);
-    const report: ReconcileReport = { runId, status: "ok", outcomes: [], created: [], reinforced: [], activated: [], proposals: [], escalated: [], remembered: [], factsTotal: 0, factsAccepted: 0 };
+    const report: ReconcileReport = {
+      runId,
+      status: "ok",
+      outcomes: [],
+      created: [],
+      reinforced: [],
+      activated: [],
+      superseded: [],
+      proposals: [],
+      escalated: [],
+      remembered: [],
+      factsTotal: 0,
+      factsAccepted: 0,
+    };
     return { id: runId, kind: "extract", noop: true, wrote, report };
   }
 
@@ -1425,7 +1562,20 @@ export function reconcileRun(db: SqlJsDatabase, input: ReconcileInput): Reconcil
       outcomes: validated.outcomes,
       factsTotal: validated.outcomes.length,
     });
-    const report: ReconcileReport = { runId, status, outcomes: [...validated.outcomes], created: [], reinforced: [], activated: [], proposals: [], escalated: [], remembered: [], factsTotal: validated.outcomes.length, factsAccepted: 0 };
+    const report: ReconcileReport = {
+      runId,
+      status,
+      outcomes: [...validated.outcomes],
+      created: [],
+      reinforced: [],
+      activated: [],
+      superseded: [],
+      proposals: [],
+      escalated: [],
+      remembered: [],
+      factsTotal: validated.outcomes.length,
+      factsAccepted: 0,
+    };
     return { ...failure.op, report };
   }
 
@@ -1454,6 +1604,7 @@ export function reconcileRun(db: SqlJsDatabase, input: ReconcileInput): Reconcil
     created: [],
     reinforced: [],
     activated: [],
+    superseded: [],
     proposalIds: [],
     escalated: [],
     remembered: [],
@@ -1480,18 +1631,8 @@ export function reconcileRun(db: SqlJsDatabase, input: ReconcileInput): Reconcil
     }
   });
 
-  // Step 7 runs in its own savepoint per candidate decision.
-  db.run("SAVEPOINT sp_tiers");
-  try {
-    decideTiers(state);
-    db.run("RELEASE sp_tiers");
-  } catch (error) {
-    db.run("ROLLBACK TO sp_tiers");
-    db.run("RELEASE sp_tiers");
-    const message = error instanceof Error ? error.message : String(error);
-    if (error instanceof MemoryNotFoundError) ctx.logger?.warn(`tier decision skipped: ${message}`);
-    else ctx.logger?.error(`tier decisions rolled back: ${message}`);
-  }
+  // Step 7: every candidate decides in its own savepoint (decideTiers), as every fact did above.
+  decideTiers(state);
 
   state.outcomes.sort((a, b) => a.ordinal - b.ordinal);
   const factsTotal = validated.accepted.length + validated.outcomes.filter((entry) => entry.rejection !== "schema").length;
@@ -1544,6 +1685,7 @@ export function reconcileRun(db: SqlJsDatabase, input: ReconcileInput): Reconcil
     created: state.created,
     reinforced: [...new Set(state.reinforced)],
     activated: state.activated,
+    superseded: state.superseded,
     proposals: [...new Set(state.proposalIds)],
     escalated: [...new Set(state.escalated)],
     remembered: [...new Set(state.remembered)],
