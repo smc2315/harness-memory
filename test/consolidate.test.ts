@@ -15,6 +15,7 @@ import type { SessionState } from "../src/core/ledger-types";
 import { ledgerFile, resolvePaths, stateDirectories, stateFile, type HarnessPaths } from "../src/core/paths";
 import { META_KEYS, MetaRepository } from "../src/db/repositories/meta";
 import { ProposalRepository } from "../src/db/repositories/proposals";
+import { ProvenanceRepository } from "../src/db/repositories/provenance";
 import { TransitionRepository } from "../src/db/repositories/transitions";
 import { selectAll } from "../src/db/sql";
 import {
@@ -32,7 +33,7 @@ import { MemoryRepository, type CreateMemoryInput } from "../src/memory/reposito
 import { decideProposal, openOrSupportProposal } from "../src/promotion/proposals";
 import { createTestDb } from "./helpers/create-test-db";
 import { assistantLine, promptLine, toolFailLine } from "./helpers/ledger-fixture";
-import { T0, autoMemory, humanMemory, isoPlus } from "./helpers/memory-fixtures";
+import { T0, autoMemory, humanMemory, insertEpisode, isoPlus } from "./helpers/memory-fixtures";
 
 let db: SqlJsDatabase;
 let memories: MemoryRepository;
@@ -352,6 +353,44 @@ describe("full sweep (0.6.0-rc.2 §1 backlog drain)", () => {
     expect(result.report.sweptActivated).toEqual([decision.id, task.id]);
     expect(memories.getById(decision.id)).toMatchObject({ status: "active", authority: "auto", enforcement: "advise", ttlExpiresAt: isoPlus(now, { days: 30 }), validationCount: 0 });
     expect(memories.getById(task.id)).toMatchObject({ status: "active", enforcement: "advise", ttlExpiresAt: isoPlus(now, { days: 7 }), revalidateAfter: isoPlus(now, { days: 3, hours: 12 }) });
+  });
+
+  test("0.6.0-rc.3 §1.1: a decision-born rule row (evidence 0) activates on its origin marker; reinforce-only and legacy rows stay", async () => {
+    const now = isoPlus(T0, { days: 1 });
+    const provenance = new ProvenanceRepository(db);
+    const episode = insertEpisode(db, { session_id: "s-decide", flags: { decision: 1 }, evidence_weight: 0 }, T0);
+    // The dogfood shape: a convention pitfall with a reachable signature whose only episode "decided" something (weight 0).
+    const born = sweepCandidate({ knowledgeKind: "convention", createdAt: T0, updatedAt: T0 }, 0);
+    provenance.insert({ memoryId: born.id, episodeId: episode.id, eventSeq: 3, relation: "origin", confidence: 0.85, createdAt: T0 });
+    // The same episode attached as reinforce only (a legacy row a decision-only episode reinforced) does not count …
+    const reinforced = sweepCandidate({ createdAt: isoPlus(T0, { hours: 1 }), updatedAt: isoPlus(T0, { hours: 1 }) }, 0);
+    provenance.insert({ memoryId: reinforced.id, episodeId: episode.id, eventSeq: 3, relation: "reinforce", confidence: 0.85, createdAt: T0 });
+    // … and neither does a row without any evidence episode (a legacy or imported candidate).
+    const legacy = sweepCandidate({ createdAt: isoPlus(T0, { hours: 2 }), updatedAt: isoPlus(T0, { hours: 2 }) }, 0);
+    expect(memories.getById(born.id)).toMatchObject({ status: "candidate", evidenceScore: 0 });
+
+    const standard = await dream(now, { config: withBudget(50, "standard") });
+    expect(standard.report.sweptActivated).toEqual([]);
+    for (const row of [born, reinforced, legacy]) expect(memories.getById(row.id)?.status).toBe("candidate");
+
+    const result = await dream(now, { config: FULL });
+    expect(result.report.sweptActivated).toEqual([born.id]);
+    expect(result.report.errors).toEqual([]);
+    // evidence_score stays 0 (decideTier counts the marker, nothing writes it to the row); the TTL is the kind's (convention 7 d).
+    expect(memories.getById(born.id)).toMatchObject({
+      status: "active",
+      authority: "auto",
+      enforcement: "advise",
+      evidenceScore: 0,
+      validationCount: 0,
+      ttlExpiresAt: isoPlus(now, { days: 7 }),
+      revalidateAfter: isoPlus(now, { days: 3, hours: 12 }),
+    });
+    expect(new TransitionRepository(db).listForMemory(born.id)).toEqual([
+      expect.objectContaining({ fromStatus: "candidate", toStatus: "active", actor: "auto_rule", reason: FULL_SWEEP_TRANSITION_REASON }),
+    ]);
+    expect(selectAll(db, "SELECT event_type FROM audit_log WHERE event_type = 'full_sweep_activation'")).toHaveLength(1);
+    for (const row of [reinforced, legacy]) expect(memories.getById(row.id)).toMatchObject({ status: "candidate", authority: "auto" });
   });
 
   test("leaves replacement rows, human rows and candidates that fail decideTier alone; under standard, shadow and off the step does nothing", async () => {

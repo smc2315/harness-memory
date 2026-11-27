@@ -23,7 +23,8 @@
  *   7 decideTier for every created / reinforced auto candidate (replacement rows are always candidate). Under
  *     `autonomy_level` full (design §1) nothing opens a proposal or writes the notify file; decision /
  *     architecture_constraint activations are counted against `extraction.max_auto_knowledge_activations_per_day`,
- *     separately from the pitfall / workflow / policy caps
+ *     separately from the pitfall / workflow / policy caps; a decision marker on the row's origin episode
+ *     (ProvenanceRepository.hasDecisionOrigin, 0.6.0-rc.3 §1.1) counts toward the rule evidence bar
  *   8 extraction_runs.outcomes_json, episodes.status = extracted, session_summaries upsert; the WriteOp carries the run id
  *
  * Step 1 (write_ops idempotency) is answered through `ctx.alreadyApplied(runId)`; a re-applied run only marks
@@ -1269,6 +1270,10 @@ function decideTiers(state: RunState): void {
         authority: memory.authority,
       },
       evidenceScore: memory.evidenceScore,
+      // 0.6.0-rc.3 (`full`, design §1.1): a decision marker on the row's origin episode counts toward the evidence bar.
+      // The origin provenance of a row created in this run was inserted by step 4, so it is already visible here; a
+      // reinforced legacy row has no decision origin and keeps the rc.2 answer. Ignored by the `standard` chain.
+      originDecisionMarker: state.provenance.hasDecisionOrigin(memory.id),
       capsRemaining: {
         episode: config.extraction.max_auto_activations_per_episode - state.activatedThisRun,
         day: config.extraction.max_auto_activations_per_day - state.activatedToday,

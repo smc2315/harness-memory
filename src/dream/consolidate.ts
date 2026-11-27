@@ -37,6 +37,7 @@ import { LIVE_STATUSES } from "../core/vocabulary";
 import { cleanOrphanTmp } from "../db/db-file";
 import { META_KEYS, MetaRepository } from "../db/repositories/meta";
 import { ProposalRepository } from "../db/repositories/proposals";
+import { ProvenanceRepository } from "../db/repositories/provenance";
 import { selectAll } from "../db/sql";
 import type { WriteOp } from "../db/store";
 import { MemoryRepository, type MemoryRecord } from "../memory/repository";
@@ -170,7 +171,9 @@ function refreshOpenProposalFlag(repository: MemoryRepository, proposals: Propos
  * — no live `supersedes_memory_id` target and not the candidate of an open proposal, the same test as reconcile's
  * decideTiers, and whose activate_* proposal no human rejected (humanRejectedActivation: the automatic path never
  * enacts a claim a human declined) — are re-evaluated with decideTier under `full`, oldest first, and activated when
- * they pass, until the budget is spent. The sweep
+ * they pass, until the budget is spent. The decideTier input is built from the stored row plus, since 0.6.0-rc.3
+ * (design §1.1), `originDecisionMarker` from the row's origin provenance, so a rule row born from a decision-only
+ * episode (evidence_score 0) passes the evidence step; the row itself is not rewritten. The sweep
  * has its own budget, `dream.full_sweep_per_run` activations per run: `capsRemaining` and `knowledgeCapsRemaining`
  * are both the activations left here, never the extraction day caps, and a row that does not pass costs nothing,
  * so unpassable old rows cannot stall the drain. An activation transitions the row by `auto_rule` (reason
@@ -184,6 +187,7 @@ function fullSweep(db: SqlJsDatabase, repository: MemoryRepository, config: Harn
   let remaining = Math.max(0, Math.floor(config.dream.full_sweep_per_run));
   if (remaining === 0) return false;
   const proposals = new ProposalRepository(db);
+  const provenance = new ProvenanceRepository(db);
   const candidates = repository
     .list({ authority: "auto", status: "candidate" })
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
@@ -209,6 +213,8 @@ function fullSweep(db: SqlJsDatabase, repository: MemoryRepository, config: Harn
         authority: memory.authority,
       },
       evidenceScore: memory.evidenceScore,
+      // 0.6.0-rc.3 (design §1.1): the origin marker that lets a decision-born rule row (evidence_score 0) reach the bar.
+      originDecisionMarker: provenance.hasDecisionOrigin(memory.id),
       capsRemaining: { episode: remaining, day: remaining },
       knowledgeCapsRemaining: { day: remaining },
       autonomyLevel: "full",

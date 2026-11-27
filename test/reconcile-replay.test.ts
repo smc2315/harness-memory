@@ -1142,6 +1142,66 @@ describe("autonomy_level full (0.6.0-rc.2 §1): policies and informational rows 
     expect(new ProposalRepository(db).listOpen({ targetId: parked }).map((proposal) => proposal.kind)).toEqual(["activate_global"]);
   });
 
+  test("0.6.0-rc.3 §1.1: a decision-born rule row activates under full on its origin marker (evidence_score 0); standard: candidate:evidence", () => {
+    // The dogfood shape (design §Why, GAP A): a pitfall with a reachable bash signature whose only episode "decided"
+    // something — no failure, no correction, weight 0 — labelled convention, so nothing but the marker could lift it.
+    const rulePitfall = (pattern: string, summary: string) =>
+      factFixture({
+        summary,
+        details: "Recorded from the session's decision marker; the episode holds no failure and no correction.",
+        trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern },
+        confidence: 0.8,
+        knowledge_kind: "convention",
+        evidence_refs: ["e2"],
+        aliases: [],
+      });
+    const lines = decisionLines("p102", 10_200);
+    const descriptor = descriptorFromLines(lines, { sessionId: "session-dec-rule", turnKey: "p102" });
+    expect(descriptor.flags).toEqual({ decision: 1 });
+    expect(descriptor.evidence_weight).toBe(0);
+    const full = applyRun(db, {
+      descriptor,
+      lines,
+      output: outputFixture([rulePitfall("npm test", "Run the suite with pnpm test; npm test has no scripts in this workspace.")]),
+    });
+    const id = full.op.report.created[0]!;
+    expect(full.op.report.activated).toEqual([id]);
+    expect(full.op.report.proposals).toEqual([]);
+    expect(full.op.report.outcomes[0]).toMatchObject({ outcome: "activated", memory_id: id, detail: "tier=active" });
+    expect(new ProvenanceRepository(db).hasDecisionOrigin(id)).toBe(true);
+    // decideTier counted the marker; the row itself records evidence_score 0, validation_count 0 and the convention's 7-day TTL at advise.
+    const row = memories.getById(id)!;
+    expect(row).toMatchObject({
+      type: "pitfall",
+      status: "active",
+      authority: "auto",
+      enforcement: "advise",
+      knowledgeKind: "convention",
+      evidenceScore: 0,
+      evidenceCount: 1,
+      validationCount: 0,
+    });
+    expect(row.ttlExpiresAt).toBe(isoPlus(REPLAY_NOW, { days: 7 }));
+    expect(new TransitionRepository(db).listForMemory(id)).toEqual([
+      expect.objectContaining({ fromStatus: "candidate", toStatus: "active", actor: "auto_rule", reason: "decideTier" }),
+    ]);
+
+    const standardLines = decisionLines("p103", 10_300);
+    const standard = applyRun(db, {
+      descriptor: descriptorFromLines(standardLines, { sessionId: "session-dec-rule-std", turnKey: "p103" }),
+      lines: standardLines,
+      output: outputFixture([rulePitfall("npm run build", "Build with pnpm build; npm run build lacks the workspace flags.")]),
+      config: STANDARD,
+      now: isoPlus(REPLAY_NOW, { hours: 1 }),
+    });
+    const parked = standard.op.report.created[0]!;
+    expect(standard.op.report.activated).toEqual([]);
+    expect(standard.op.report.proposals).toEqual([]);
+    expect(standard.op.report.outcomes[0]).toMatchObject({ outcome: "created", memory_id: parked, detail: "tier=candidate:evidence" });
+    expect(memories.getById(parked)).toMatchObject({ status: "candidate", evidenceScore: 0 });
+    expect(new TransitionRepository(db).listForMemory(parked)).toEqual([]);
+  });
+
   test("the knowledge budget is its own counter: a decision activation neither consumes nor is consumed by the rule caps, and both counters survive across runs of the day", () => {
     const config = { ...DEFAULT_CONFIG, extraction: { ...DEFAULT_CONFIG.extraction, max_auto_activations_per_day: 1, max_auto_knowledge_activations_per_day: 1 } };
     const pitfall = (pattern: string, summary: string) =>
