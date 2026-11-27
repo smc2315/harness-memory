@@ -122,6 +122,28 @@ describe("acquireDirLock", () => {
     expect(readdirSync(lockDir)).toEqual([LOCK_OWNER_FILE]);
   });
 
+  test("a refused takeover names the contender that took over even when the wait is already spent", async () => {
+    // The loaded-suite shape of the test above: the first retry alone exceeds waitMs, so the busy error is thrown
+    // right after the refused takeover. It must still name the live holder, not the dead record the verdict read.
+    const dead: LockOwner = { pid: 987_654, hostname: hostname(), purpose: "crashed", started_at: T0, heartbeat_at: T0 };
+    const fast: LockOwner = { pid: 424_242, hostname: hostname(), purpose: "fast", started_at: isoPlus(1_000), heartbeat_at: isoPlus(1_000) };
+    writeOwner(lockDir, dead);
+    const isAlive = (pid: number): boolean => {
+      if (pid === dead.pid && readLockOwner(lockDir)?.purpose === dead.purpose) {
+        rmSync(lockDir, { recursive: true, force: true });
+        writeOwner(lockDir, fast);
+        return false;
+      }
+      return pid !== dead.pid;
+    };
+
+    const attempt = acquireDirLock(lockDir, { purpose: "slow", waitMs: 0, now: () => isoPlus(1_000), isAlive });
+    await expect(attempt).rejects.toBeInstanceOf(LockBusyError);
+    await expect(attempt).rejects.toMatchObject({ holder: { purpose: "fast" } });
+
+    expect(readLockOwner(lockDir)).toEqual(fast);
+    expect(readdirSync(lockDir)).toEqual([LOCK_OWNER_FILE]);
+  });
   test("a holder that refreshes its heartbeat right after the stale verdict keeps the lock", async () => {
     // e.g. a writer that was suspended for > staleMs and wakes up between our inspection and our removal
     const holder: LockOwner = { pid: 1, hostname: "other-host", purpose: "paused", started_at: T0, heartbeat_at: T0 };

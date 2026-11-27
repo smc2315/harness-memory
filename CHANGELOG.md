@@ -27,6 +27,7 @@ Full autonomy, second pass. The rc.2 `dream` sweep was run against the author's 
 
 - On the dogfood dump the rc.2 sweep activated the stale target of a one-session `supersede` and left the correction parked for its whole TTL; rc.3 supersedes the target and activates the correction (4 of the 7 open contests resolve, the other 3 wait for a second block, a human signal, or a replacement that clears the bar).
 - Rule rows extracted from decision-only episodes (14 on the dump, among them "do not run build-migration against prod") could never reach the `full` evidence bar; they now activate at `advise` with a 7-day TTL under their true label.
+- `acquireDirLock` names the lock's current holder when a stale takeover is refused because the record changed under it (a refreshed heartbeat, or a faster contender's takeover): the `LockBusyError` used to carry the dead record the stale verdict was based on, which made the takeover test in `test/db-locks.test.ts` depend on the first retry finishing within its 80 ms wait.
 
 ## 0.6.0-rc.2 — 2026-11-26
 
