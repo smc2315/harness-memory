@@ -513,6 +513,71 @@ describe("evaluateAutoDemotion", () => {
     openOrSupportProposal(db, { kind: "stale", targetMemoryId: policy.id, rationale: "r", confidence: 0.8, createdBy: "extractor", now: T0, support: support("ep-p2", "s2") });
     expect(evaluateAutoDemotion(db, { proposalId: p.proposalId!, now: T0 })).toMatchObject({ applied: false, reason: "policy" });
   });
+
+  /** A supersede T → R supported from two sessions, written straight to the repository (openOrSupportProposal's 30-day skip is not in the way). */
+  function twoSessionSupersede(targetId: string, candidateId: string, episodes: [string, string], now: string): string {
+    for (const [episodeId, sessionId] of [[episodes[0], `${episodes[0]}-session`], [episodes[1], `${episodes[1]}-session`]] as const) {
+      insertEpisode(db, { id: episodeId, session_id: sessionId });
+    }
+    const created = proposals.create({ kind: "supersede", targetMemoryId: targetId, candidateMemoryId: candidateId, rationale: "r", confidence: 0.8, createdBy: "extractor", now });
+    for (const episodeId of episodes) proposals.addSupport(created.id, { episodeId, sessionId: `${episodeId}-session`, confidence: 0.8, createdAt: now });
+    expect(proposals.recomputeDerived(created.id)).toEqual({ supportCount: 2, supportSessions: 2 });
+    return created.id;
+  }
+
+  test("0.6.0-rc.3 §7: a stale / supersede on the target a human rejected blocks the two-session rule for good (target_human_rejected); an auto_rule reject does not", () => {
+    const defended = activeAuto("Row a human defended", { id: "ep-o-def" });
+    const replacement = memories.create(autoMemory({ summary: "Replacement of the defended row", supersedesMemoryId: defended.id }));
+    // hm review, day 1: the user keeps the row; the extractor claims the replacement from two sessions afterwards.
+    const staleClaim = proposals.create({ kind: "stale", targetMemoryId: defended.id, rationale: "r", confidence: 0.8, createdBy: "extractor", now: T0 });
+    decideProposal(db, { proposalId: staleClaim.id, decidedBy: "human", accept: false, now: isoPlus(T0, { hours: 1 }) });
+    const later = isoPlus(T0, { hours: 2 });
+    const contest = twoSessionSupersede(defended.id, replacement.id, ["ep-def-1", "ep-def-2"], later);
+
+    expect(evaluateAutoDemotion(db, { proposalId: contest, now: later })).toEqual({ applied: false, reason: "target_human_rejected" });
+    expect(memories.getById(defended.id)).toMatchObject({ status: "active", supersededByMemoryId: null });
+    expect(memories.getById(replacement.id)).toMatchObject({ status: "candidate", ttlExpiresAt: null });
+    expect(proposals.getById(contest)).toMatchObject({ status: "open", supportSessions: 2 });
+    expect(new TransitionRepository(db).listForMemory(defended.id)).toEqual([]);
+    expect(new TransitionRepository(db).listForMemory(replacement.id)).toEqual([]);
+
+    // The automatic paths close proposals as `expired` and reject by auto_rule: neither is a human verdict.
+    const undefended = activeAuto("Row the auto rule declined to stale", { id: "ep-o-und" });
+    const other = memories.create(autoMemory({ summary: "Replacement of the undefended row", supersedesMemoryId: undefended.id }));
+    const autoReject = proposals.create({ kind: "stale", targetMemoryId: undefended.id, rationale: "r", confidence: 0.8, createdBy: "extractor", now: T0 });
+    decideProposal(db, { proposalId: autoReject.id, decidedBy: "auto_rule", accept: false, now: isoPlus(T0, { hours: 1 }) });
+    const applied = evaluateAutoDemotion(db, { proposalId: twoSessionSupersede(undefended.id, other.id, ["ep-und-1", "ep-und-2"], later), now: later });
+    expect(applied).toMatchObject({ applied: true, reason: "accepted" });
+    expect(memories.getById(undefended.id)).toMatchObject({ status: "superseded", supersededByMemoryId: other.id });
+    expect(memories.getById(other.id)?.status).toBe("active");
+  });
+
+  test("0.6.0-rc.3 §7: a replacement whose activate_* proposal a human rejected is never activated by the two-session rule (candidate_human_rejected)", () => {
+    const target = activeAuto("Row with a declined replacement", { id: "ep-o-dec" });
+    const declined = memories.create(autoMemory({ summary: "Replacement a human declined to activate", supersedesMemoryId: target.id }));
+    const activateGlobal = proposals.create({ kind: "activate_global", targetMemoryId: declined.id, rationale: "r", confidence: 0.8, createdBy: "extractor", now: T0 });
+    decideProposal(db, { proposalId: activateGlobal.id, decidedBy: "human", accept: false, now: isoPlus(T0, { hours: 1 }) });
+    const later = isoPlus(T0, { hours: 2 });
+    const contest = twoSessionSupersede(target.id, declined.id, ["ep-dec-1", "ep-dec-2"], later);
+
+    expect(evaluateAutoDemotion(db, { proposalId: contest, now: later })).toEqual({ applied: false, reason: "candidate_human_rejected" });
+    expect(memories.getById(target.id)).toMatchObject({ status: "active", supersededByMemoryId: null });
+    expect(memories.getById(declined.id)).toMatchObject({ status: "candidate", ttlExpiresAt: null });
+    expect(proposals.getById(contest)).toMatchObject({ status: "open", supportSessions: 2 });
+    expect(new TransitionRepository(db).listForMemory(target.id)).toEqual([]);
+    expect(new TransitionRepository(db).listForMemory(declined.id)).toEqual([]);
+
+    // A stale claim on the same target names no replacement: the declined row does not shield its target from the rule.
+    insertEpisode(db, { id: "ep-dec-3", session_id: "s-dec-3" });
+    insertEpisode(db, { id: "ep-dec-4", session_id: "s-dec-4" });
+    const staleClaim = proposals.create({ kind: "stale", targetMemoryId: target.id, rationale: "r", confidence: 0.8, createdBy: "extractor", now: later });
+    proposals.addSupport(staleClaim.id, { episodeId: "ep-dec-3", sessionId: "s-dec-3", confidence: 0.8, createdAt: later });
+    proposals.addSupport(staleClaim.id, { episodeId: "ep-dec-4", sessionId: "s-dec-4", confidence: 0.8, createdAt: later });
+    proposals.recomputeDerived(staleClaim.id);
+    expect(evaluateAutoDemotion(db, { proposalId: staleClaim.id, now: later })).toMatchObject({ applied: true, reason: "accepted" });
+    expect(memories.getById(target.id)?.status).toBe("stale");
+    expect(memories.getById(declined.id)?.status).toBe("candidate");
+  });
 });
 
 describe("shared proposal helpers (0.6.0-rc.3 §2.1)", () => {

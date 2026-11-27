@@ -31,6 +31,7 @@ import {
 import { appendLedgerLine, parseLedger } from "../src/dream/ledger";
 import { MemoryRepository, type CreateMemoryInput } from "../src/memory/repository";
 import { decideProposal, openOrSupportProposal } from "../src/promotion/proposals";
+import { transitionMemory } from "../src/promotion/transitions";
 import { createTestDb } from "./helpers/create-test-db";
 import { assistantLine, promptLine, toolFailLine } from "./helpers/ledger-fixture";
 import { T0, autoMemory, humanMemory, insertEpisode, isoPlus } from "./helpers/memory-fixtures";
@@ -817,6 +818,317 @@ describe("full sweep (0.6.0-rc.2 §1 backlog drain, 0.6.0-rc.3 §2 replacement r
     for (const { proposalId } of contests) expect(proposals.getById(proposalId)?.status).toBe("open");
     expect(proposals.getById(merge.proposalId!)?.status).toBe("open");
     expect(proposals.countOpen()).toBe(5);
+  });
+
+  test("0.6.0-rc.3 §2.1 rule 4b: a chain T0 ← T ← R whose middle row passes resolves from the correction end in one run — T0 and T superseded by R, T never active", async () => {
+    const now = isoPlus(T0, { days: 1 });
+    const oldest = sweepCandidate(bornAt(0));
+    // T passes the bar on its own: judged first (oldest proposal), P1(T0, T) would activate the contradicted T and park R for good.
+    const middle = contest(oldest.id, bornAt(1), { now: T0 });
+    const newest = contest(middle.candidate.id, bornAt(2), { now: isoPlus(T0, { minutes: 1 }) });
+
+    // Budget 1: the held P1 costs nothing; the one unit goes to P2, whose chain walk settles P1 in the same pass.
+    const result = await dream(now, { config: withBudget(1) });
+    expect(result.report.sweptErrors).toEqual([]);
+    expect(result.report.errors).toEqual([]);
+    expect(result.report.sweptSuperseded).toEqual([middle.candidate.id, oldest.id]);
+    expect(result.report.sweptActivated).toEqual([newest.candidate.id]);
+    expect(result.report.sweptProposalsClosed).toEqual([]);
+    for (const id of [oldest.id, middle.candidate.id]) {
+      expect(memories.getById(id)).toMatchObject({ status: "superseded", supersededByMemoryId: newest.candidate.id, contested: 0, openProposalId: null });
+    }
+    expect(memories.getById(newest.candidate.id)).toMatchObject({ status: "active", authority: "auto", ttlExpiresAt: isoPlus(now, { days: 30 }) });
+    const proposals = new ProposalRepository(db);
+    for (const id of [middle.proposalId, newest.proposalId]) {
+      expect(proposals.getById(id)).toMatchObject({ status: "accepted", decidedBy: "auto_rule", decisionNote: FULL_AUTONOMY_DECISION_NOTE, decidedAt: now });
+    }
+    const transitions = new TransitionRepository(db);
+    // T was never active: its one transition is the supersede by R; T0 is superseded by R through P1, never by T.
+    expect(transitions.listForMemory(middle.candidate.id)).toEqual([
+      expect.objectContaining({ fromStatus: "candidate", toStatus: "superseded", actor: "auto_rule", reason: FULL_SWEEP_TRANSITION_REASON, proposalId: newest.proposalId }),
+    ]);
+    expect(transitions.listForMemory(oldest.id)).toEqual([
+      expect.objectContaining({ fromStatus: "candidate", toStatus: "superseded", actor: "auto_rule", reason: FULL_SWEEP_TRANSITION_REASON, proposalId: middle.proposalId }),
+    ]);
+    expect(supersedeAudits()).toEqual([
+      { targetId: middle.candidate.id, replacementId: newest.candidate.id, proposalId: newest.proposalId, source: "sweep" },
+      { targetId: oldest.id, replacementId: newest.candidate.id, proposalId: middle.proposalId, source: "sweep", via: middle.candidate.id },
+    ]);
+    const activation = selectAll(db, "SELECT details_json FROM audit_log WHERE event_type = 'full_sweep_activation'");
+    expect(activation).toHaveLength(1);
+    expect(JSON.parse(String(activation[0]!.details_json))).toMatchObject({
+      memoryId: newest.candidate.id,
+      proposalId: newest.proposalId,
+      superseded: [middle.candidate.id, oldest.id],
+    });
+    const again = await dream(isoPlus(now, { hours: 6 }), { config: FULL });
+    expect(again.report).toMatchObject({ sweptActivated: [], sweptSuperseded: [], sweptProposalsClosed: [], sweptErrors: [] });
+  });
+
+  test("rule 4b holds nothing when the contest on the replacement cannot resolve: with R below the bar, P1(T0, T) resolves as before and P2 waits on the active T", async () => {
+    const now = isoPlus(T0, { days: 1 });
+    const oldest = sweepCandidate(bornAt(0));
+    const middle = contest(oldest.id, bornAt(1), { now: T0 });
+    const weak = contest(middle.candidate.id, { confidence: 0.65, ...bornAt(2) }, { now: isoPlus(T0, { minutes: 1 }) });
+
+    const result = await dream(now, { config: FULL });
+    expect(result.report.sweptErrors).toEqual([]);
+    expect(result.report.sweptSuperseded).toEqual([oldest.id]);
+    expect(result.report.sweptActivated).toEqual([middle.candidate.id]);
+    expect(memories.getById(oldest.id)).toMatchObject({ status: "superseded", supersededByMemoryId: middle.candidate.id });
+    expect(memories.getById(middle.candidate.id)).toMatchObject({ status: "active", contested: 1, openProposalId: weak.proposalId });
+    expect(memories.getById(weak.candidate.id)?.status).toBe("candidate");
+    const proposals = new ProposalRepository(db);
+    expect(proposals.getById(middle.proposalId)?.status).toBe("accepted");
+    expect(proposals.getById(weak.proposalId)).toMatchObject({ status: "open", supportSessions: 0 });
+  });
+
+  test.each([false, true])(
+    "a diamond behind the correction (T0b ← T0a ← T, T0b ← T, T ← R) resolves in one run without a throw (hop order reversed: %s): three targets superseded by R, the sibling hop closed once",
+    async (reversed) => {
+      const now = isoPlus(T0, { days: 1 });
+      const bottom = sweepCandidate(bornAt(0));
+      const left = contest(bottom.id, { confidence: 0.65, ...bornAt(1) }, { now: T0 });
+      const top = sweepCandidate({ confidence: 0.65, supersedesMemoryId: left.candidate.id, ...bornAt(2) });
+      const hop = (targetId: string, minutes: number): string =>
+        openOrSupportProposal(db, {
+          kind: "supersede",
+          targetMemoryId: targetId,
+          candidateMemoryId: top.id,
+          rationale: "supersede: newer claim",
+          confidence: 0.8,
+          createdBy: "extractor",
+          now: isoPlus(T0, { minutes }),
+          expiresInDays: 30,
+        }).proposalId!;
+      const [first, second] = reversed ? [hop(bottom.id, 1), hop(left.candidate.id, 2)] : [hop(left.candidate.id, 1), hop(bottom.id, 2)];
+      const newest = contest(top.id, bornAt(3), { now: isoPlus(T0, { minutes: 3 }) });
+
+      const result = await dream(now, { config: FULL });
+      expect(result.report.sweptErrors).toEqual([]);
+      expect(result.report.errors).toEqual([]);
+      expect([...result.report.sweptSuperseded].sort()).toEqual([top.id, left.candidate.id, bottom.id].sort());
+      expect(result.report.sweptActivated).toEqual([newest.candidate.id]);
+      // The hop the recursion closed as a sibling of a retired target is expired(full_autonomy) and reported once.
+      expect(result.report.sweptProposalsClosed).toEqual([reversed ? left.proposalId : second]);
+      const proposals = new ProposalRepository(db);
+      const decided = [newest.proposalId, left.proposalId, first, second].map((id) => proposals.getById(id)!);
+      expect(decided.map((proposal) => proposal.status).sort()).toEqual(["accepted", "accepted", "accepted", "expired"]);
+      for (const proposal of decided) expect(proposal).toMatchObject({ decidedBy: "auto_rule", decisionNote: FULL_AUTONOMY_DECISION_NOTE, decidedAt: now });
+      expect(proposals.countOpen()).toBe(0);
+      for (const id of [top.id, left.candidate.id, bottom.id]) {
+        expect(memories.getById(id)).toMatchObject({ status: "superseded", supersededByMemoryId: newest.candidate.id, contested: 0, openProposalId: null });
+        expect(new TransitionRepository(db).listForMemory(id)).toHaveLength(1);
+      }
+      expect(memories.getById(newest.candidate.id)?.status).toBe("active");
+      const again = await dream(isoPlus(now, { hours: 6 }), { config: FULL });
+      expect(again.report).toMatchObject({ sweptActivated: [], sweptSuperseded: [], sweptProposalsClosed: [], sweptErrors: [] });
+    }
+  );
+
+  test("a thrown resolution holds back the chain behind its target as well: T0 is not drained while P(T, R) waits, and the retry supersedes it by R", async () => {
+    const now = isoPlus(T0, { days: 1 });
+    const oldest = sweepCandidate(bornAt(0));
+    // P′(T0, T) cannot resolve on its own (T below the bar); P(T, R) would, but its replacement's write fails this run.
+    const middle = contest(oldest.id, { confidence: 0.65, ...bornAt(1) }, { now: T0 });
+    const newest = contest(middle.candidate.id, bornAt(2), { now: isoPlus(T0, { minutes: 1 }) });
+    const abort = "BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END";
+    db.run(`CREATE TRIGGER sweep_abort BEFORE UPDATE ON memories WHEN NEW.id = '${newest.candidate.id}' ${abort}`);
+
+    const failed = await dream(now, { config: FULL });
+    expect(failed.report.sweptErrors).toHaveLength(1);
+    expect(failed.report.sweptErrors[0]).toContain(`resolution ${newest.proposalId}: `);
+    expect(failed.report.sweptActivated).toEqual([]);
+    expect(failed.report.sweptSuperseded).toEqual([]);
+    // T0 passes decideTier and is the candidate of no proposal, yet it keeps its chain for the retry instead of draining.
+    expect(memories.getById(oldest.id)).toMatchObject({ status: "candidate", contested: 1, openProposalId: middle.proposalId });
+    expect(new TransitionRepository(db).listForMemory(oldest.id)).toEqual([]);
+
+    db.run("DROP TRIGGER sweep_abort");
+    const retried = await dream(isoPlus(now, { hours: 6 }), { config: FULL });
+    expect(retried.report.sweptErrors).toEqual([]);
+    expect(retried.report.sweptSuperseded).toEqual([middle.candidate.id, oldest.id]);
+    expect(retried.report.sweptActivated).toEqual([newest.candidate.id]);
+    for (const id of [oldest.id, middle.candidate.id]) {
+      expect(memories.getById(id)).toMatchObject({ status: "superseded", supersededByMemoryId: newest.candidate.id });
+    }
+  });
+
+  /** Two 4-hour blocks of one resumed session (`support_sessions` 2 since 0.6.0-rc.3 §2.3), as episodes `<prefix>-a` / `<prefix>-b`. */
+  function twoBlocks(prefix: string): [ContestSupport, ContestSupport] {
+    insertEpisode(db, { id: `${prefix}-a`, session_id: "s-resumed", started_at: T0 }, T0);
+    insertEpisode(db, { id: `${prefix}-b`, session_id: "s-resumed", started_at: isoPlus(T0, { hours: 5 }) }, T0);
+    return [
+      { episodeId: `${prefix}-a`, sessionId: "s-resumed" },
+      { episodeId: `${prefix}-b`, sessionId: "s-resumed" },
+    ];
+  }
+
+  /** An injected active auto row (a convention rule the sweep's phase 2 may judge). */
+  const activeRow = () => memories.create(autoMemory({ status: "active", knowledgeKind: "convention", summary: nextSummary(), scopeGlob: "src/**" }));
+
+  test("a replacement the two-session rule activates gets the sweep's bookkeeping: its open activate_* proposals close as expired(full_autonomy), one full_sweep_activation audit row names the contest", async () => {
+    const now = isoPlus(T0, { days: 1 });
+    const [blockA, blockB] = twoBlocks("ep-bk");
+    const target = activeRow();
+    const { candidate: replacement, proposalId } = contest(target.id, bornAt(1), { support: blockA });
+    openOrSupportProposal(db, {
+      kind: "supersede",
+      targetMemoryId: target.id,
+      candidateMemoryId: replacement.id,
+      rationale: "supersede: newer claim",
+      confidence: 0.8,
+      createdBy: "extractor",
+      now: isoPlus(T0, { hours: 5 }),
+      support: { confidence: 0.8, ...blockB },
+    });
+    const activateGlobal = openOrSupportProposal(db, {
+      kind: "activate_global",
+      targetMemoryId: replacement.id,
+      rationale: "activate_global: repo-wide row",
+      confidence: 0.85,
+      createdBy: "extractor",
+      now: T0,
+      expiresInDays: 30,
+    }).proposalId!;
+    expect(memories.getById(replacement.id)).toMatchObject({ status: "candidate", openProposalId: activateGlobal });
+
+    const result = await dream(now, { config: FULL });
+    expect(result.report.sweptErrors).toEqual([]);
+    expect(result.report.sweptSuperseded).toEqual([target.id]);
+    expect(result.report.sweptActivated).toEqual([replacement.id]);
+    expect(result.report.sweptProposalsClosed).toEqual([activateGlobal]);
+    const proposals = new ProposalRepository(db);
+    expect(proposals.getById(activateGlobal)).toMatchObject({ status: "expired", decidedBy: "auto_rule", decisionNote: FULL_AUTONOMY_DECISION_NOTE, decidedAt: now });
+    expect(proposals.getById(proposalId)).toMatchObject({ status: "accepted", decidedBy: "auto_rule", supportSessions: 2 });
+    expect(memories.getById(replacement.id)).toMatchObject({ status: "active", openProposalId: null, contested: 0, ttlExpiresAt: isoPlus(now, { days: 30 }) });
+    const activation = selectAll(db, "SELECT summary, details_json FROM audit_log WHERE event_type = 'full_sweep_activation'");
+    expect(activation).toHaveLength(1);
+    expect(String(activation[0]!.summary)).toContain(`via supersede of ${target.id}`);
+    expect(JSON.parse(String(activation[0]!.details_json))).toMatchObject({
+      memoryId: replacement.id,
+      proposalId,
+      superseded: [target.id],
+      proposalsClosed: [activateGlobal],
+      ttlExpiresAt: isoPlus(now, { days: 30 }),
+    });
+    expect(proposals.countOpen()).toBe(0);
+  });
+
+  test("0.6.0-rc.3 §7: the two-session rule never enacts a claim a human declined — a rejected stale on the target or a rejected activate_* on the replacement holds under the block-aligned count", async () => {
+    const now = isoPlus(T0, { days: 1 });
+    const [blockA, blockB] = twoBlocks("ep-hr");
+    const proposals = new ProposalRepository(db);
+    /** The extractor's supersede T → R from both blocks, written straight to the repository (no 30-day skip in the way). */
+    const contested = (targetId: string, candidateId: string): string => {
+      const created = proposals.create({ kind: "supersede", targetMemoryId: targetId, candidateMemoryId: candidateId, rationale: "supersede: newer claim", confidence: 0.8, createdBy: "extractor", now: isoPlus(T0, { hours: 2 }) });
+      proposals.addSupport(created.id, { ...blockA, confidence: 0.8, createdAt: T0 });
+      proposals.addSupport(created.id, { ...blockB, confidence: 0.8, createdAt: isoPlus(T0, { hours: 5 }) });
+      proposals.recomputeDerived(created.id);
+      return created.id;
+    };
+    // hm review, day 1: the user rejected a stale claim on this row.
+    const defended = activeRow();
+    const staleClaim = proposals.create({ kind: "stale", targetMemoryId: defended.id, rationale: "stale: no longer true", confidence: 0.8, createdBy: "extractor", now: T0 });
+    decideProposal(db, { proposalId: staleClaim.id, decidedBy: "human", accept: false, now: isoPlus(T0, { hours: 1 }) });
+    const defendedReplacement = sweepCandidate({ supersedesMemoryId: defended.id, ...bornAt(1) });
+    const defendedContest = contested(defended.id, defendedReplacement.id);
+    // The user rejected this replacement's activate_global.
+    const replaced = activeRow();
+    const declined = sweepCandidate({ supersedesMemoryId: replaced.id, ...bornAt(2) });
+    const activateGlobal = proposals.create({ kind: "activate_global", targetMemoryId: declined.id, rationale: "activate_global: repo-wide row", confidence: 0.85, createdBy: "extractor", now: T0 });
+    decideProposal(db, { proposalId: activateGlobal.id, decidedBy: "human", accept: false, now: isoPlus(T0, { hours: 1 }) });
+    const declinedContest = contested(replaced.id, declined.id);
+    // Control: the same two blocks against a row nobody defended resolve.
+    const plainTarget = activeRow();
+    const plainReplacement = sweepCandidate({ supersedesMemoryId: plainTarget.id, ...bornAt(3) });
+    const plainContest = contested(plainTarget.id, plainReplacement.id);
+
+    const result = await dream(now, { config: FULL });
+    expect(result.report.sweptErrors).toEqual([]);
+    expect(result.report.sweptSuperseded).toEqual([plainTarget.id]);
+    expect(result.report.sweptActivated).toEqual([plainReplacement.id]);
+    expect(proposals.getById(plainContest)).toMatchObject({ status: "accepted", decidedBy: "auto_rule", supportSessions: 2 });
+    const transitions = new TransitionRepository(db);
+    for (const [target, replacement, contestId] of [
+      [defended, defendedReplacement, defendedContest],
+      [replaced, declined, declinedContest],
+    ] as const) {
+      expect(memories.getById(target.id)).toMatchObject({ status: "active", supersededByMemoryId: null });
+      expect(memories.getById(replacement.id)).toMatchObject({ status: "candidate", ttlExpiresAt: null });
+      expect(proposals.getById(contestId)).toMatchObject({ status: "open", supportSessions: 2 });
+      expect(transitions.listForMemory(target.id)).toEqual([]);
+      expect(transitions.listForMemory(replacement.id)).toEqual([]);
+    }
+    expect(proposals.countOpen()).toBe(2);
+    const again = await dream(isoPlus(now, { hours: 6 }), { config: FULL });
+    expect(again.report).toMatchObject({ sweptActivated: [], sweptSuperseded: [], sweptErrors: [] });
+  });
+
+  test("dream.full_sweep_per_run = 0 switches off the budgeted phases only: the unit-free two-session re-evaluation still runs under full", async () => {
+    const now = isoPlus(T0, { days: 1 });
+    const [blockA, blockB] = twoBlocks("ep-z");
+    const active = activeRow();
+    const { candidate: replacement, proposalId } = contest(active.id, bornAt(1), { support: blockA });
+    openOrSupportProposal(db, {
+      kind: "supersede",
+      targetMemoryId: active.id,
+      candidateMemoryId: replacement.id,
+      rationale: "supersede: newer claim",
+      confidence: 0.8,
+      createdBy: "extractor",
+      now: isoPlus(T0, { hours: 5 }),
+      support: { confidence: 0.8, ...blockB },
+    });
+    // What a budget would have paid for — a resolvable one-support contest on a candidate and a passing plain candidate — is left alone.
+    const target = sweepCandidate(bornAt(2));
+    const parked = contest(target.id, bornAt(3));
+    const plain = sweepCandidate(bornAt(4));
+
+    const result = await dream(now, { config: withBudget(0) });
+    expect(result.noop).toBe(false);
+    expect(result.report.sweptErrors).toEqual([]);
+    expect(result.report.sweptSuperseded).toEqual([active.id]);
+    expect(result.report.sweptActivated).toEqual([replacement.id]);
+    expect(result.report.sweptProposalsClosed).toEqual([]);
+    expect(memories.getById(active.id)).toMatchObject({ status: "superseded", supersededByMemoryId: replacement.id });
+    expect(memories.getById(replacement.id)?.status).toBe("active");
+    const proposals = new ProposalRepository(db);
+    expect(proposals.getById(proposalId)).toMatchObject({ status: "accepted", decidedBy: "auto_rule", supportSessions: 2 });
+    expect(memories.getById(target.id)).toMatchObject({ status: "candidate", contested: 1 });
+    expect(memories.getById(parked.candidate.id)?.status).toBe("candidate");
+    expect(proposals.getById(parked.proposalId)?.status).toBe("open");
+    expect(memories.getById(plain.id)?.status).toBe("candidate");
+    expect(selectAll(db, "SELECT event_type FROM audit_log WHERE event_type IN ('full_supersede', 'full_sweep_activation')").map((row) => row.event_type)).toEqual([
+      "full_sweep_activation",
+    ]);
+  });
+
+  test("§2.1 rule 1 in phase 1: a stale(ttl_expired) target resolves like a candidate — stale → superseded by R, R active with its TTL; a human's demotion waits for the reviewer", async () => {
+    const now = isoPlus(T0, { days: 1 });
+    const expiredRow = memories.create(autoMemory({ status: "active", summary: nextSummary(), scopeGlob: "src/**", ...bornAt(0) }));
+    transitionMemory(db, { memoryId: expiredRow.id, to: "stale", actor: "expiry", reason: "ttl_expired", now: T0, statusReason: "ttl_expired" });
+    const { candidate: replacement, proposalId } = contest(expiredRow.id, bornAt(1));
+    const demoted = memories.create(autoMemory({ status: "active", summary: nextSummary(), scopeGlob: "src/**", ...bornAt(2) }));
+    transitionMemory(db, { memoryId: demoted.id, to: "stale", actor: "human", reason: "cli:memory:demote", now: T0 });
+    const demotedContest = contest(demoted.id, bornAt(3));
+
+    const result = await dream(now, { config: FULL });
+    expect(result.report.sweptErrors).toEqual([]);
+    expect(result.report.sweptSuperseded).toEqual([expiredRow.id]);
+    expect(result.report.sweptActivated).toEqual([replacement.id]);
+    expect(memories.getById(expiredRow.id)).toMatchObject({ status: "superseded", statusReason: "auto_rule", supersededByMemoryId: replacement.id, contested: 0, openProposalId: null });
+    expect(memories.getById(replacement.id)).toMatchObject({ status: "active", authority: "auto", ttlExpiresAt: isoPlus(now, { days: 30 }) });
+    expect(new TransitionRepository(db).listForMemory(expiredRow.id).map((entry) => [entry.fromStatus, entry.toStatus, entry.actor])).toEqual([
+      ["active", "stale", "expiry"],
+      ["stale", "superseded", "auto_rule"],
+    ]);
+    const proposals = new ProposalRepository(db);
+    expect(proposals.getById(proposalId)).toMatchObject({ status: "accepted", decidedBy: "auto_rule", decisionNote: FULL_AUTONOMY_DECISION_NOTE, decidedAt: now });
+    expect(supersedeAudits()).toEqual([{ targetId: expiredRow.id, replacementId: replacement.id, proposalId, source: "sweep" }]);
+    expect(memories.getById(demoted.id)).toMatchObject({ status: "stale", statusReason: "human", contested: 1 });
+    expect(memories.getById(demotedContest.candidate.id)?.status).toBe("candidate");
+    expect(proposals.getById(demotedContest.proposalId)?.status).toBe("open");
   });
 });
 

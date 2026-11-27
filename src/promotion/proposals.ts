@@ -147,8 +147,11 @@ export interface OpenOrSupportResult {
   skipped: "recent_reject" | null;
 }
 
-/** Proposal kinds that contradict the target row; the others (activation, scope / signature fixes) only wait on a review. */
-const CONTESTING_KINDS: ReadonlySet<string> = new Set(["supersede", "stale", "revalidate"]);
+/**
+ * Proposal kinds that contradict the target row; the others (activation, scope / signature fixes) only wait on a review.
+ * The one definition of "a contest": flagTarget's `contested` flag and the replacement resolution's sibling closure read it.
+ */
+export const CONTESTING_KINDS: ReadonlySet<ProposalKind> = new Set<ProposalKind>(["supersede", "stale", "revalidate"]);
 
 /**
  * Refreshes `open_proposal_id` / `contested` on a target from its open proposals, keeping the proposal the row already
@@ -546,7 +549,10 @@ export function supportersCarryHumanSignal(supports: readonly ProposalSupportRec
 /**
  * §5.7 step 6 auto demotion: type ≠ policy ∧ support_sessions ≥ 2 ∧ (when the target's origin episode
  * was a correction / remember episode, one supporter must carry has_human_signal or deterministic)
- * ∧ target active ∧ authority auto → accept by auto_rule. Human targets only get the proposal.
+ * ∧ target active ∧ authority auto → accept by auto_rule. Human targets only get the proposal, and a claim a human
+ * declined is never enacted (0.6.0-rc.3 design §7, under every level): a `supersede` / `stale` on the target a human
+ * rejected (`target_human_rejected`) or a rejected `activate_*` on the replacement (`candidate_human_rejected`) holds
+ * the proposal open however many sessions support it.
  */
 export function evaluateAutoDemotion(db: SqlJsDatabase, input: AutoDemotionInput): AutoDemotionResult {
   const proposals = new ProposalRepository(db);
@@ -559,6 +565,10 @@ export function evaluateAutoDemotion(db: SqlJsDatabase, input: AutoDemotionInput
   if (target.authority !== "auto") return { applied: false, reason: "human_target" };
   if (target.type === "policy") return { applied: false, reason: "policy" };
   if (target.status !== "active") return { applied: false, reason: `status:${target.status}` };
+  if (humanRejectedContest(proposals, target.id)) return { applied: false, reason: "target_human_rejected" };
+  if (proposal.kind === "supersede" && proposal.candidateMemoryId !== null && humanRejectedActivation(proposals, proposal.candidateMemoryId)) {
+    return { applied: false, reason: "candidate_human_rejected" };
+  }
   if (proposal.supportSessions < AUTO_DEMOTION_MIN_SESSIONS) return { applied: false, reason: "support_sessions" };
   if (proposal.kind === "supersede" && proposal.candidateMemoryId !== null) {
     // A replacement that expired or was rejected while the proposal gathered support cannot take the target's place.

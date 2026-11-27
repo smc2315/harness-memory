@@ -14,14 +14,16 @@ import { ProvenanceRepository } from "../src/db/repositories/provenance";
 import { TransitionRepository } from "../src/db/repositories/transitions";
 import { selectAll } from "../src/db/sql";
 import { FULL_AUTONOMY_DECISION_NOTE as CONSOLIDATE_NOTE, FULL_SWEEP_TRANSITION_REASON as CONSOLIDATE_REASON } from "../src/dream/consolidate";
-import { MemoryRepository, type CreateMemoryInput } from "../src/memory/repository";
+import { MemoryRepository, type CreateMemoryInput, type MemoryRecord } from "../src/memory/repository";
 import * as promotion from "../src/promotion";
 import { decideProposal, openOrSupportProposal } from "../src/promotion/proposals";
 import {
+  CHAIN_MAX_DEPTH,
   FULL_AUTONOMY_DECISION_NOTE,
   FULL_SUPERSEDE_AUDIT_EVENT,
   FULL_SWEEP_TRANSITION_REASON,
   applySupersedeResolution,
+  chainTargets,
   checkSupersedeResolution,
 } from "../src/promotion/replacement";
 import { transitionMemory } from "../src/promotion/transitions";
@@ -92,6 +94,14 @@ function auditRows() {
   }));
 }
 
+/** checkSupersedeResolution with rule 5 as this test judges it: every replacement passes the bar unless the test says otherwise. */
+function check(proposalId: string, passesTier: (candidate: MemoryRecord) => boolean = () => true) {
+  return checkSupersedeResolution(db, proposalId, { passesTier });
+}
+
+/** Rule 5 by the stored confidence alone (decideTier's bar is 0.7): the cheapest stand-in for the caller's decideTier. */
+const confidenceBar = (candidate: MemoryRecord): boolean => candidate.confidence >= 0.7;
+
 /** A resolution the sweep would run: reason `full_sweep`, no session. */
 function sweep(proposalId: string) {
   return applySupersedeResolution(db, { proposalId, now: NOW, source: "sweep", transitionReason: FULL_SWEEP_TRANSITION_REASON });
@@ -110,6 +120,8 @@ describe("replacement module surface", () => {
     expect(CONSOLIDATE_REASON).toBe(FULL_SWEEP_TRANSITION_REASON);
     expect(promotion.checkSupersedeResolution).toBe(checkSupersedeResolution);
     expect(promotion.applySupersedeResolution).toBe(applySupersedeResolution);
+    expect(promotion.chainTargets).toBe(chainTargets);
+    expect(CHAIN_MAX_DEPTH).toBe(10);
   });
 });
 
@@ -118,7 +130,7 @@ describe("checkSupersedeResolution (design §2.1 rules 1–4)", () => {
     const target = memories.create(autoMemory({ summary: "Never-shown target" }));
     const { candidate, proposalId } = contest(target.id, {}, { episodeId: "ep-c1", sessionId: "s1" });
 
-    expect(checkSupersedeResolution(db, proposalId)).toMatchObject({
+    expect(check(proposalId)).toMatchObject({
       ok: true,
       needsTierDecision: true,
       proposal: { id: proposalId, kind: "supersede", status: "open", supportCount: 1 },
@@ -131,12 +143,12 @@ describe("checkSupersedeResolution (design §2.1 rules 1–4)", () => {
     const target = memories.create(autoMemory({ status: "active", summary: "Injected target" }));
     const { proposalId } = contest(target.id, {}, { episodeId: "ep-c2", sessionId: "s2" });
 
-    expect(checkSupersedeResolution(db, proposalId)).toEqual({ ok: false, reason: "target_status" });
+    expect(check(proposalId)).toEqual({ ok: false, reason: "target_status" });
   });
 
   test("a stale target resolves only when its TTL expired; a human's demotion is target_status", () => {
     const expiredTarget = ttlExpiredRow("Expired target");
-    expect(checkSupersedeResolution(db, contest(expiredTarget.id).proposalId)).toMatchObject({
+    expect(check(contest(expiredTarget.id).proposalId)).toMatchObject({
       ok: true,
       target: { id: expiredTarget.id, status: "stale", statusReason: "ttl_expired" },
     });
@@ -144,46 +156,46 @@ describe("checkSupersedeResolution (design §2.1 rules 1–4)", () => {
     const demoted = memories.create(autoMemory({ status: "active", summary: "Demoted target" }));
     transitionMemory(db, { memoryId: demoted.id, to: "stale", actor: "human", reason: "cli:memory:demote", now: T0 });
     expect(memories.getById(demoted.id)?.statusReason).toBe("human");
-    expect(checkSupersedeResolution(db, contest(demoted.id).proposalId)).toEqual({ ok: false, reason: "target_status" });
+    expect(check(contest(demoted.id).proposalId)).toEqual({ ok: false, reason: "target_status" });
   });
 
   test("a human target is target_human whatever its status", () => {
     const active = memories.create(humanMemory({ summary: "Human rule" }));
-    expect(checkSupersedeResolution(db, contest(active.id).proposalId)).toEqual({ ok: false, reason: "target_human" });
+    expect(check(contest(active.id).proposalId)).toEqual({ ok: false, reason: "target_human" });
 
     const candidate = memories.create(humanMemory({ status: "candidate", summary: "Human candidate" }));
-    expect(checkSupersedeResolution(db, contest(candidate.id).proposalId)).toEqual({ ok: false, reason: "target_human" });
+    expect(check(contest(candidate.id).proposalId)).toEqual({ ok: false, reason: "target_human" });
   });
 
   test("a correction-born target needs a supporter with has_human_signal or deterministic (rule 3)", () => {
     const corrected = memories.create(autoMemory({ summary: "Correction-born target" }));
     origin(corrected.id, "ep-o5", { correction: 1 });
     const { candidate, proposalId } = contest(corrected.id, {}, { episodeId: "ep-s5a", sessionId: "s5a" });
-    expect(checkSupersedeResolution(db, proposalId)).toEqual({ ok: false, reason: "human_signal" });
+    expect(check(proposalId)).toEqual({ ok: false, reason: "human_signal" });
 
     open("supersede", corrected.id, candidate.id, { episodeId: "ep-s5b", sessionId: "s5b", hasHumanSignal: 1 });
-    expect(checkSupersedeResolution(db, proposalId)).toMatchObject({ ok: true, proposal: { id: proposalId, supportCount: 2 } });
+    expect(check(proposalId)).toMatchObject({ ok: true, proposal: { id: proposalId, supportCount: 2 } });
 
     const remembered = memories.create(autoMemory({ summary: "Remember-born target" }));
     origin(remembered.id, "ep-o5b", { remember: 1 });
     const deterministic = contest(remembered.id, {}, { episodeId: "ep-s5c", sessionId: "s5c", deterministic: 1 });
-    expect(checkSupersedeResolution(db, deterministic.proposalId)).toMatchObject({ ok: true, target: { id: remembered.id } });
+    expect(check(deterministic.proposalId)).toMatchObject({ ok: true, target: { id: remembered.id } });
 
     // a plain origin asks nothing of the supporters
     const plain = memories.create(autoMemory({ summary: "Plain-born target" }));
     origin(plain.id, "ep-o5c");
     const plainContest = contest(plain.id, {}, { episodeId: "ep-s5d", sessionId: "s5d" });
-    expect(checkSupersedeResolution(db, plainContest.proposalId)).toMatchObject({ ok: true });
+    expect(check(plainContest.proposalId)).toMatchObject({ ok: true });
   });
 
   test("a supersede / stale on the target rejected by a human blocks for good; an auto_rule reject does not (rule 2)", () => {
     const defended = memories.create(autoMemory({ summary: "Target a human defended" }));
     decideProposal(db, { proposalId: open("stale", defended.id, null), decidedBy: "human", accept: false, now: T0 });
-    expect(checkSupersedeResolution(db, contest(defended.id).proposalId)).toEqual({ ok: false, reason: "target_human_rejected" });
+    expect(check(contest(defended.id).proposalId)).toEqual({ ok: false, reason: "target_human_rejected" });
 
     const declined = memories.create(autoMemory({ summary: "Target the auto rule declined to stale" }));
     decideProposal(db, { proposalId: open("stale", declined.id, null), decidedBy: "auto_rule", accept: false, now: T0 });
-    expect(checkSupersedeResolution(db, contest(declined.id).proposalId)).toMatchObject({ ok: true, target: { id: declined.id } });
+    expect(check(contest(declined.id).proposalId)).toMatchObject({ ok: true, target: { id: declined.id } });
   });
 
   test("a replacement parked by an open proposal of another kind is candidate_other_proposal; a second supersede naming it is not", () => {
@@ -191,15 +203,15 @@ describe("checkSupersedeResolution (design §2.1 rules 1–4)", () => {
     const { candidate, proposalId } = contest(target.id);
     const otherTarget = memories.create(autoMemory({ summary: "Other target the same row replaces" }));
     open("supersede", otherTarget.id, candidate.id);
-    expect(checkSupersedeResolution(db, proposalId)).toMatchObject({ ok: true });
+    expect(check(proposalId)).toMatchObject({ ok: true });
 
     const twin = memories.create(autoMemory({ summary: "Near-duplicate of the replacement" }));
     open("merge", twin.id, candidate.id);
-    expect(checkSupersedeResolution(db, proposalId)).toEqual({ ok: false, reason: "candidate_other_proposal" });
+    expect(check(proposalId)).toEqual({ ok: false, reason: "candidate_other_proposal" });
   });
 
   test("a replacement that is already active (it resolved another contest) is ok without a tier decision; other shapes are refused", () => {
-    const against = (replacementId: string) => checkSupersedeResolution(db, open("supersede", memories.create(autoMemory()).id, replacementId));
+    const against = (replacementId: string) => check(open("supersede", memories.create(autoMemory()).id, replacementId));
 
     const active = memories.create(autoMemory({ status: "active", summary: "Already active replacement" }));
     expect(against(active.id)).toMatchObject({ ok: true, needsTierDecision: false, candidate: { id: active.id, status: "active" } });
@@ -220,18 +232,93 @@ describe("checkSupersedeResolution (design §2.1 rules 1–4)", () => {
     const { candidate, proposalId } = contest(target.id);
     decideProposal(db, { proposalId: open("activate_global", candidate.id, null), decidedBy: "human", accept: false, now: T0 });
 
-    expect(checkSupersedeResolution(db, proposalId)).toEqual({ ok: false, reason: "candidate_human_rejected" });
+    expect(check(proposalId)).toEqual({ ok: false, reason: "candidate_human_rejected" });
   });
 
   test("a decided or unknown proposal is not_open; another kind is kind", () => {
     const target = memories.create(autoMemory({ summary: "Target" }));
     const { proposalId } = contest(target.id);
     decideProposal(db, { proposalId, decidedBy: "auto_rule", accept: true, now: T0, note: FULL_AUTONOMY_DECISION_NOTE });
-    expect(checkSupersedeResolution(db, proposalId)).toEqual({ ok: false, reason: "not_open" });
-    expect(checkSupersedeResolution(db, "no-such-proposal")).toEqual({ ok: false, reason: "not_open" });
+    expect(check(proposalId)).toEqual({ ok: false, reason: "not_open" });
+    expect(check("no-such-proposal")).toEqual({ ok: false, reason: "not_open" });
 
     const active = memories.create(autoMemory({ status: "active", summary: "Active row with a stale claim" }));
-    expect(checkSupersedeResolution(db, open("stale", active.id, null))).toEqual({ ok: false, reason: "kind" });
+    expect(check(open("stale", active.id, null))).toEqual({ ok: false, reason: "kind" });
+  });
+
+  test("rule 4b: a replacement that is itself the target of a resolvable contest is candidate_contested — the chain resolves from R's end", () => {
+    const oldest = memories.create(autoMemory({ summary: "Oldest target" }));
+    const middle = contest(oldest.id, { summary: "Middle row, passes the bar", confidence: 0.85 });
+    const newest = contest(middle.candidate.id, { summary: "Newest row, passes the bar", confidence: 0.85 });
+
+    // P1(T0, T) is held although T passes: P2(T, R) resolves first and settles P1 through the chain walk (T0 by R, never by T).
+    expect(check(middle.proposalId, confidenceBar)).toEqual({ ok: false, reason: "candidate_contested" });
+    expect(check(newest.proposalId, confidenceBar)).toMatchObject({
+      ok: true,
+      needsTierDecision: true,
+      target: { id: middle.candidate.id },
+      candidate: { id: newest.candidate.id },
+    });
+    // Nothing is written by a check: both contests are still open and every row is where it was.
+    expect(proposals.getById(middle.proposalId)?.status).toBe("open");
+    expect(proposals.getById(newest.proposalId)?.status).toBe("open");
+    expect(memories.getById(oldest.id)?.status).toBe("candidate");
+    expect(memories.getById(middle.candidate.id)?.status).toBe("candidate");
+  });
+
+  test("rule 4b holds nothing when the contest on the replacement cannot resolve (§3): R below the bar, R human-rejected, or R already active", () => {
+    const oldest = memories.create(autoMemory({ summary: "Oldest target" }));
+    const middle = contest(oldest.id, { summary: "Middle row, passes the bar", confidence: 0.85 });
+    const weak = contest(middle.candidate.id, { summary: "Newest row, below the bar", confidence: 0.65 });
+    expect(check(weak.proposalId, confidenceBar)).toMatchObject({ ok: true, needsTierDecision: true });
+    expect(check(middle.proposalId, confidenceBar)).toMatchObject({ ok: true, needsTierDecision: true, candidate: { id: middle.candidate.id } });
+
+    // A second contest on T whose replacement a human declined to activate is not resolvable either.
+    const declined = contest(middle.candidate.id, { summary: "Newest row a human declined", confidence: 0.85 });
+    decideProposal(db, { proposalId: open("activate_global", declined.candidate.id, null), decidedBy: "human", accept: false, now: T0 });
+    expect(check(declined.proposalId, confidenceBar)).toEqual({ ok: false, reason: "candidate_human_rejected" });
+    expect(check(middle.proposalId, confidenceBar)).toMatchObject({ ok: true });
+
+    // An active replacement (it resolved another contest this run) keeps the two-session rule for its own contests: P proceeds without a tier decision.
+    const other = memories.create(autoMemory({ summary: "Other target" }));
+    const active = memories.create(autoMemory({ status: "active", summary: "Already active replacement" }));
+    const onActive = open("supersede", other.id, active.id);
+    contest(active.id, { summary: "Row said to replace the active replacement", confidence: 0.85 });
+    expect(check(onActive, confidenceBar)).toMatchObject({ ok: true, needsTierDecision: false, candidate: { id: active.id, status: "active" } });
+  });
+});
+
+describe("chainTargets (the rows a resolution's chain walk would reach)", () => {
+  test("a chain of three behind the target, nearest first; a decided proposal and a row without proposals count for nothing", () => {
+    const oldest = memories.create(autoMemory({ summary: "Oldest target" }));
+    const second = contest(oldest.id, { summary: "Second row" });
+    const third = contest(second.candidate.id, { summary: "Third row" });
+    const newest = contest(third.candidate.id, { summary: "Newest row" });
+
+    expect(chainTargets(proposals, third.candidate.id)).toEqual([second.candidate.id, oldest.id]);
+    expect(chainTargets(proposals, newest.candidate.id)).toEqual([third.candidate.id, second.candidate.id, oldest.id]);
+    expect(chainTargets(proposals, oldest.id)).toEqual([]);
+
+    decideProposal(db, { proposalId: second.proposalId, decidedBy: "auto_rule", accept: false, now: T0 });
+    expect(chainTargets(proposals, third.candidate.id)).toEqual([second.candidate.id]);
+  });
+
+  test("a diamond names each target once; the walk stops after CHAIN_MAX_DEPTH hops", () => {
+    const bottom = memories.create(autoMemory({ summary: "Diamond bottom" }));
+    const left = contest(bottom.id, { summary: "Diamond left" });
+    const top = contest(left.candidate.id, { summary: "Diamond top" });
+    open("supersede", bottom.id, top.candidate.id);
+    expect(chainTargets(proposals, top.candidate.id)).toEqual([left.candidate.id, bottom.id]);
+
+    let row = memories.create(autoMemory({ summary: "Chain root" }));
+    const ids = [row.id];
+    for (let hop = 0; hop < CHAIN_MAX_DEPTH + 2; hop += 1) {
+      row = contest(row.id, { summary: `Chain hop ${String(hop)}` }).candidate;
+      ids.push(row.id);
+    }
+    const reached = chainTargets(proposals, row.id);
+    expect(reached).toHaveLength(CHAIN_MAX_DEPTH);
+    expect(reached).toEqual(ids.slice(-CHAIN_MAX_DEPTH - 1, -1).reverse());
   });
 });
 
@@ -321,6 +408,7 @@ describe("applySupersedeResolution (design §2.2)", () => {
   test("the other open supersede / stale / revalidate proposals on the dead target close as expired(full_autonomy); a rival replacement stays parked", () => {
     const target = memories.create(autoMemory({ summary: "Doubly contested target" }));
     const staleClaim = open("stale", target.id, null);
+    const revalidateClaim = open("revalidate", target.id, null);
     const { candidate, proposalId } = contest(target.id);
     const rival = memories.create(autoMemory({ summary: "Rival replacement", supersedesMemoryId: target.id }));
     const rivalProposal = open("supersede", target.id, rival.id);
@@ -333,9 +421,10 @@ describe("applySupersedeResolution (design §2.2)", () => {
       replacementId: candidate.id,
       superseded: [target.id],
       proposalsAccepted: [proposalId],
-      proposalsClosed: [staleClaim, rivalProposal],
+      proposalsClosed: [staleClaim, revalidateClaim, rivalProposal],
     });
     expired(staleClaim);
+    expired(revalidateClaim);
     expired(rivalProposal);
     expect(proposals.getById(activate)?.status).toBe("open");
     expect(memories.getById(target.id)).toMatchObject({
@@ -353,7 +442,7 @@ describe("applySupersedeResolution (design §2.2)", () => {
     const oldestStale = open("stale", oldest.id, null);
     const middle = contest(oldest.id, { summary: "Middle row" }, { episodeId: "ep-ch1", sessionId: "s1" });
     const newest = contest(middle.candidate.id, { summary: "Newest row" }, { episodeId: "ep-ch2", sessionId: "s2" });
-    expect(checkSupersedeResolution(db, newest.proposalId)).toMatchObject({ ok: true, needsTierDecision: true });
+    expect(check(newest.proposalId)).toMatchObject({ ok: true, needsTierDecision: true });
 
     const result = applySupersedeResolution(db, {
       proposalId: newest.proposalId,
@@ -424,8 +513,85 @@ describe("applySupersedeResolution (design §2.2)", () => {
       },
     ]);
     // both contests are decided: the caller's next check never reaches apply again
-    expect(checkSupersedeResolution(db, newest.proposalId)).toEqual({ ok: false, reason: "not_open" });
-    expect(checkSupersedeResolution(db, middle.proposalId)).toEqual({ ok: false, reason: "not_open" });
+    expect(check(newest.proposalId)).toEqual({ ok: false, reason: "not_open" });
+    expect(check(middle.proposalId)).toEqual({ ok: false, reason: "not_open" });
+  });
+
+  test("a stale(ttl_expired) target resolves like a candidate: stale → superseded by auto_rule, the replacement active with its TTL, the proposal accepted", () => {
+    const expiredTarget = ttlExpiredRow("Expired target");
+    const { candidate, proposalId } = contest(expiredTarget.id, { knowledgeKind: "convention" });
+    expect(check(proposalId)).toMatchObject({ ok: true, needsTierDecision: true, target: { status: "stale", statusReason: "ttl_expired" } });
+
+    const result = sweep(proposalId);
+
+    expect(result).toEqual({
+      replacementId: candidate.id,
+      replacementActivated: true,
+      superseded: [expiredTarget.id],
+      proposalsAccepted: [proposalId],
+      proposalsClosed: [],
+    });
+    expect(memories.getById(expiredTarget.id)).toMatchObject({
+      status: "superseded",
+      statusReason: "auto_rule",
+      supersededByMemoryId: candidate.id,
+      contested: 0,
+      openProposalId: null,
+    });
+    expect(memories.getById(candidate.id)).toMatchObject({
+      status: "active",
+      authority: "auto",
+      ttlExpiresAt: isoPlus(NOW, { days: 7 }),
+      revalidateAfter: isoPlus(NOW, { hours: 84 }),
+    });
+    expect(proposals.getById(proposalId)).toMatchObject({ status: "accepted", decidedBy: "auto_rule", decisionNote: FULL_AUTONOMY_DECISION_NOTE, decidedAt: NOW });
+    expect(transitions.listForMemory(expiredTarget.id).map((entry) => [entry.fromStatus, entry.toStatus])).toEqual([
+      ["active", "stale"],
+      ["stale", "superseded"],
+    ]);
+    expect(transitions.listForMemory(expiredTarget.id)[1]).toMatchObject({ actor: "auto_rule", reason: FULL_SWEEP_TRANSITION_REASON, proposalId });
+    expect(auditRows()).toEqual([
+      { sessionId: null, summary: expect.any(String), details: { targetId: expiredTarget.id, replacementId: candidate.id, proposalId, source: "sweep" } },
+    ]);
+  });
+
+  test.each([
+    ["P′1(T0a, T) before P′2(T0b, T)", false],
+    ["P′2(T0b, T) before P′1(T0a, T)", true],
+  ])("the diamond T0b ← T0a ← T, T0b ← T behind R resolves without a throw (%s): three targets superseded by R, each proposal decided once", (_order, reversed) => {
+    const bottom = memories.create(autoMemory({ summary: "Oldest target T0b" }));
+    const left = contest(bottom.id, { summary: "Middle row T0a", confidence: 0.65 });
+    const top = memories.create(autoMemory({ summary: "Row T, below the bar", confidence: 0.65, supersedesMemoryId: left.candidate.id }));
+    const viaLeft = () => open("supersede", left.candidate.id, top.id);
+    const viaBottom = () => open("supersede", bottom.id, top.id);
+    const [first, second] = reversed ? [viaBottom(), viaLeft()] : [viaLeft(), viaBottom()];
+    const newest = contest(top.id, { summary: "Newest row R" });
+
+    let result: ReturnType<typeof applySupersedeResolution> | null = null;
+    expect(() => {
+      result = sweep(newest.proposalId);
+    }).not.toThrow();
+
+    // Walk order follows the hop list: the first hop supersedes its target and retires it; the recursion closes the second
+    // hop as that target's sibling (reversed: the inner P″ is the sibling), so the outer loop finds it decided and skips it.
+    const walked = reversed ? [bottom.id, left.candidate.id] : [left.candidate.id, bottom.id];
+    expect(result).toEqual({
+      replacementId: newest.candidate.id,
+      replacementActivated: true,
+      superseded: [top.id, ...walked],
+      proposalsAccepted: reversed ? [newest.proposalId, first, second] : [newest.proposalId, first, left.proposalId],
+      proposalsClosed: reversed ? [left.proposalId] : [second],
+    });
+    for (const id of [top.id, left.candidate.id, bottom.id]) {
+      expect(memories.getById(id)).toMatchObject({ status: "superseded", supersededByMemoryId: newest.candidate.id, contested: 0, openProposalId: null });
+      expect(transitions.listForMemory(id)).toEqual([expect.objectContaining({ fromStatus: "candidate", toStatus: "superseded", actor: "auto_rule" })]);
+    }
+    expect(memories.getById(newest.candidate.id)?.status).toBe("active");
+    const decided = [newest.proposalId, first, second, left.proposalId].map((id) => proposals.getById(id)!);
+    expect(decided.map((proposal) => proposal.status).sort()).toEqual(["accepted", "accepted", "accepted", "expired"]);
+    for (const proposal of decided) expect(proposal).toMatchObject({ decidedBy: "auto_rule", decisionNote: FULL_AUTONOMY_DECISION_NOTE, decidedAt: NOW });
+    expect(proposals.countOpen()).toBe(0);
+    expect(auditRows().map((row) => row.details.targetId)).toEqual([top.id, ...walked]);
   });
 
   test("a chain hop whose target is human, active or human-signal-protected closes as expired and leaves the row alone, without throwing", () => {
@@ -483,7 +649,7 @@ describe("applySupersedeResolution (design §2.2)", () => {
     const replacement = memories.create(autoMemory({ summary: "Shared replacement", knowledgeKind: "convention" }));
     const firstProposal = open("supersede", first.id, replacement.id);
     const secondProposal = open("supersede", second.id, replacement.id);
-    expect(checkSupersedeResolution(db, firstProposal)).toMatchObject({ ok: true, needsTierDecision: true });
+    expect(check(firstProposal)).toMatchObject({ ok: true, needsTierDecision: true });
 
     expect(sweep(firstProposal)).toEqual({
       replacementId: replacement.id,
@@ -493,7 +659,7 @@ describe("applySupersedeResolution (design §2.2)", () => {
       proposalsClosed: [],
     });
 
-    expect(checkSupersedeResolution(db, secondProposal)).toMatchObject({
+    expect(check(secondProposal)).toMatchObject({
       ok: true,
       needsTierDecision: false,
       candidate: { id: replacement.id, status: "active" },
@@ -523,7 +689,7 @@ describe("applySupersedeResolution (design §2.2)", () => {
   test("a human target never reaches apply through check; forced anyway, AuthorityViolationError is thrown before anything is written", () => {
     const human = memories.create(humanMemory({ summary: "Human rule" }));
     const { candidate, proposalId } = contest(human.id);
-    expect(checkSupersedeResolution(db, proposalId)).toEqual({ ok: false, reason: "target_human" });
+    expect(check(proposalId)).toEqual({ ok: false, reason: "target_human" });
 
     expect(() => sweep(proposalId)).toThrow(AuthorityViolationError);
 

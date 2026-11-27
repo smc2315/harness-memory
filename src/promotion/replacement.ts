@@ -2,32 +2,42 @@
  * Replacement resolution (0.6.0-rc.3 design §2.1–§2.2, GAP B): a `supersede` contest `P(T, R)` whose target never
  * reached the snapshot (candidate) or already left it (stale, ttl_expired) resolves on one support under `full`.
  *
- * - `checkSupersedeResolution`: §2.1 rules 1–4. The proposal is open and a `supersede`; `T` is a live auto
+ * - `checkSupersedeResolution`: §2.1 rules 1–4 and 4b. The proposal is open and a `supersede`; `T` is a live auto
  *   candidate / ttl_expired row no human defended (humanRejectedContest) whose correction / remember origin, if any,
  *   is answered by one of the proposal's own supporters (the §5.7 step 6 rule); `R` is an auto candidate — or already
  *   active, when another contest of the same run activated it — that no human declined to activate and that no open
- *   proposal of another kind parks. Rule 5, `decideTier` on `R`, is the caller's: it owns the budgets.
+ *   proposal of another kind parks. Rule 5, `decideTier` on `R`, is the caller's (it owns the budgets) and is passed in
+ *   as `passesTier`, because rule 4b needs it: when `R` is itself the target of an open contest `P′(R, R′)` that is
+ *   resolvable (rules 1–5 on `P′`, recursively, ≤ CHAIN_MAX_DEPTH), `P` is `candidate_contested` — the chain is resolved
+ *   from the correction end, so `P′`'s resolution walks `P` and `T` is superseded by `R′`, never by the contested `R`
+ *   (§2.2, §2.4). A contest on `R` that cannot resolve holds nothing (§3): `P` proceeds as if it were not there.
  * - `applySupersedeResolution`: §2.2. `decideProposal(accept, auto_rule, full_autonomy)` is the one writer of
  *   `T → superseded` and `R → active` (TTL from tierTtlDays); nothing here activates `R` a second time. Then what the
  *   dead target and the activated row leave behind is closed: `T`'s other contests (`expired`), the `supersede`
  *   proposals whose candidate is `T` (accepted when their own target passes the same target rules with their own
  *   supporters — `T0` is then superseded by `R`, never by the dead `T` — otherwise `expired`, since a proposal whose
- *   candidate is dead can be accepted by nobody), and the `activate_*` proposals on `R`. Every touched target is
+ *   candidate is dead can be accepted by nobody), and the `activate_*` proposals on `R`. Every proposal is re-read
+ *   before it is decided: a diamond (one row replacing two rows of the same chain) lets an earlier hop's recursion
+ *   close a later hop as a sibling, and that hop is then skipped instead of decided twice. Every touched target is
  *   re-flagged; one `full_supersede` audit row is written per superseded row.
+ * - `chainTargets`: the read-only twin of that walk — the rows a resolution would reach behind a target — which the
+ *   sweep holds back from its drain when a resolution throws (§2.4).
  *
  * No transaction or SAVEPOINT is opened here: the dream sweep and reconcile step 7 wrap each resolution in their own,
- * so a throw costs that resolution alone. The two literals they share with the rc.2 sweep live here so
- * `countAutoActivationsSince` (reconcile), consolidate and the tests read one definition.
+ * so a throw costs that resolution alone. The decision note and the transition reason the automatic `full` paths
+ * share live here: consolidate re-exports them, reconcile binds FULL_SWEEP_TRANSITION_REASON in
+ * `countAutoActivationsSince` (§2.5), and the tests read the same definitions. What counts as a contest is
+ * proposals.ts's CONTESTING_KINDS, the set flagTarget's `contested` flag reads.
  */
 
 import type { Database as SqlJsDatabase } from "sql.js";
 
 import { createDeterministicId, digestText } from "../core/ids";
-import type { ProposalKind } from "../core/vocabulary";
 import { ProposalRepository, type ProposalRecord } from "../db/repositories/proposals";
 import { MemoryRepository, type MemoryRecord } from "../memory/repository";
 import {
   ACTIVATION_PROPOSAL_KINDS,
+  CONTESTING_KINDS,
   decideProposal,
   flagTarget,
   humanRejectedActivation,
@@ -44,10 +54,8 @@ export const FULL_SWEEP_TRANSITION_REASON = "full_sweep";
 /** `audit_log.event_type` written once per row a resolution supersedes, chain hops included. */
 export const FULL_SUPERSEDE_AUDIT_EVENT = "full_supersede";
 
-/** Chain hops walked from one resolution (§2.2); extraction never parks replacements deeper than this. */
-const CHAIN_MAX_DEPTH = 10;
-/** Proposal kinds that contest their target; closed on a target that just died (the others may still restore it). */
-const CONTEST_KINDS: ReadonlySet<ProposalKind> = new Set<ProposalKind>(["supersede", "stale", "revalidate"]);
+/** Chain hops walked from one resolution (§2.2), followed by rule 4b and chainTargets alike; extraction never parks replacements deeper than this. */
+export const CHAIN_MAX_DEPTH = 10;
 
 export type SupersedeSkipReason =
   | "not_open"
@@ -61,7 +69,13 @@ export type SupersedeSkipReason =
   | "candidate_status"
   | "candidate_other_proposal"
   | "candidate_human_rejected"
+  | "candidate_contested"
   | "human_signal";
+
+export interface SupersedeCheckOptions {
+  /** §2.1 rule 5 as the caller judges it (decideTier with its own budgets); rule 4b asks it about the replacement of a contest on `R`. */
+  passesTier: (candidate: MemoryRecord) => boolean;
+}
 
 export type SupersedeCheck =
   | {
@@ -91,8 +105,8 @@ function targetSkipReason(db: SqlJsDatabase, proposals: ProposalRepository, targ
   return null;
 }
 
-/** §2.1 rules 1–4 (rule 5, decideTier, is the caller's). */
-export function checkSupersedeResolution(db: SqlJsDatabase, proposalId: string): SupersedeCheck {
+/** §2.1 rules 1–4 and 4b (rule 5 is `options.passesTier`, the caller's decideTier; `depth` counts the 4b recursion). */
+export function checkSupersedeResolution(db: SqlJsDatabase, proposalId: string, options: SupersedeCheckOptions, depth = 0): SupersedeCheck {
   const proposals = new ProposalRepository(db);
   const repository = new MemoryRepository(db);
   const proposal = proposals.getById(proposalId);
@@ -114,7 +128,41 @@ export function checkSupersedeResolution(db: SqlJsDatabase, proposalId: string):
   }
   if (humanRejectedActivation(proposals, candidate.id)) return { ok: false, reason: "candidate_human_rejected" };
 
+  // Rule 4b: a resolvable contest on R resolves first and settles this one through its chain walk (T is then superseded
+  // by R's replacement, never by the contested R). An unresolvable contest on R holds nothing (§3). An active R keeps the
+  // two-session rule for its own contests, so they never resolve here.
+  if (depth < CHAIN_MAX_DEPTH) {
+    for (const contest of proposals.listOpen({ kind: "supersede", targetId: candidate.id })) {
+      const inner = checkSupersedeResolution(db, contest.id, options, depth + 1);
+      if (inner.ok && (!inner.needsTierDecision || options.passesTier(inner.candidate))) return { ok: false, reason: "candidate_contested" };
+    }
+  }
+
   return { ok: true, proposal, target, candidate, needsTierDecision: candidate.status === "candidate" };
+}
+
+/**
+ * The rows a resolution's chain walk would reach behind `targetId` (read-only, nearest first): the targets of the open
+ * `supersede` proposals whose candidate is the row, then theirs, up to CHAIN_MAX_DEPTH hops, each named once. The sweep
+ * holds them back with the literal target when a resolution throws, so the retry still finds them candidates (§2.4).
+ */
+export function chainTargets(proposals: ProposalRepository, targetId: string): string[] {
+  const seen = new Set<string>([targetId]);
+  const found: string[] = [];
+  let frontier = [targetId];
+  for (let depth = 0; depth < CHAIN_MAX_DEPTH && frontier.length > 0; depth += 1) {
+    const next: string[] = [];
+    for (const id of frontier) {
+      for (const hop of proposals.listOpen({ kind: "supersede", candidateId: id })) {
+        if (seen.has(hop.targetMemoryId)) continue;
+        seen.add(hop.targetMemoryId);
+        found.push(hop.targetMemoryId);
+        next.push(hop.targetMemoryId);
+      }
+    }
+    frontier = next;
+  }
+  return found;
 }
 
 export interface ApplySupersedeInput {
@@ -190,29 +238,39 @@ export function applySupersedeResolution(db: SqlJsDatabase, input: ApplySupersed
   }
 
   for (const open of proposals.listOpen({ targetId: replacementId })) {
-    if (ACTIVATION_PROPOSAL_KINDS.has(open.kind)) expire(resolution, open.id);
+    if (ACTIVATION_PROPOSAL_KINDS.has(open.kind)) decideOnce(resolution, open.id, "expired");
   }
   flagTarget(db, replacementId, input.now);
 
   return resolution.result;
 }
 
-function expire(resolution: Resolution, proposalId: string): void {
-  resolution.proposals.decide(proposalId, { status: "expired", decidedBy: "auto_rule", note: FULL_AUTONOMY_DECISION_NOTE, now: resolution.input.now });
-  resolution.result.proposalsClosed.push(proposalId);
+/**
+ * Decides a proposal by auto_rule (full_autonomy) once: the record is re-read first, because an earlier hop's recursion
+ * may already have closed it (a diamond's second hop is a sibling of the target the first hop retired), and deciding a
+ * decided proposal throws, which would roll back the whole resolution on every run.
+ */
+function decideOnce(resolution: Resolution, proposalId: string, status: "accepted" | "expired"): void {
+  if (resolution.proposals.getById(proposalId)?.status !== "open") return;
+  resolution.proposals.decide(proposalId, { status, decidedBy: "auto_rule", note: FULL_AUTONOMY_DECISION_NOTE, now: resolution.input.now });
+  (status === "accepted" ? resolution.result.proposalsAccepted : resolution.result.proposalsClosed).push(proposalId);
 }
 
 /**
  * What a row that just died leaves behind: its other contests close (a dead row cannot be contested further), the
- * `supersede` proposals that named it as the replacement of an older row are walked, and its flags are refreshed.
- * Beyond CHAIN_MAX_DEPTH the walk stops and the remaining proposals are left as they are.
+ * `supersede` proposals that named it as the replacement of an older row are walked — each re-read first, since an
+ * earlier hop's recursion may have decided it — and its flags are refreshed. Beyond CHAIN_MAX_DEPTH the walk stops and
+ * the remaining proposals are left as they are.
  */
 function retireTarget(resolution: Resolution, targetId: string, depth: number): void {
   for (const sibling of resolution.proposals.listOpen({ targetId })) {
-    if (CONTEST_KINDS.has(sibling.kind)) expire(resolution, sibling.id);
+    if (CONTESTING_KINDS.has(sibling.kind)) decideOnce(resolution, sibling.id, "expired");
   }
   if (depth < CHAIN_MAX_DEPTH) {
-    for (const hop of resolution.proposals.listOpen({ kind: "supersede", candidateId: targetId })) walkChainHop(resolution, hop, targetId, depth + 1);
+    for (const { id } of resolution.proposals.listOpen({ kind: "supersede", candidateId: targetId })) {
+      const hop = resolution.proposals.getById(id);
+      if (hop !== null && hop.status === "open") walkChainHop(resolution, hop, targetId, depth + 1);
+    }
   }
   flagTarget(resolution.db, targetId, resolution.input.now);
 }
@@ -226,7 +284,7 @@ function walkChainHop(resolution: Resolution, hop: ProposalRecord, via: string, 
   const { db, proposals, repository, input, replacementId } = resolution;
   const target = repository.getById(hop.targetMemoryId);
   if (target === null || targetSkipReason(db, proposals, target, hop.id) !== null) {
-    expire(resolution, hop.id);
+    decideOnce(resolution, hop.id, "expired");
     if (target !== null) flagTarget(db, target.id, input.now);
     return;
   }
@@ -241,8 +299,7 @@ function walkChainHop(resolution: Resolution, hop: ProposalRecord, via: string, 
     replacementId,
     runId: input.runId ?? null,
   });
-  proposals.decide(hop.id, { status: "accepted", decidedBy: "auto_rule", note: FULL_AUTONOMY_DECISION_NOTE, now: input.now });
-  resolution.result.proposalsAccepted.push(hop.id);
+  decideOnce(resolution, hop.id, "accepted");
   recordSuperseded(resolution, target, hop.id, via);
   retireTarget(resolution, target.id, depth);
 }

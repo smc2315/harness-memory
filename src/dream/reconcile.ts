@@ -78,7 +78,7 @@ import { decideTier, enforcementDefault, type DecideTierInput } from "../promoti
 import { escalateOnReinforce } from "../promotion/escalation";
 import { ACTIVATION_PROPOSAL_KINDS, evaluateAutoDemotion, humanRejectedActivation, openOrSupportProposal } from "../promotion/proposals";
 import { citesRememberPrompt, REMEMBER_MAX_PER_EPISODE, REMEMBER_STATUS_REASON, rememberEnforcement, rememberTransitionReason } from "../promotion/remember";
-import { applySupersedeResolution, checkSupersedeResolution, type ApplySupersedeResult } from "../promotion/replacement";
+import { FULL_SWEEP_TRANSITION_REASON, applySupersedeResolution, checkSupersedeResolution, type ApplySupersedeResult } from "../promotion/replacement";
 import { revalidateMemory } from "../promotion/revalidate";
 import { adoptActiveMemory, transitionMemory } from "../promotion/transitions";
 import { scanMemoryContent } from "../security/scanner";
@@ -1251,7 +1251,9 @@ export function isKnowledgeType(type: MemoryType): boolean {
  * `rules` = pitfall / workflow / policy rows (extraction.max_auto_activations_per_day), `knowledge` = decision /
  * architecture_constraint rows (extraction.max_auto_knowledge_activations_per_day, 0.6.0-rc.2). The split keeps a
  * knowledge activation from eating the rule budget on the next run of the day. from_status <> to_status: an A′
- * escalation is recorded as active → active by auto_rule and is not an activation.
+ * escalation is recorded as active → active by auto_rule and is not an activation. Transitions whose reason is
+ * FULL_SWEEP_TRANSITION_REASON — the dream sweep's activations and resolutions — are left out, so the sweep consumes
+ * neither daily cap (0.6.0-rc.2 §1, rc.3 §2.5).
  */
 function countAutoActivationsSince(db: SqlJsDatabase, startIso: string, budget: "rules" | "knowledge"): number {
   const typeFilter = budget === "knowledge" ? `m.type IN (${KNOWLEDGE_TYPE_SQL})` : `(m.type IS NULL OR m.type NOT IN (${KNOWLEDGE_TYPE_SQL}))`;
@@ -1261,8 +1263,8 @@ function countAutoActivationsSince(db: SqlJsDatabase, startIso: string, budget: 
      FROM memory_transitions t
      LEFT JOIN memories m ON m.id = t.memory_id
      WHERE t.actor = 'auto_rule' AND t.to_status = 'active' AND t.from_status <> t.to_status AND t.created_at >= ?
-       AND (t.reason IS NULL OR t.reason <> 'full_sweep') AND ${typeFilter}`,
-    [startIso]
+       AND (t.reason IS NULL OR t.reason <> ?) AND ${typeFilter}`,
+    [startIso, FULL_SWEEP_TRANSITION_REASON]
   );
   return row === null ? 0 : Number(row.n ?? 0);
 }
@@ -1350,15 +1352,17 @@ interface ContestResolution {
 }
 
 /**
- * One `supersede` contest of step 7 (0.6.0-rc.3 §2.4, `full` only): §2.1 rules 1–4 through checkSupersedeResolution,
- * rule 5 through decideTier on the replacement as if it were not one, with the run's own caps, then
+ * One `supersede` contest of step 7 (0.6.0-rc.3 §2.4, `full` only): §2.1 rules 1–4 and 4b through
+ * checkSupersedeResolution, rule 5 through decideTier on the replacement as if it were not one, with the run's own
+ * caps (rule 4b asks the same question about the replacement of a contest on the replacement), then
  * applySupersedeResolution (source `extraction`; the default transition reason, so unlike the sweep's this
  * activation is counted against the day caps, §2.5). Null when the contest is left exactly as it is.
  */
 function resolveContest(state: RunState, proposalId: string): ContestResolution | null {
-  const check = checkSupersedeResolution(state.db, proposalId);
+  const passesTier = (candidate: MemoryRecord): boolean => decideTier(tierInputFor(state, candidate, false)).status === "active";
+  const check = checkSupersedeResolution(state.db, proposalId, { passesTier });
   if (!check.ok) return null;
-  if (check.needsTierDecision && decideTier(tierInputFor(state, check.candidate, false)).status !== "active") return null;
+  if (check.needsTierDecision && !passesTier(check.candidate)) return null;
   const result = applySupersedeResolution(state.db, {
     proposalId,
     now: state.ctx.now,
@@ -1392,11 +1396,13 @@ function recordResolutions(state: RunState, resolutions: readonly ContestResolut
 }
 
 /**
- * Step 7 for one candidate of this run. Under `full` (0.6.0-rc.3 §2.4) its open `supersede` contests come first: a
- * replacement row resolves the contests it is the replacement of and is activated by that resolution
- * (`tier=active; full_supersede=<targets>`); a plain row that is itself the target of a resolvable contest is
- * superseded instead of activated (`tier=candidate:superseded(<replacement>)`). What no resolution settles follows
- * the rc.2 path: decideTier, the human-rejected guard, the activation or the review proposal.
+ * Step 7 for one candidate of this run. Under `full` (0.6.0-rc.3 §2.4) its open `supersede` contests come first, the
+ * contests on the row itself before the contests it is the replacement of (§2.1 rule 4b, every candidate row alike):
+ * a row that is the target of a resolvable contest is superseded instead of activated
+ * (`tier=candidate:superseded(<replacement>)`) — a replacement row too, so a contradicted middle row never activates
+ * through its own contest; otherwise a replacement row resolves the contests it is the replacement of and is activated
+ * by that resolution (`tier=active; full_supersede=<targets>`). What no resolution settles follows the rc.2 path:
+ * decideTier, the human-rejected guard, the activation or the review proposal.
  */
 function decideTierOf(state: RunState, memoryId: string): void {
   const { config } = state.ctx;
@@ -1408,11 +1414,13 @@ function decideTierOf(state: RunState, memoryId: string): void {
   const outcome = tierOutcomeFor(state, memory.id);
 
   if (config.autonomy_level === "full") {
-    const resolutions = resolveContests(state, isReplacementRow ? { candidateId: memory.id } : { targetId: memory.id });
+    const onRow = resolveContests(state, { targetId: memory.id });
+    const asReplacement = onRow.length === 0 && isReplacementRow ? resolveContests(state, { candidateId: memory.id }) : [];
+    const resolutions = onRow.length > 0 ? onRow : asReplacement;
     const first = resolutions[0];
     if (first !== undefined) {
       recordResolutions(state, resolutions);
-      if (isReplacementRow) {
+      if (onRow.length === 0) {
         if (outcome !== undefined) {
           if (outcome.outcome === "created" || outcome.outcome === "reinforced") outcome.outcome = "activated";
           outcome.proposal_id = first.proposalId;
