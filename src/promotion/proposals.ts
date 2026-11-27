@@ -11,6 +11,8 @@
  *   Rejecting a `revalidate` answers the TTL question like the proposal's expiry would: stale(ttl_expired).
  * - `evaluateAutoDemotion`: the §5.7 step 6 rule that lets two sessions demote an auto row.
  * - `expireProposals`: open → expired; an expired `revalidate` sends its auto row to stale(ttl_expired).
+ * - `targetOriginHasHumanSignal` / `supportersCarryHumanSignal` / `humanRejectedContest` / `flagTarget`: the rules the
+ *   auto demotion shares with the 0.6.0-rc.3 replacement resolution (design §2.1), exported so both read one definition.
  */
 
 import type { Database as SqlJsDatabase } from "sql.js";
@@ -31,7 +33,8 @@ import { EpisodeRepository } from "../db/repositories/episodes";
 import { ProposalRepository, type ProposalRecord, type ProposalSupportRecord } from "../db/repositories/proposals";
 import { ProvenanceRepository } from "../db/repositories/provenance";
 import { InvalidMemoryTransitionError, MemoryRepository, type MemoryRecord } from "../memory/repository";
-import { TASK_HORIZON_TTL_DAYS, addDays, baseTtlDays, midpointIso, revalidateMemory } from "./revalidate";
+import { tierTtlDays } from "./authority";
+import { addDays, midpointIso, revalidateMemory } from "./revalidate";
 import { transitionMemory } from "./transitions";
 
 export const RECENT_REJECT_SKIP_DAYS = 30;
@@ -50,6 +53,17 @@ export function humanRejectedActivation(proposals: ProposalRepository, memoryId:
   return proposals
     .listForMemory(memoryId, { status: "rejected" })
     .some((proposal) => ACTIVATION_PROPOSAL_KINDS.has(proposal.kind) && proposal.decidedBy === "human" && proposal.targetMemoryId === memoryId);
+}
+
+/**
+ * 0.6.0-rc.3 (design §2.1 rule 2): true when a human rejected a `supersede` / `stale` proposal whose literal target is
+ * this row. The replacement resolution then leaves the row alone for good — a claim a human declined is never enacted
+ * by the automatic path (design §7). Only `decided_by = 'human'` counts: the automatic paths close proposals as `expired`.
+ */
+export function humanRejectedContest(proposals: ProposalRepository, targetId: string): boolean {
+  return proposals
+    .listDecided({ targetId, status: "rejected" })
+    .some((proposal) => (proposal.kind === "supersede" || proposal.kind === "stale") && proposal.decidedBy === "human");
 }
 
 export type ProposalNotApplicableCode = "payload_missing" | "candidate_not_live";
@@ -133,10 +147,17 @@ export interface OpenOrSupportResult {
   skipped: "recent_reject" | null;
 }
 
-/** Proposal kinds that contradict the target row; the others (activation, scope / signature fixes) only wait on a review. */
-const CONTESTING_KINDS: ReadonlySet<string> = new Set(["supersede", "stale", "revalidate"]);
+/**
+ * Proposal kinds that contradict the target row; the others (activation, scope / signature fixes) only wait on a review.
+ * The one definition of "a contest": flagTarget's `contested` flag and the replacement resolution's sibling closure read it.
+ */
+export const CONTESTING_KINDS: ReadonlySet<ProposalKind> = new Set<ProposalKind>(["supersede", "stale", "revalidate"]);
 
-function flagTarget(db: SqlJsDatabase, targetId: string, now: string): void {
+/**
+ * Refreshes `open_proposal_id` / `contested` on a target from its open proposals, keeping the proposal the row already
+ * names while it stays open. Shared with the 0.6.0-rc.3 replacement resolution, which refreshes every target it touches.
+ */
+export function flagTarget(db: SqlJsDatabase, targetId: string, now: string): void {
   const repository = new MemoryRepository(db, { clock: () => now });
   const target = repository.getById(targetId);
   if (target === null) return;
@@ -216,6 +237,12 @@ export interface DecideProposalInput {
   /** Actor written to memory_transitions; defaults to the decider. */
   actorForTransition?: TransitionActor;
   runId?: string | null;
+  /**
+   * memory_transitions.reason for every transition this decision makes (default `proposal:<kind>`; the reject paths keep
+   * their `proposal:<kind> rejected`). The dream sweep passes `full_sweep` so countAutoActivationsSince keeps excluding
+   * its activations from the daily caps (0.6.0-rc.3 §2.5); extraction-time resolutions keep the default and are counted.
+   */
+  transitionReason?: string;
 }
 
 export interface DecideProposalResult {
@@ -236,7 +263,9 @@ function isLive(status: MemoryRecord["status"]): boolean {
 /**
  * Applies a decision with its side effects (§7.5):
  * - supersede → target superseded by the candidate; the candidate row is promoted (human decisions make it human);
- *   a candidate that is no longer live (rejected / superseded) cannot replace anything → ProposalNotApplicableError
+ *   a candidate that is no longer live (rejected / superseded) cannot replace anything → ProposalNotApplicableError.
+ *   By `auto_rule` the target may be active, candidate or stale(ttl_expired) (0.6.0-rc.3 §2.6 edges); a human-demoted
+ *   stale target throws InvalidMemoryTransitionError from transitionMemory before anything is written
  * - stale → target stale
  * - activate_policy / activate_global → target active with authority human (human decider only)
  * - fix_scope / fix_signature → payload applied through setScope, needs_scope cleared (human → setAuthority human);
@@ -260,7 +289,7 @@ export function decideProposal(db: SqlJsDatabase, input: DecideProposalInput): D
   const remember = (memory: MemoryRecord | null): void => {
     if (memory !== null) touched.set(memory.id, memory);
   };
-  const reason = `proposal:${proposal.kind}`;
+  const reason = input.transitionReason ?? `proposal:${proposal.kind}`;
   const target = repository.getById(proposal.targetMemoryId);
   const candidate = proposal.candidateMemoryId === null ? null : repository.getById(proposal.candidateMemoryId);
 
@@ -313,9 +342,9 @@ export function decideProposal(db: SqlJsDatabase, input: DecideProposalInput): D
                 runId: input.runId ?? null,
               });
               if (actor === "auto_rule") {
-                // A `task`-horizon replacement gets the same 7-day ceiling every other activation path gives it (design §2).
-                const days = promoted.horizon === "task" ? TASK_HORIZON_TTL_DAYS : baseTtlDays(promoted.knowledgeKind);
-                const ttl = addDays(input.now, days);
+                // The TTL every other activation path gives the row (0.6.0-rc.3 §2.7): the 7-day ceiling for a `task`
+                // horizon, KNOWLEDGE_TTL_DAYS for a decision / architecture_constraint, baseTtlDays(kind) otherwise.
+                const ttl = addDays(input.now, tierTtlDays(promoted.knowledgeKind, promoted.horizon, promoted.type));
                 remember(repository.setTtl(candidate.id, { ttlExpiresAt: ttl, revalidateAfter: midpointIso(input.now, ttl), validationCount: Math.max(0, promoted.evidenceCount - 1), updatedAt: input.now }));
               } else {
                 remember(promoted);
@@ -425,7 +454,16 @@ export function decideProposal(db: SqlJsDatabase, input: DecideProposalInput): D
       }
     }
   } else if (proposal.kind === "supersede" && candidate !== null && candidate.status === "candidate" && input.decidedBy === "human") {
-    remember(transitionMemory(db, { memoryId: candidate.id, to: "rejected", actor: "human", reason: "proposal:supersede rejected", now: input.now, proposalId: proposal.id }));
+    remember(
+      transitionMemory(db, {
+        memoryId: candidate.id,
+        to: "rejected",
+        actor: "human",
+        reason: input.transitionReason ?? "proposal:supersede rejected",
+        now: input.now,
+        proposalId: proposal.id,
+      })
+    );
     effects.push("replacement:rejected");
   } else if (proposal.kind === "revalidate" && target !== null && target.status === "active") {
     // §5.8 (2): the proposal asks "confirm the memory still holds or let it go stale"; a reject is the second
@@ -439,7 +477,7 @@ export function decideProposal(db: SqlJsDatabase, input: DecideProposalInput): D
           memoryId: target.id,
           to: "stale",
           actor: staleActor,
-          reason: "proposal:revalidate rejected",
+          reason: input.transitionReason ?? "proposal:revalidate rejected",
           now: input.now,
           proposalId: proposal.id,
           statusReason: target.authority === "auto" ? "ttl_expired" : undefined,
@@ -470,6 +508,11 @@ export interface AutoDemotionInput {
   proposalId: string;
   now: string;
   runId?: string | null;
+  /**
+   * memory_transitions.reason of the decision's transitions (default decideProposal's `proposal:<kind>`); the dream
+   * sweep passes `full_sweep` so its activations stay out of the daily caps (0.6.0-rc.3 §2.5).
+   */
+  transitionReason?: string;
 }
 
 export interface AutoDemotionResult {
@@ -483,9 +526,33 @@ function hasHumanSignalFlags(flags: EpisodeFlags): boolean {
 }
 
 /**
+ * The §5.7 step 6 human-signal rule, target side (0.6.0-rc.3 §2.1 rule 3): true when an `origin` episode of the row
+ * carries `correction` or `remember` — the row is the user's own words, so an agent's claim alone may not demote or
+ * replace it. Reinforcing episodes do not count: they say the row was confirmed, not where it came from.
+ */
+export function targetOriginHasHumanSignal(db: SqlJsDatabase, memoryId: string): boolean {
+  const episodes = new EpisodeRepository(db);
+  return new ProvenanceRepository(db)
+    .listForMemory(memoryId)
+    .filter((row) => row.relation === "origin")
+    .some((row) => {
+      const episode = episodes.getById(row.episodeId);
+      return episode !== null && hasHumanSignalFlags(episode.flags);
+    });
+}
+
+/** The supporter side of the same rule: one supporter with has_human_signal or deterministic answers a human-signal origin. */
+export function supportersCarryHumanSignal(supports: readonly ProposalSupportRecord[]): boolean {
+  return supports.some((row) => row.hasHumanSignal === 1 || row.deterministic === 1);
+}
+
+/**
  * §5.7 step 6 auto demotion: type ≠ policy ∧ support_sessions ≥ 2 ∧ (when the target's origin episode
  * was a correction / remember episode, one supporter must carry has_human_signal or deterministic)
- * ∧ target active ∧ authority auto → accept by auto_rule. Human targets only get the proposal.
+ * ∧ target active ∧ authority auto → accept by auto_rule. Human targets only get the proposal, and a claim a human
+ * declined is never enacted (0.6.0-rc.3 design §7, under every level): a `supersede` / `stale` on the target a human
+ * rejected (`target_human_rejected`) or a rejected `activate_*` on the replacement (`candidate_human_rejected`) holds
+ * the proposal open however many sessions support it.
  */
 export function evaluateAutoDemotion(db: SqlJsDatabase, input: AutoDemotionInput): AutoDemotionResult {
   const proposals = new ProposalRepository(db);
@@ -498,6 +565,10 @@ export function evaluateAutoDemotion(db: SqlJsDatabase, input: AutoDemotionInput
   if (target.authority !== "auto") return { applied: false, reason: "human_target" };
   if (target.type === "policy") return { applied: false, reason: "policy" };
   if (target.status !== "active") return { applied: false, reason: `status:${target.status}` };
+  if (humanRejectedContest(proposals, target.id)) return { applied: false, reason: "target_human_rejected" };
+  if (proposal.kind === "supersede" && proposal.candidateMemoryId !== null && humanRejectedActivation(proposals, proposal.candidateMemoryId)) {
+    return { applied: false, reason: "candidate_human_rejected" };
+  }
   if (proposal.supportSessions < AUTO_DEMOTION_MIN_SESSIONS) return { applied: false, reason: "support_sessions" };
   if (proposal.kind === "supersede" && proposal.candidateMemoryId !== null) {
     // A replacement that expired or was rejected while the proposal gathered support cannot take the target's place.
@@ -505,17 +576,7 @@ export function evaluateAutoDemotion(db: SqlJsDatabase, input: AutoDemotionInput
     if (candidate !== null && !isLive(candidate.status)) return { applied: false, reason: "candidate_not_live" };
   }
 
-  const supports: ProposalSupportRecord[] = proposals.listSupport(proposal.id);
-  const originEpisodeIds = new ProvenanceRepository(db)
-    .listForMemory(target.id)
-    .filter((row) => row.relation === "origin")
-    .map((row) => row.episodeId);
-  const episodes = new EpisodeRepository(db);
-  const originFromHumanSignal = originEpisodeIds.some((episodeId) => {
-    const episode = episodes.getById(episodeId);
-    return episode !== null && hasHumanSignalFlags(episode.flags);
-  });
-  if (originFromHumanSignal && !supports.some((row) => row.hasHumanSignal === 1 || row.deterministic === 1)) {
+  if (targetOriginHasHumanSignal(db, target.id) && !supportersCarryHumanSignal(proposals.listSupport(proposal.id))) {
     return { applied: false, reason: "origin_human_signal_unmatched" };
   }
 
@@ -525,6 +586,7 @@ export function evaluateAutoDemotion(db: SqlJsDatabase, input: AutoDemotionInput
     accept: true,
     now: input.now,
     note: `auto demotion: ${String(proposal.supportSessions)} sessions`,
+    transitionReason: input.transitionReason,
     runId: input.runId ?? null,
   });
   return { applied: true, reason: "accepted", decision };

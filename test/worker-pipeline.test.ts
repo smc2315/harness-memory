@@ -25,7 +25,7 @@ import { ExtractionRunRepository } from "../src/db/repositories/runs";
 import { buildEpisodeDescriptor } from "../src/dream/episode";
 import { createReplayProvider, type ExtractionProvider, type ProbeOutcome, type ProviderResult } from "../src/dream/extract/providers";
 import { appendLedgerLine } from "../src/dream/ledger";
-import { composeStore, importTextFile, isEpisodeDescriptor, readEpisodeLines, rememberImportText, runWorker, silentWorkerLogger, type WorkerOptions } from "../src/dream/worker";
+import { composeStore, importTextFile, isEpisodeDescriptor, readEpisodeLines, rememberImportText, runWorker, silentWorkerLogger, type WorkerLogger, type WorkerOptions } from "../src/dream/worker";
 import { MemoryRepository } from "../src/memory/repository";
 import { assistantLine, loadLedgerFixture, promptLine, withOffsets } from "./helpers/ledger-fixture";
 import { autoMemory } from "./helpers/memory-fixtures";
@@ -116,13 +116,15 @@ describe("worker extract", () => {
   test("queue file → two lock sessions → active memory, snapshot, write_ops; reruns are idempotent", async () => {
     const descriptor = queueEpisode(s01);
     const provider = createReplayProvider({ answers: { [descriptor.id]: outputFixture([factFixture({ evidence_refs: ["e1"] })]) } });
-    const result = await worker({ provider });
+    const lines: Array<{ event: string; fields: Record<string, unknown> }> = [];
+    const logger: WorkerLogger = { ...silentWorkerLogger, line: (event, fields = {}) => void lines.push({ event, fields }) };
+    const result = await worker({ provider, logger });
 
     expect(result.exitCode).toBe(0);
     expect(result.busy).toBe(false);
     expect(result.inserted).toBe(1);
     expect(result.processed).toHaveLength(1);
-    expect(result.processed[0]).toMatchObject({ episodeId: descriptor.id, status: "ok", fromCache: false, created: [expect.any(String)], activated: [expect.any(String)] });
+    expect(result.processed[0]).toMatchObject({ episodeId: descriptor.id, status: "ok", fromCache: false, created: [expect.any(String)], activated: [expect.any(String)], superseded: [] });
     expect(readdirSync(paths.queueDir)).toEqual([]);
     expect(existsSync(paths.workerPid)).toBe(false);
     expect(existsSync(paths.workerLock)).toBe(false);
@@ -131,6 +133,23 @@ describe("worker extract", () => {
     expect(existsSync(paths.snapshotLexical)).toBe(true);
     const runId = extractionRunId(descriptor.id);
     expect(existsSync(rawFile(paths, runId))).toBe(true);
+    // The worker.log `reconciled` line carries the report's counts — the targets step 7 superseded included (0.6.0-rc.3 §2.4).
+    expect(lines.filter((entry) => entry.event === "reconciled").map((entry) => entry.fields)).toEqual([
+      {
+        episode: descriptor.id,
+        run: runId,
+        status: "ok",
+        facts: 1,
+        accepted: 1,
+        created: 1,
+        activated: 1,
+        superseded: 0,
+        proposals: 0,
+        escalated: 0,
+        remembered: 0,
+        noop: false,
+      },
+    ]);
 
     const store = composeStore({ paths, config, logger: silentWorkerLogger, clock });
     await store.read((db) => {
@@ -780,7 +799,9 @@ describe("worker reindex and dream", () => {
     expect(result.dream?.errors).toEqual([]);
     // rc.2: the full sweep ran (default level is full) and found no candidate left to drain after the extraction.
     expect(result.dream?.sweptActivated).toEqual([]);
+    expect(result.dream?.sweptSuperseded).toEqual([]);
     expect(result.dream?.sweptProposalsClosed).toEqual([]);
+    expect(result.dream?.sweptErrors).toEqual([]);
     expect(result.snapshotBuilt).toBe(true);
     const store = composeStore({ paths, config, logger: silentWorkerLogger, clock });
     await store.read((db) => {

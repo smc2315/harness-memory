@@ -12,8 +12,15 @@ For anyone with an existing `.harness-memory/memory.sqlite` written by 0.3–0.5
 | Candidates | `DreamWorker` template candidates + LLM candidates, all `**/*` + `before_model` | validated facts with scope, triggers and a trigger signature; no templates |
 | Promotion | 5-gate auto-promoter + `memory:review` | `authority` (human / auto), `decideTier`, proposals, `hm review` |
 | `before_tool` | scope glob only; warnings arrived with the tool result | tool + argument signature; `permissionDecision ask / deny` before execution |
-| Database | `user_version` 9–16 | `user_version` 23 (migrations 017–023), backups `memory.sqlite.bak-v<N>` |
+| Database | `user_version` 9–16 | `user_version` 24 (migrations 017–024), backups `memory.sqlite.bak-v<N>` |
 | Embeddings | installed by default | optional (`hm install --with-embeddings`), idle-exit helper |
+
+## Upgrading from 0.6.0-rc.2 to 0.6.0-rc.3
+
+- Migration 024 (`user_version` 24, backup `memory.sqlite.bak-v23`) relabels stored auto rows whose `correction` / `failure_resolution` label has no correction, remember or failure signal behind it to `convention` (`docs/redesign/full-autonomy-0.6.0-rc.3.md` §1.2) — 22 rows on the author's dogfood database; no TTL is shortened and no status changes. `hm install --host claude` (the upgrade step below) runs it.
+- Under `full`, the next `dream` runs lift the two kinds of rows rc.2 left parked for good: rule rows born from decision-only episodes activate at `advise` with a 7-day TTL, and a one-support `supersede` contest on a candidate target resolves — the target is superseded and the correction activated (`accepted by auto_rule (full_autonomy)` in `hm memory:history <id>`). On the dogfood database that is 14 rule rows and 4 of 7 contests after one `dream`; the `hm dream` line reports them as `full sweep: activated N, superseded N, proposals closed N, errors N`.
+- The two-session rule — the one that supersedes an *active* auto row — now counts `(session, 4-hour block)` pairs as the rc.2 ladder does and refuses a claim you rejected (`target_human_rejected` / `candidate_human_rejected`), under every `autonomy_level`. Nothing else changes under `standard`, `shadow` or `off`.
+- `EXTRACTOR_VERSION` stays 2026.11.v2: episodes already extracted are not re-run. The new `knowledge_kind` rule applies to new extractions, and to stored rows through migration 024.
 
 ## Upgrading from 0.6.0-rc.1 to 0.6.0-rc.2
 
@@ -31,11 +38,11 @@ For anyone with an existing `.harness-memory/memory.sqlite` written by 0.3–0.5
 ## Upgrade steps (Claude Code)
 
 ```bash
-# 0.6.0-rc.2 is a GitHub pre-release, not on npm yet: plain `npm install -g harness-memory` still installs 0.5.1
-npm install -g https://github.com/smc2315/harness-memory/releases/download/v0.6.0-rc.2/harness-memory-0.6.0-rc.2.tgz
+# 0.6.0-rc.3 is a GitHub pre-release, not on npm yet: plain `npm install -g harness-memory` still installs 0.5.1
+npm install -g https://github.com/smc2315/harness-memory/releases/download/v0.6.0-rc.3/harness-memory-0.6.0-rc.3.tgz
 #   (once published: npm install -g harness-memory@next; or update the project devDependency the same way)
 cd <project>
-hm install --host claude                   # migrates memory.sqlite → v23 (backup first), builds the snapshot, registers 9 hooks
+hm install --host claude                   # migrates memory.sqlite → v24 (backup first), builds the snapshot, registers 9 hooks
 hm doctor                                  # every check OK / WARN / FAIL
 hm review                                  # fix_scope proposals for legacy rows, merge proposals for duplicates
 ```
@@ -52,7 +59,7 @@ Optional but recommended: `hm import --from CLAUDE.md`. v0.5's `install` importe
 
 ## What the migrations do
 
-All seven files run on a fresh connection without a surrounding transaction (017 and 021 toggle `PRAGMA foreign_keys`); atomicity comes from applying them in memory and saving via tmp + rename. `PRAGMA user_version` is set after each file; a database already at 23 is untouched, and a database newer than 23 makes the CLI refuse with "upgrade harness-memory".
+All eight files run on a fresh connection without a surrounding transaction (017 and 021 toggle `PRAGMA foreign_keys`); atomicity comes from applying them in memory and saving via tmp + rename. `PRAGMA user_version` is set after each file; a database already at 24 is untouched, and a database newer than 24 makes the CLI refuse with "upgrade harness-memory".
 
 | # | file | effect |
 |---|---|---|
@@ -63,6 +70,7 @@ All seven files run on a fresh connection without a surrounding transaction (017
 | 021 | `021_legacy_archive.sql` | Renames `dream_evidence_events`, `dream_runs`, `dream_memory_evidence_links` to `legacy_*`; marks unconsumed legacy evidence `discarded` (it is **not** re-extracted — those blobs have no tool set or scope refs, and re-extraction would burn a day of LLM budget for nothing); drops the never-populated `topic_summaries`. The `evidence` table stays for manual notes. |
 | 022 | `022_episode_summaries.sql` | Adds `summary` (one line, ≤ 400 chars) and `summary_kind` (`extracted` = the extractor's `episode_summary`, `derived` = the worker's deterministic summary built from the descriptor and ledger lines) to `episodes` for the recall layer (`recall.enabled`, off by default). No backfill: episodes closed before the upgrade keep `NULL` and are invisible to `hm recall` until re-queued. |
 | 023 | `023_signature_precision.sql` | Adds `signature_precision` (`mistake_exact` / `noun`), `side_effect` (`read` / `write`) and `horizon` (`durable` / `task`) to `memories` for the full-autonomy rules (`docs/redesign/full-autonomy-0.6.0-rc.2.md`). All NULL for existing rows: a NULL precision counts as `noun`, so no pre-023 row can be born at or escalated to `soft_deny` by the new rule without a re-extraction. |
+| 024 | `024_knowledge_kind_signal.sql` | Relabels stored auto rows whose `knowledge_kind` is `correction` / `failure_resolution` but whose evidence episodes (`origin` / `reinforce` provenance) carry no correction, remember or failure flag and no `correction_for` to `convention` (`docs/redesign/full-autonomy-0.6.0-rc.3.md` §1.2): the label, not the episode, was giving them the 30-day TTL, the `revalidate` grace and the ladder. Human rows, imports and rows without provenance are untouched; no `ttl_expires_at` is shortened — the relabel changes what happens at expiry, not when. Backup `memory.sqlite.bak-v23`. |
 
 **Post-migrate** (same lock session, idempotent through `meta.semantic_key_backfill`): (1) v0.5 `DreamWorker` template candidates — `status = 'candidate'` rows linked from `legacy_dream_memory_evidence_links` — are `rejected` with `status_reason = migration` and a `memory_transitions` row; (2) every live row gets a `semantic_key` (`sha256(type | scope | signature | normalized summary)`); when two live rows collide, the oldest keeps the key and a `merge` proposal (30 days) is opened for the pair.
 
@@ -105,8 +113,9 @@ On the author's real v0.5 databases: v9 (13 memories, 142 evidence rows, 75 lega
 
 `hm uninstall --purge` keeps the `memory.sqlite.bak-v<N>` files for the same reason.
 
-## Known gaps (0.6.0-rc.2)
+## Known gaps (0.6.0-rc.3)
 
 - Live `claude -p` extraction has run in two synthetic sessions only (six calls on the `sonnet` alias; see docs/redesign/phase-e-notes.md); the replay provider covers the tests; the first dogfood run (17 days, one Java/Spring project, Claude Code on WSL) is summarised in CHANGELOG.md and docs/redesign/full-autonomy-0.6.0-rc.2.md. The first live probe failed with `api 404` because the interactive default model was a gateway id — the claude provider now passes `--model sonnet` unless `extraction.model` is set, and such failures show as `probe provider_error` with the API message. Report any probe result other than `ok` / `not_logged_in` with `hm doctor --json`.
 - Exec-form hooks are written when `claude --version` ≥ 2.1.139 or unknown; the minimum is inferred from release mirrors. If Claude Code reports hook errors on every call, re-run `hm install --host claude --hook-form shell`.
 - `fix_scope` proposals carry their payload (scope, triggers, signature) in the proposal rationale; the interactive editor for it is part of `hm review` (Phase C).
+- A `supersede` cycle (two rows each proposed as the other's replacement) is not resolved automatically: both rows wait for the proposals' 30-day expiry (`docs/redesign/full-autonomy-0.6.0-rc.3.md` §3). A `stale` claim against a candidate target has no automatic resolution either: it applies once the target is active, or expires.

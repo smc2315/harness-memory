@@ -199,3 +199,28 @@ export function laterIso(left: string | null, right: string): string {
 export function correctionEpisodeSql(alias: string): string {
   return `(${alias}.correction_for IS NOT NULL OR ${alias}.flags_json LIKE '%"correction":1%')`;
 }
+
+/**
+ * SQL predicate marking a decision episode: its prompt carried the decision flag (same compact JSON form as above).
+ * Read by `ProvenanceRepository.hasDecisionOrigin`, the origin-only marker `decideTier` counts under `full` (rc.3 §1.1).
+ */
+export function decisionEpisodeSql(alias: string): string {
+  return `${alias}.flags_json LIKE '%"decision":1%'`;
+}
+
+/** Width of the `(session_id, block of episodes.started_at)` pair the block-aligned session counters count (rc.2 §4). */
+export const SESSION_BLOCK_HOURS = 4;
+const SESSION_BLOCK_SECONDS = SESSION_BLOCK_HOURS * 60 * 60;
+
+/**
+ * Session-block key of the episode joined as `episodeAlias`: `<session_id>/<floor(unix(started_at) / 4h)>`. The
+ * division sits inside the CAST on purpose: SQLite binds `||` tighter than `/`, so `a || '/' || x / n` would divide the
+ * concatenated text. An unparseable `started_at` makes the block NULL and the key falls back to the session id (one
+ * block per session); a missing episode row (LEFT JOIN miss) falls back to `fallback`, the caller's own column. Shared
+ * by `distinct_session_count` (memories) and `support_sessions` (proposals) so both ladders count the same sessions.
+ */
+export function sessionBlockKeySql(episodeAlias: string, fallback: string): string {
+  const block = `CAST(strftime('%s', ${episodeAlias}.started_at) / ${String(SESSION_BLOCK_SECONDS)} AS INTEGER)`;
+
+  return `COALESCE(${episodeAlias}.session_id || '/' || ${block}, ${episodeAlias}.session_id, ${fallback})`;
+}

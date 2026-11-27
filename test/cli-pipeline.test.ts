@@ -11,16 +11,18 @@ import type { MemoryListReport } from "../src/cli/commands/memory-list";
 import type { MemoryWhyReport } from "../src/cli/commands/memory-why";
 import type { QueueListReport, QueueMutationReport, QueueShowReport } from "../src/cli/commands/queue";
 import type { TraceReport } from "../src/cli/commands/trace";
+import { renderDreamReport, renderWorkerResult } from "../src/cli/lib/worker-run";
 import { createSessionState, writeQueueFile, writeSessionState } from "../src/adapters/session-state";
 import type { EpisodeDescriptor } from "../src/core/episode-types";
 import type { LedgerLine } from "../src/core/ledger-types";
 import { ledgerFile, queueFile, sessionKey, stateFile } from "../src/core/paths";
 import { EpisodeRepository } from "../src/db/repositories/episodes";
+import type { DreamReport } from "../src/dream/consolidate";
 import { buildEpisodeDescriptor } from "../src/dream/episode";
 import { buildExtractionPrompt } from "../src/dream/extract/prompt";
 import { createReplayProvider } from "../src/dream/extract/providers";
 import { appendLedgerLine } from "../src/dream/ledger";
-import type { WorkerResult } from "../src/dream/worker";
+import type { ProcessedEpisode, WorkerResult } from "../src/dream/worker";
 import { MemoryRepository } from "../src/memory/repository";
 import { createCliProject, runHm, type CliProject } from "./helpers/cli-run";
 import { CLI_NOW, clockOptions, readProject, seedProject } from "./helpers/cli-seed";
@@ -155,7 +157,7 @@ describe("hm extract / hm dream", () => {
     expect(result.command).toBe("extract");
     expect(result.inserted).toBe(1);
     expect(result.processed).toHaveLength(1);
-    expect(result.processed[0]).toMatchObject({ episodeId: descriptor.id, status: "ok", created: [expect.any(String)], activated: [expect.any(String)] });
+    expect(result.processed[0]).toMatchObject({ episodeId: descriptor.id, status: "ok", created: [expect.any(String)], activated: [expect.any(String)], superseded: [] });
     expect(existsSync(queueFile(project.paths, descriptor.id))).toBe(false);
     const memories = (await runHm(project, ["memory:list", "--json"])).json<MemoryListReport>();
     expect(memories.memories).toHaveLength(1);
@@ -200,6 +202,66 @@ describe("hm extract / hm dream", () => {
     expect(result.dream!.staled).toHaveLength(1);
     const text = await runHm(project, ["dream"], clockOptions(CLI_NOW, { seams: { provider: null } }));
     expect(text.stdout).toContain("dream:");
+  });
+
+  test("renderDreamReport counts the full sweep's activations, supersedes, closed proposals and per-row errors on one line", () => {
+    const report: DreamReport = {
+      ttlExtended: [],
+      downgraded: [],
+      revalidateProposals: [],
+      staled: ["m-stale"],
+      rejectedCandidates: [],
+      expiredProposals: [],
+      staledByExpiry: [],
+      mergeProposals: [],
+      fixSignatureProposals: [],
+      sweptActivated: ["m-replacement", "m-plain"],
+      sweptSuperseded: ["m-target"],
+      sweptProposalsClosed: ["p-activate"],
+      sweptErrors: ["resolution p-contest: simulated write failure"],
+      embedded: 0,
+      idleClosed: [],
+      gc: { ledgers: 0, states: 0, raw: 0, tmp: 0, audit: 0 },
+      errors: ["ttl: disk full"],
+    };
+    const lines = renderDreamReport(report);
+    expect(lines[0]).toContain("staled 1");
+    expect(lines[3]).toBe("  full sweep: activated 2, superseded 1, proposals closed 1, errors 1");
+    expect(lines.slice(4)).toEqual(["  error: ttl: disk full"]);
+  });
+
+  test("renderWorkerResult prints one line per processed episode: created, activated, superseded (0.6.0-rc.3 §2.4), proposals, outcomes, then the non-zero ladder / remember counts", () => {
+    const episode: ProcessedEpisode = {
+      episodeId: "ep1a2b3c4d5e6f7a8b9c",
+      runId: "run9f8e7d6c5b4a3b2c1",
+      status: "ok",
+      fromCache: true,
+      op: { id: "run9f8e7d6c5b4a3b2c1", kind: "extract", noop: false, wrote: true },
+      outcomes: 3,
+      created: ["m-replacement"],
+      activated: ["m-replacement"],
+      superseded: ["m-target"],
+      proposals: [],
+      escalated: ["m-ladder"],
+      remembered: [],
+    };
+    const result: WorkerResult = {
+      command: "extract",
+      exitCode: 0,
+      busy: false,
+      loops: 1,
+      inserted: 1,
+      processed: [episode],
+      skipped: [],
+      waiting: null,
+      dream: null,
+      snapshotBuilt: false,
+      errors: [],
+    };
+    expect(renderWorkerResult(result, "replay")).toEqual([
+      "extract: provider replay; inserted 1 episode from queue, processed 1 run, skipped 0, loops 1",
+      "  episode ep1a2b3c run run9f8e7 ok (raw cache): created 1, activated 1, superseded 1, proposals 0, outcomes 3, escalated 1",
+    ]);
   });
 });
 

@@ -1,7 +1,7 @@
 /**
  * A′ ladder and remember-as-human helpers (src/promotion/escalation.ts, src/promotion/remember.ts): the pure
  * decisions as a table, the notice text the SessionStart hook renders, and the database-level escalation
- * (enforcement, history transition, audit row, downgrade / session-age lookups) on a fresh v23 database.
+ * (enforcement, history transition, audit row, downgrade / session-age lookups) on a fresh v24 database.
  * 0.6.0-rc.2: the ladder runs under `standard` and `full` and adds two gates — signature_precision must be
  * `mistake_exact` (null / noun never climb) and a `task` horizon never exceeds advise.
  */

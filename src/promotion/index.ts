@@ -7,6 +7,7 @@ export {
   ACTIVATION_MIN_CONFIDENCE,
   ACTIVATION_MIN_EVIDENCE,
   FULL_ACTIVATION_MIN_EVIDENCE,
+  FULL_DECISION_MARKER_EVIDENCE,
   KNOWLEDGE_TTL_DAYS,
   SILENT_WRITE_MIN_EVIDENCE,
   TASK_TTL_DAYS,
@@ -51,6 +52,8 @@ export {
 } from "./revalidate";
 // Proposals (Phase B1): open/support, human and auto decisions, auto-demotion evaluation, expiry.
 export * from "./proposals";
+// 0.6.0-rc.3 (design §2): replacement resolution — a supersede contest against a candidate / ttl_expired target.
+export * from "./replacement";
 // A′: the autonomy ladder (advise → soft_deny on a second session's reinforce) and remember-as-human helpers.
 export * from "./escalation";
 export * from "./remember";

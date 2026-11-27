@@ -13,6 +13,10 @@
  * never saw reinforcement. The same fact coming back ≥ 4 hours later in the same session now counts as another
  * block. Provenance rows whose episode is unknown (import bullets such as `import:CLAUDE.md`) keep counting once
  * per episode id, as before.
+ *
+ * `hasDecisionOrigin(memoryId)` (0.6.0-rc.3 §1.1) answers `decideTier`'s `originDecisionMarker`: whether the row's
+ * origin episode carried the decision flag. Origin only, so a legacy row reinforced once by a decision-only episode
+ * stays a candidate.
  */
 
 import type { Database as SqlJsDatabase } from "sql.js";
@@ -26,6 +30,7 @@ import {
 } from "../../core/vocabulary";
 import { MemoryNotFoundError } from "../../memory/repository";
 import {
+  decisionEpisodeSql,
   expectEnum,
   expectNullableNumber,
   expectNullableString,
@@ -37,9 +42,13 @@ import {
   rowsChanged,
   selectAll,
   selectOne,
+  sessionBlockKeySql,
   truncateText,
   type SqlRow,
 } from "./common";
+
+/** The block width moved to common.ts (shared with proposals in rc.3); re-exported so existing importers keep working. */
+export { SESSION_BLOCK_HOURS } from "./common";
 
 const PROVENANCE_COLUMNS = [
   "memory_id",
@@ -55,18 +64,10 @@ const PROVENANCE_COLUMNS = [
 export const PROVENANCE_EXCERPT_MAX_CHARS = 500;
 export const AUTO_CONFIDENCE_CAP = 0.99;
 export const AUTO_CONFIDENCE_STEP = 0.05;
-/** Width of the `(session_id, block of episodes.started_at)` pair that `distinct_session_count` counts (design §4). */
-export const SESSION_BLOCK_HOURS = 4;
 
 const EVIDENCE_RELATION_SQL = EVIDENCE_RELATIONS.map((relation) => `'${relation}'`).join(", ");
-const SESSION_BLOCK_SECONDS = SESSION_BLOCK_HOURS * 60 * 60;
-/**
- * Session-block key of an evidence episode: `<session_id>/<floor(unix(started_at) / 4h)>`. The division sits inside
- * the CAST on purpose: SQLite binds `||` tighter than `/`, so `a || '/' || x / n` would divide the concatenated text.
- * An unparseable `started_at` makes the block NULL and the key falls back to the session id (one block per session),
- * a missing episode row (import bullet) to the episode id.
- */
-const SESSION_BLOCK_KEY_SQL = `COALESCE(e.session_id || '/' || CAST(strftime('%s', e.started_at) / ${String(SESSION_BLOCK_SECONDS)} AS INTEGER), e.session_id, ev.episode_id)`;
+/** Block key of the evidence episode `e`; an episode id without an episodes row (import bullet) is its own key. */
+const SESSION_BLOCK_KEY_SQL = sessionBlockKeySql("e", "ev.episode_id");
 
 export interface ProvenanceRecord {
   memoryId: string;
@@ -172,6 +173,28 @@ export class ProvenanceRepository {
       `,
       { $episodeId: episodeId }
     ).map(mapProvenanceRow);
+  }
+
+  /**
+   * True when an `origin` provenance row points at an episode flagged `decision` (0.6.0-rc.3 §1.1): the
+   * `originDecisionMarker` that `decideTier` counts toward the `full` bar. Origin only, so reinforcement by a
+   * decision-only episode never promotes a legacy or imported row; an origin without an episodes row has no flags to
+   * carry the marker.
+   */
+  hasDecisionOrigin(memoryId: string): boolean {
+    const row = selectOne(
+      this.db,
+      `
+        SELECT 1
+        FROM memory_provenance p
+        JOIN episodes e ON e.id = p.episode_id
+        WHERE p.memory_id = $memoryId AND p.relation = 'origin' AND ${decisionEpisodeSql("e")}
+        LIMIT 1
+      `,
+      { $memoryId: memoryId }
+    );
+
+    return row !== null;
   }
 
   aggregate(memoryId: string): DerivedAggregate {

@@ -48,6 +48,8 @@ const ALLOWED_FOR_AUTO = new Set<EdgeKey>([
   key("active", "superseded", "import"),
   key("stale", "superseded", "import"),
   key("active", "superseded", "auto_rule"),
+  key("candidate", "superseded", "auto_rule"),
+  key("stale", "superseded", "auto_rule"),
   key("stale", "active", "human"),
   key("stale", "active", "auto_rule"),
   key("superseded", "active", "human"),
@@ -81,6 +83,17 @@ describe("isAllowedTransition (spec §4.7 edge table)", () => {
     expect(isAllowedTransition("stale", "active", "auto_rule", "auto", { statusReason: "human" })).toBe(false);
     expect(isAllowedTransition("stale", "active", "auto_rule", "auto", { statusReason: null })).toBe(false);
     expect(isAllowedTransition("stale", "active", "human", "auto", { statusReason: null })).toBe(true);
+  });
+
+  test("stale -> superseded by auto_rule requires status_reason ttl_expired when the reason is known (0.6.0-rc.3 §2.6)", () => {
+    expect(isAllowedTransition("stale", "superseded", "auto_rule", "auto")).toBe(true);
+    expect(isAllowedTransition("stale", "superseded", "auto_rule", "auto", { statusReason: "ttl_expired" })).toBe(true);
+    expect(isAllowedTransition("stale", "superseded", "auto_rule", "auto", { statusReason: "human" })).toBe(false);
+    expect(isAllowedTransition("stale", "superseded", "auto_rule", "auto", { statusReason: null })).toBe(false);
+    expect(isAllowedTransition("stale", "superseded", "auto_rule", "human", { statusReason: "ttl_expired" })).toBe(false);
+    // the candidate edge has no status_reason requirement; import keeps its reach over any live row
+    expect(isAllowedTransition("candidate", "superseded", "auto_rule", "auto", { statusReason: null })).toBe(true);
+    expect(isAllowedTransition("stale", "superseded", "import", "auto", { statusReason: "human" })).toBe(true);
   });
 
   test("defaultStatusReason follows the actor", () => {
@@ -163,10 +176,23 @@ describe("transitionMemory", () => {
   test("expiry and auto_rule on a human row throw AuthorityViolationError and write nothing (R4)", () => {
     const humanCandidate = memories.create(humanMemory({ status: "candidate", createdAt: "2026-01-01T00:00:00.000Z" }));
     const humanActive = memories.create(humanMemory({ status: "active" }));
+    const humanStale = memories.create(humanMemory({ status: "stale", summary: "Human stale" }));
     const replacement = memories.create(autoMemory({ summary: "Replacement" }));
 
     const attempts: Array<() => unknown> = [
       () => transitionMemory(db, { memoryId: humanCandidate.id, to: "rejected", actor: "expiry", reason: "45d", now }),
+      // 0.6.0-rc.3 §2.6: the two new supersede edges are auto-only like every other auto_rule edge
+      () =>
+        transitionMemory(db, {
+          memoryId: humanCandidate.id,
+          to: "superseded",
+          actor: "auto_rule",
+          reason: "full_sweep",
+          now,
+          replacementId: replacement.id,
+        }),
+      () =>
+        transitionMemory(db, { memoryId: humanStale.id, to: "superseded", actor: "auto_rule", reason: "full_sweep", now, replacementId: replacement.id }),
       () => transitionMemory(db, { memoryId: humanActive.id, to: "stale", actor: "expiry", reason: "ttl", now }),
       () => transitionMemory(db, { memoryId: humanActive.id, to: "stale", actor: "auto_rule", reason: "2-support", now }),
       () => transitionMemory(db, { memoryId: humanActive.id, to: "superseded", actor: "auto_rule", reason: "2-support", now, replacementId: replacement.id }),
@@ -182,8 +208,10 @@ describe("transitionMemory", () => {
     expect(memories.getById(humanCandidate.id)?.status).toBe("candidate");
     expect(memories.getById(humanActive.id)?.status).toBe("active");
     expect(memories.getById(humanActive.id)?.updatedAt).toBe(T0);
+    expect(memories.getById(humanStale.id)).toMatchObject({ status: "stale", supersededByMemoryId: null, updatedAt: T0 });
     expect(transitions.listForMemory(humanCandidate.id)).toEqual([]);
     expect(transitions.listForMemory(humanActive.id)).toEqual([]);
+    expect(transitions.listForMemory(humanStale.id)).toEqual([]);
   });
 
   test("expiry demotes auto rows with the right status_reason, overridable by the caller", () => {
@@ -250,17 +278,73 @@ describe("transitionMemory", () => {
     expect(transitions.listForMemory(old.id).map((entry) => entry.toStatus)).toEqual(["superseded", "active"]);
   });
 
-  test("auto_rule may supersede only active auto rows; import may supersede any live row", () => {
+  test("auto_rule supersedes candidate and ttl_expired-stale auto rows but never a human-demoted stale row; import may supersede any live row", () => {
+    const replacement = memories.create(autoMemory({ summary: "Auto replacement" }));
     const candidate = memories.create(autoMemory({ summary: "Candidate" }));
-    const stale = memories.create(autoMemory({ status: "stale", summary: "Stale" }));
+    const expired = memories.create(autoMemory({ status: "active", summary: "Expired" }));
+    transitionMemory(db, { memoryId: expired.id, to: "stale", actor: "expiry", reason: "ttl", now });
+    const demoted = memories.create(autoMemory({ status: "active", summary: "Demoted" }));
+    transitionMemory(db, { memoryId: demoted.id, to: "stale", actor: "human", reason: "cli:memory:demote", now });
+    const later = isoPlus(now, { hours: 1 });
+
+    // 0.6.0-rc.3 §2.6: a replacement resolves a contest against a never-shown candidate or an already-expired row
+    const supersededCandidate = transitionMemory(db, {
+      memoryId: candidate.id,
+      to: "superseded",
+      actor: "auto_rule",
+      reason: "full_sweep",
+      now: later,
+      replacementId: replacement.id,
+    });
+    expect(supersededCandidate).toMatchObject({
+      status: "superseded",
+      statusReason: "auto_rule",
+      supersededByMemoryId: replacement.id,
+      authority: "auto",
+      updatedAt: later,
+    });
+    const supersededExpired = transitionMemory(db, {
+      memoryId: expired.id,
+      to: "superseded",
+      actor: "auto_rule",
+      reason: "full_sweep",
+      now: later,
+      replacementId: replacement.id,
+    });
+    expect(supersededExpired).toMatchObject({ status: "superseded", statusReason: "auto_rule", supersededByMemoryId: replacement.id });
+    expect(transitions.listForMemory(expired.id).map((entry) => [entry.toStatus, entry.actor])).toEqual([
+      ["stale", "expiry"],
+      ["superseded", "auto_rule"],
+    ]);
+
+    // a human's demotion is a verdict the automatic path does not overturn (as the stale -> active edge already holds)
+    expect(() =>
+      transitionMemory(db, { memoryId: demoted.id, to: "superseded", actor: "auto_rule", reason: "full_sweep", now: later, replacementId: replacement.id })
+    ).toThrow(InvalidMemoryTransitionError);
+    expect(memories.getById(demoted.id)).toMatchObject({ status: "stale", statusReason: "human", supersededByMemoryId: null, updatedAt: now });
+    expect(transitions.listForMemory(demoted.id)).toHaveLength(1);
+
+    const importReplacement = memories.create(humanMemory({ summary: "Import replacement" }));
+    const importCandidate = memories.create(autoMemory({ summary: "Import candidate" }));
     const humanActive = memories.create(humanMemory({ summary: "Human active" }));
-    const replacement = memories.create(humanMemory({ summary: "Import replacement" }));
-
-    expect(() => transitionMemory(db, { memoryId: candidate.id, to: "superseded", actor: "auto_rule", reason: "x", now, replacementId: replacement.id })).toThrow(InvalidMemoryTransitionError);
-    expect(() => transitionMemory(db, { memoryId: stale.id, to: "superseded", actor: "auto_rule", reason: "x", now, replacementId: replacement.id })).toThrow(InvalidMemoryTransitionError);
-
-    expect(transitionMemory(db, { memoryId: candidate.id, to: "superseded", actor: "import", reason: "import", now, replacementId: replacement.id }).statusReason).toBe("import");
-    expect(transitionMemory(db, { memoryId: stale.id, to: "superseded", actor: "import", reason: "import", now, replacementId: replacement.id }).status).toBe("superseded");
+    const imported = transitionMemory(db, {
+      memoryId: importCandidate.id,
+      to: "superseded",
+      actor: "import",
+      reason: "import",
+      now,
+      replacementId: importReplacement.id,
+    });
+    expect(imported.statusReason).toBe("import");
+    const importedDemoted = transitionMemory(db, {
+      memoryId: demoted.id,
+      to: "superseded",
+      actor: "import",
+      reason: "import",
+      now: later,
+      replacementId: importReplacement.id,
+    });
+    expect(importedDemoted.status).toBe("superseded");
     expect(transitionMemory(db, { memoryId: humanActive.id, to: "stale", actor: "import", reason: "--sync removed bullet", now }).statusReason).toBe("import_sync");
   });
 

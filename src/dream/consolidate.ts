@@ -4,10 +4,19 @@
  *
  *   (4) fire roll-ups already written by lock session 1 → auto rows: ttl = max(ttl, last_fired_at + 14 d);
  *       override downgrade: auto ∧ override_count ≥ 3 ∧ evidence_score < 3 → enforcement 'advise' + audit_log
- *   (S) full sweep (0.6.0-rc.2, `autonomy_level: "full"` only): auto candidates that are not replacement rows are
- *       re-evaluated with decideTier, oldest first, and activated when they pass — up to dream.full_sweep_per_run
- *       activations per run; their open activate_* proposals close as expired(full_autonomy). Runs before (2)/(3)
- *       so a candidate that passes today is activated rather than expired.
+ *   (S) full sweep (0.6.0-rc.2 / rc.3, `autonomy_level: "full"` only), three phases on one budget of
+ *       dream.full_sweep_per_run units: (1) open `supersede` contests whose target is an auto candidate /
+ *       stale(ttl_expired) row are resolved oldest first when the contest passes design §2.1 (a contest whose
+ *       replacement is itself the target of a resolvable contest waits for that one, which settles it through the
+ *       chain walk) and the replacement passes decideTier — target superseded, replacement activated, one unit each;
+ *       (2) open supersede / stale proposals on active auto rows are recounted in session blocks and judged by the
+ *       two-session rule (evaluateAutoDemotion, no unit; a budget of 0 stops phases 1 and 3 only); a replacement it
+ *       activates gets the same bookkeeping as the other phases — activate_* proposals closed, `full_sweep_activation`
+ *       audit row; (3) auto candidates that are not replacement rows are re-evaluated with decideTier, oldest first,
+ *       one unit per activation. Every transition is by `auto_rule` (reason `full_sweep`), the rows' open activate_*
+ *       proposals close as expired(full_autonomy), and each resolution / activation runs in its own SAVEPOINT (a throw
+ *       costs that row and lands in sweptErrors). Runs before (2)/(3) so a candidate that passes today is activated
+ *       rather than expired.
  *   (2) TTL: correction / failure_resolution auto rows open a `revalidate` proposal, other auto rows → stale(ttl_expired)
  *   (3) auto candidates older than retention.candidate_days → rejected(expiry); proposals past expires_at → expired
  *       (an expired revalidate stales its row)
@@ -37,11 +46,19 @@ import { LIVE_STATUSES } from "../core/vocabulary";
 import { cleanOrphanTmp } from "../db/db-file";
 import { META_KEYS, MetaRepository } from "../db/repositories/meta";
 import { ProposalRepository } from "../db/repositories/proposals";
+import { ProvenanceRepository } from "../db/repositories/provenance";
 import { selectAll } from "../db/sql";
 import type { WriteOp } from "../db/store";
 import { MemoryRepository, type MemoryRecord } from "../memory/repository";
 import { decideTier, type DecideTierInput } from "../promotion/authority";
-import { expireProposals, humanRejectedActivation, openOrSupportProposal } from "../promotion/proposals";
+import { ACTIVATION_PROPOSAL_KINDS, evaluateAutoDemotion, expireProposals, humanRejectedActivation, openOrSupportProposal } from "../promotion/proposals";
+import {
+  FULL_AUTONOMY_DECISION_NOTE,
+  FULL_SWEEP_TRANSITION_REASON,
+  applySupersedeResolution,
+  chainTargets,
+  checkSupersedeResolution,
+} from "../promotion/replacement";
 import { extendTtlOnFire } from "../promotion/revalidate";
 import { transitionMemory } from "../promotion/transitions";
 import { scanMemoryContent } from "../security/scanner";
@@ -54,10 +71,8 @@ export const MERGE_COSINE = 0.92;
 export const OVERRIDE_DOWNGRADE_COUNT = 3;
 export const OVERRIDE_DOWNGRADE_MAX_EVIDENCE = 3;
 export const IDLE_TURN_MS = 60 * 60 * 1000;
-/** `proposals.decision_note` of an activate_* proposal the full sweep closed because its target activated on its own. */
-export const FULL_AUTONOMY_DECISION_NOTE = "full_autonomy";
-/** `memory_transitions.reason` of a candidate the full sweep activated. */
-export const FULL_SWEEP_TRANSITION_REASON = "full_sweep";
+// The sweep's decision note and transition reason are shared with the replacement resolution (0.6.0-rc.3 §2.2, §2.5).
+export { FULL_AUTONOMY_DECISION_NOTE, FULL_SWEEP_TRANSITION_REASON } from "../promotion/replacement";
 const EMBED_BATCH = 32;
 
 export type EmbedFn = (texts: string[]) => Promise<Float32Array[]>;
@@ -89,10 +104,20 @@ export interface DreamReport {
   staledByExpiry: string[];
   mergeProposals: string[];
   fixSignatureProposals: string[];
-  /** 0.6.0-rc.2 full sweep: auto candidates activated by decideTier under `autonomy_level: "full"` (empty otherwise). */
+  /**
+   * Full sweep (`autonomy_level: "full"` only, empty otherwise): auto rows the sweep activated — by decideTier in phase 3,
+   * by decideProposal as the replacement of a resolved or demoted contest in phases 1–2.
+   */
   sweptActivated: string[];
-  /** 0.6.0-rc.2 full sweep: activate_policy / activate_global proposals closed as expired(full_autonomy) with their target. */
+  /**
+   * Full sweep: activate_policy / activate_global proposals closed as expired(full_autonomy) with their target (rc.2) and the
+   * contests a resolution closed the same way — the dead target's other contests and chain proposals that did not pass (rc.3).
+   */
   sweptProposalsClosed: string[];
+  /** 0.6.0-rc.3 full sweep: targets superseded by a resolution (chain hops included) or by the re-judged two-session rule. */
+  sweptSuperseded: string[];
+  /** 0.6.0-rc.3 full sweep: `resolution <proposalId>: <message>` / `activation <memoryId>: <message>` per row whose savepoint rolled back. */
+  sweptErrors: string[];
   embedded: number;
   idleClosed: string[];
   gc: { ledgers: number; states: number; raw: number; tmp: number; audit: number };
@@ -149,12 +174,10 @@ function fireAndOverride(db: SqlJsDatabase, repository: MemoryRepository, now: s
   return changed;
 }
 
-const SWEEP_CLOSED_PROPOSAL_KINDS: ReadonlySet<string> = new Set(["activate_policy", "activate_global"]);
-
 /**
  * Same bookkeeping as the proposal queue's flagTarget after the sweep closed a row's activate_* proposals:
  * `open_proposal_id` keeps pointing at a still-open proposal or is cleared. `contested` tracks supersede / stale /
- * revalidate proposals only, which the sweep never touches.
+ * revalidate proposals only, which this path never touches.
  */
 function refreshOpenProposalFlag(repository: MemoryRepository, proposals: ProposalRepository, memoryId: string): void {
   const target = repository.getById(memoryId);
@@ -165,87 +188,229 @@ function refreshOpenProposalFlag(repository: MemoryRepository, proposals: Propos
   if (target.openProposalId !== openProposalId) repository.setFlags(memoryId, { openProposalId, updatedAt: target.updatedAt });
 }
 
+/** Closes the row's open activate_policy / activate_global proposals as expired(full_autonomy) and refreshes its flag; returns their ids. */
+function closeActivationProposals(repository: MemoryRepository, proposals: ProposalRepository, memoryId: string, now: string): string[] {
+  const closed: string[] = [];
+  for (const proposal of proposals.listOpen({ targetId: memoryId })) {
+    if (!ACTIVATION_PROPOSAL_KINDS.has(proposal.kind)) continue;
+    proposals.decide(proposal.id, { status: "expired", decidedBy: "auto_rule", note: FULL_AUTONOMY_DECISION_NOTE, now });
+    closed.push(proposal.id);
+  }
+  if (closed.length > 0) refreshOpenProposalFlag(repository, proposals, memoryId);
+  return closed;
+}
+
 /**
- * Backlog drain (design §1, `autonomy_level: "full"` only). Auto `candidate` rows that are not replacement rows
- * — no live `supersedes_memory_id` target and not the candidate of an open proposal, the same test as reconcile's
- * decideTiers, and whose activate_* proposal no human rejected (humanRejectedActivation: the automatic path never
- * enacts a claim a human declined) — are re-evaluated with decideTier under `full`, oldest first, and activated when
- * they pass, until the budget is spent. The sweep
- * has its own budget, `dream.full_sweep_per_run` activations per run: `capsRemaining` and `knowledgeCapsRemaining`
- * are both the activations left here, never the extraction day caps, and a row that does not pass costs nothing,
- * so unpassable old rows cannot stall the drain. An activation transitions the row by `auto_rule` (reason
- * `full_sweep`), stores the decision's TTL / revalidate with validation_count = evidence_count − 1, writes an
- * audit_log row (`full_sweep_activation`) and closes every open activate_policy / activate_global proposal on the
- * row as `expired` with decision note `full_autonomy`. Human rows are never selected; `standard`, `shadow` and
- * `off` leave this step out entirely.
+ * The decideTier input the sweep builds from a stored row: the sweep's own budget on every cap (never the extraction
+ * day caps), `originDecisionMarker` from the row's origin provenance (0.6.0-rc.3 §1.1: a decision-born rule row at
+ * evidence_score 0 passes the evidence step without being rewritten), never a replacement row (a contested
+ * replacement is judged on its own merits, §2.1 rule 5), and the stored text scanned again — the validator rejected
+ * unsafe facts when the row was written, but legacy / imported text never passed it.
+ */
+function sweepTierInput(memory: MemoryRecord, provenance: ProvenanceRepository, remaining: number, now: string): DecideTierInput {
+  return {
+    memory: {
+      type: memory.type,
+      scopeGlob: memory.scopeGlob,
+      hasSignature: memory.triggerSignature !== null && memory.signatureKey.length > 0,
+      signatureTool: memory.triggerSignature?.tool ?? null,
+      relevantTools: memory.relevantTools,
+      lifecycleTriggers: memory.lifecycleTriggers,
+      confidence: memory.confidence,
+      authority: memory.authority,
+    },
+    evidenceScore: memory.evidenceScore,
+    originDecisionMarker: provenance.hasDecisionOrigin(memory.id),
+    capsRemaining: { episode: remaining, day: remaining },
+    knowledgeCapsRemaining: { day: remaining },
+    autonomyLevel: "full",
+    knowledgeKind: memory.knowledgeKind,
+    isReplacementRow: false,
+    scanSafe: scanMemoryContent(memory.summary, memory.details).safe,
+    horizon: memory.horizon,
+    now,
+  };
+}
+
+/** The contest a replacement was activated through, named in its `full_sweep_activation` audit row. */
+interface ActivationVia {
+  proposalId: string;
+  superseded: string[];
+}
+
+/** The rc.2 `full_sweep_activation` audit row for a row the sweep activated, read after its TTL was stored. */
+function writeActivationAudit(db: SqlJsDatabase, memory: MemoryRecord, closed: string[], via: ActivationVia | null, now: string): void {
+  const how = via === null ? "" : ` via supersede of ${via.superseded.join(", ")}`;
+  const facts = `evidence ${String(memory.evidenceScore)}, confidence ${String(memory.confidence)}`;
+  writeAudit(
+    db,
+    "full_sweep_activation",
+    createDeterministicId(`audit:full_sweep_activation:${memory.id}:${now}`),
+    `full sweep: ${memory.type} ${oneLine(memory.summary, 80)} activated${how} (${facts})`,
+    {
+      memoryId: memory.id,
+      type: memory.type,
+      evidenceScore: memory.evidenceScore,
+      confidence: memory.confidence,
+      ttlExpiresAt: memory.ttlExpiresAt,
+      proposalsClosed: closed,
+      ...(via === null ? {} : { proposalId: via.proposalId, superseded: via.superseded }),
+    },
+    now
+  );
+}
+
+type SavepointOutcome<T> = { ok: true; value: T } | { ok: false; error: string };
+
+/** Runs `fn` in its own SAVEPOINT (as reconcile runs every fact): a throw rolls back that work alone and is returned, not raised. */
+function inSavepoint<T>(db: SqlJsDatabase, name: string, fn: () => T): SavepointOutcome<T> {
+  db.run(`SAVEPOINT ${name}`);
+  try {
+    const value = fn();
+    db.run(`RELEASE ${name}`);
+    return { ok: true, value };
+  } catch (error) {
+    db.run(`ROLLBACK TO ${name}`);
+    db.run(`RELEASE ${name}`);
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** Oldest first, ids as the tie-break: the order every sweep phase walks its rows and proposals in. */
+function byAge(left: { createdAt: string; id: string }, right: { createdAt: string; id: string }): number {
+  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+}
+
+/**
+ * Backlog drain (design rc.2 §1, rc.3 §2.4; `autonomy_level: "full"` only): three phases on one budget of
+ * dream.full_sweep_per_run units. Every transition is by `auto_rule` with reason `full_sweep`, which
+ * countAutoActivationsSince excludes, so the sweep consumes neither extraction day cap (§2.5). Every resolution and
+ * every activation runs in its own SAVEPOINT: a throw costs that row alone, is reported in `report.sweptErrors` and
+ * never rolls back the run's other work.
+ *
+ * 1. Open `supersede` contests, oldest first, whose target is an auto candidate / stale(ttl_expired) row and whose
+ *    replacement is an auto candidate (checkSupersedeResolution, §2.1 rules 1–4 and 4b: a contest whose replacement
+ *    is itself the target of a resolvable contest is skipped as `candidate_contested` — that later contest resolves in
+ *    the same pass and its chain walk settles the skipped one, so the old target is superseded by the correction,
+ *    never by the contested middle row). The replacement must pass decideTier on its own (rule 5) unless an earlier
+ *    contest of this run already activated it; then applySupersedeResolution lets decideProposal supersede the
+ *    target and activate the replacement (§2.2, the one activation owner), closes what the dead target leaves behind
+ *    and walks the chain of proposals that named it. One unit per resolution (a skipped contest costs nothing); the
+ *    replacement gets the rc.2 `full_sweep_activation` audit row as well. A resolution that throws holds its target
+ *    and every chain target behind it (chainTargets) back from phase 3, so the retry still finds the chain intact.
+ * 2. Open `supersede` / `stale` proposals on active auto rows keep the two-session rule (§2.3): `support_sessions`
+ *    is recounted in session blocks and evaluateAutoDemotion judges the proposal, so a claim that already has two
+ *    blocks resolves at this dream instead of waiting for a fresh support. rc.1 mechanics: no unit is spent, and a
+ *    budget of 0 (which stops phases 1 and 3) does not stop this phase. A replacement activated this way gets the
+ *    bookkeeping of the other phases: its open activate_* proposals close as expired(full_autonomy) and one
+ *    `full_sweep_activation` audit row names the contest.
+ * 3. The rc.2 drain: auto candidates that are not replacement rows — no live `supersedes_memory_id` target and not
+ *    the candidate of an open proposal, the same test as reconcile's decideTiers — and whose activate_* proposal no
+ *    human rejected (humanRejectedActivation: the automatic path never enacts a claim a human declined) are
+ *    re-evaluated with decideTier, oldest first, and activated when they pass, one unit each. Each row is re-read
+ *    first: a target phase 1 superseded, a replacement it activated and a target (or chain target) whose resolution
+ *    threw this run are skipped (the last keep their contests for the next dream instead of draining as plain
+ *    candidates). A row that does not pass costs nothing, so unpassable old rows cannot stall the drain; an activation
+ *    stores the decision's TTL / revalidate with validation_count = evidence_count − 1 and closes the row's open
+ *    activate_* proposals as expired(full_autonomy).
+ *
+ * Human rows are never selected or superseded; `standard`, `shadow` and `off` leave this step out entirely.
  */
 function fullSweep(db: SqlJsDatabase, repository: MemoryRepository, config: HarnessConfig, now: string, report: DreamReport): boolean {
   if (config.autonomy_level !== "full") return false;
   let remaining = Math.max(0, Math.floor(config.dream.full_sweep_per_run));
-  if (remaining === 0) return false;
   const proposals = new ProposalRepository(db);
-  const candidates = repository
-    .list({ authority: "auto", status: "candidate" })
-    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+  const provenance = new ProvenanceRepository(db);
+  const candidates = repository.list({ authority: "auto", status: "candidate" }).sort(byAge);
+  const heldBack = new Set<string>();
   let changed = false;
+  // §2.1 rule 5 as the sweep judges it, with the budget left at the time of the call; rule 4b asks it about chain replacements too.
+  const passesTier = (candidate: MemoryRecord): boolean => decideTier(sweepTierInput(candidate, provenance, remaining, now)).status === "active";
 
-  for (const memory of candidates) {
+  for (const [index, proposal] of proposals.listOpen({ kind: "supersede" }).sort(byAge).entries()) {
     if (remaining <= 0) break;
-    const supersedesLive = memory.supersedesMemoryId !== null && resolveTargetRow(repository, memory.supersedesMemoryId) !== null;
-    if (supersedesLive || proposals.listOpen({ candidateId: memory.id }).length > 0) continue;
-    // A human who rejected this row's activate_* proposal (rc.1 / `standard`) said no: the sweep never reverses it.
-    if (humanRejectedActivation(proposals, memory.id)) continue;
+    const outcome = inSavepoint(db, `sp_sweep_res_${String(index)}`, () => {
+      const check = checkSupersedeResolution(db, proposal.id, { passesTier });
+      if (!check.ok) return null;
+      if (check.needsTierDecision && !passesTier(check.candidate)) return null;
+      const result = applySupersedeResolution(db, { proposalId: proposal.id, now, transitionReason: FULL_SWEEP_TRANSITION_REASON, source: "sweep" });
+      if (result.replacementActivated) {
+        const activated = repository.getById(result.replacementId) ?? check.candidate;
+        writeActivationAudit(db, activated, result.proposalsClosed, { proposalId: proposal.id, superseded: result.superseded }, now);
+      }
+      return result;
+    });
+    if (!outcome.ok) {
+      report.sweptErrors.push(`resolution ${proposal.id}: ${outcome.error}`);
+      // The chain behind the target (T0 behind T) drains as plain candidates otherwise, and the retry could no longer supersede it.
+      for (const id of [proposal.targetMemoryId, ...chainTargets(proposals, proposal.targetMemoryId)]) heldBack.add(id);
+      continue;
+    }
+    if (outcome.value === null) continue;
+    report.sweptSuperseded.push(...outcome.value.superseded);
+    if (outcome.value.replacementActivated) report.sweptActivated.push(outcome.value.replacementId);
+    report.sweptProposalsClosed.push(...outcome.value.proposalsClosed);
+    remaining -= 1;
+    changed = true;
+  }
 
-    const hasSignature = memory.triggerSignature !== null && memory.signatureKey.length > 0;
-    const input: DecideTierInput = {
-      memory: {
-        type: memory.type,
-        scopeGlob: memory.scopeGlob,
-        hasSignature,
-        signatureTool: memory.triggerSignature?.tool ?? null,
-        relevantTools: memory.relevantTools,
-        lifecycleTriggers: memory.lifecycleTriggers,
-        confidence: memory.confidence,
-        authority: memory.authority,
-      },
-      evidenceScore: memory.evidenceScore,
-      capsRemaining: { episode: remaining, day: remaining },
-      knowledgeCapsRemaining: { day: remaining },
-      autonomyLevel: "full",
-      knowledgeKind: memory.knowledgeKind,
-      isReplacementRow: false,
-      // The validator rejected unsafe facts when the row was written; legacy / imported text is scanned here again.
-      scanSafe: scanMemoryContent(memory.summary, memory.details).safe,
-      horizon: memory.horizon,
-      now,
-    };
-    const decision = decideTier(input);
+  const contests = proposals.listOpen().filter((proposal) => proposal.kind === "supersede" || proposal.kind === "stale");
+  for (const [index, proposal] of contests.sort(byAge).entries()) {
+    const target = repository.getById(proposal.targetMemoryId);
+    if (target === null || target.authority !== "auto" || target.status !== "active") continue;
+    const outcome = inSavepoint(db, `sp_sweep_demote_${String(index)}`, () => {
+      proposals.recomputeDerived(proposal.id);
+      const demotion = evaluateAutoDemotion(db, { proposalId: proposal.id, now, transitionReason: FULL_SWEEP_TRANSITION_REASON });
+      const replacementId = proposal.candidateMemoryId;
+      const activated = demotion.applied && replacementId !== null && demotion.decision?.effects.includes("replacement:active") === true;
+      let closed: string[] = [];
+      if (activated) {
+        // The same bookkeeping phases 1 and 3 give an activated row; the audit row is read after decideProposal stored the TTL.
+        closed = closeActivationProposals(repository, proposals, replacementId, now);
+        const replacement = repository.getById(replacementId);
+        if (replacement !== null) writeActivationAudit(db, replacement, closed, { proposalId: proposal.id, superseded: [target.id] }, now);
+      }
+      return { demotion, activated, closed };
+    });
+    if (!outcome.ok) {
+      report.sweptErrors.push(`resolution ${proposal.id}: ${outcome.error}`);
+      continue;
+    }
+    if (!outcome.value.demotion.applied) continue;
+    (proposal.kind === "supersede" ? report.sweptSuperseded : report.staled).push(target.id);
+    if (outcome.value.activated && proposal.candidateMemoryId !== null) report.sweptActivated.push(proposal.candidateMemoryId);
+    report.sweptProposalsClosed.push(...outcome.value.closed);
+    changed = true;
+  }
+
+  for (const [index, memory] of candidates.entries()) {
+    if (remaining <= 0) break;
+    const current = repository.getById(memory.id);
+    if (current === null || current.status !== "candidate" || current.authority !== "auto" || heldBack.has(current.id)) continue;
+    const supersedesLive = current.supersedesMemoryId !== null && resolveTargetRow(repository, current.supersedesMemoryId) !== null;
+    if (supersedesLive || proposals.listOpen({ candidateId: current.id }).length > 0) continue;
+    if (humanRejectedActivation(proposals, current.id)) continue;
+    const decision = decideTier(sweepTierInput(current, provenance, remaining, now));
     if (decision.status !== "active") continue;
 
-    transitionMemory(db, { memoryId: memory.id, to: "active", actor: "auto_rule", reason: FULL_SWEEP_TRANSITION_REASON, now });
-    repository.setTtl(memory.id, {
-      ttlExpiresAt: decision.ttlExpiresAt ?? null,
-      revalidateAfter: decision.revalidateAfter ?? null,
-      validationCount: Math.max(0, memory.evidenceCount - 1),
-      updatedAt: now,
+    const outcome = inSavepoint(db, `sp_sweep_act_${String(index)}`, () => {
+      transitionMemory(db, { memoryId: current.id, to: "active", actor: "auto_rule", reason: FULL_SWEEP_TRANSITION_REASON, now });
+      const activated = repository.setTtl(current.id, {
+        ttlExpiresAt: decision.ttlExpiresAt ?? null,
+        revalidateAfter: decision.revalidateAfter ?? null,
+        validationCount: Math.max(0, current.evidenceCount - 1),
+        updatedAt: now,
+      });
+      const closed = closeActivationProposals(repository, proposals, current.id, now);
+      writeActivationAudit(db, activated, closed, null, now);
+      return closed;
     });
-    const closed: string[] = [];
-    for (const proposal of proposals.listOpen({ targetId: memory.id })) {
-      if (!SWEEP_CLOSED_PROPOSAL_KINDS.has(proposal.kind)) continue;
-      proposals.decide(proposal.id, { status: "expired", decidedBy: "auto_rule", note: FULL_AUTONOMY_DECISION_NOTE, now });
-      closed.push(proposal.id);
+    if (!outcome.ok) {
+      report.sweptErrors.push(`activation ${current.id}: ${outcome.error}`);
+      continue;
     }
-    if (closed.length > 0) refreshOpenProposalFlag(repository, proposals, memory.id);
-    writeAudit(
-      db,
-      "full_sweep_activation",
-      createDeterministicId(`audit:full_sweep_activation:${memory.id}:${now}`),
-      `full sweep: ${memory.type} ${oneLine(memory.summary, 80)} activated (evidence ${String(memory.evidenceScore)}, confidence ${String(memory.confidence)})`,
-      { memoryId: memory.id, type: memory.type, evidenceScore: memory.evidenceScore, confidence: memory.confidence, ttlExpiresAt: decision.ttlExpiresAt ?? null, proposalsClosed: closed },
-      now
-    );
-    report.sweptActivated.push(memory.id);
-    report.sweptProposalsClosed.push(...closed);
+    report.sweptActivated.push(current.id);
+    report.sweptProposalsClosed.push(...outcome.value);
     remaining -= 1;
     changed = true;
   }
@@ -732,6 +897,8 @@ export async function runDream(db: SqlJsDatabase, options: DreamOptions): Promis
     fixSignatureProposals: [],
     sweptActivated: [],
     sweptProposalsClosed: [],
+    sweptSuperseded: [],
+    sweptErrors: [],
     embedded: 0,
     idleClosed: [],
     gc: { ledgers: 0, states: 0, raw: 0, tmp: 0, audit: 0 },

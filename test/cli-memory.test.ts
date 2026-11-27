@@ -18,6 +18,7 @@ import type { MemoryTransitionReport } from "../src/cli/commands/memory-transiti
 import { TARGET_USER_VERSION } from "../src/core/paths";
 import { hasWriteOp } from "../src/db/meta";
 import { ProvenanceRepository } from "../src/db/repositories/provenance";
+import { ProposalRepository } from "../src/db/repositories/proposals";
 import { TransitionRepository } from "../src/db/repositories/transitions";
 import { MemoryRepository } from "../src/memory/repository";
 import { rememberTransitionReason } from "../src/promotion/remember";
@@ -223,6 +224,32 @@ describe("hm memory:promote|demote|reject|restore|enforce", () => {
 });
 
 describe("hm memory:history / memory:trace / memory:stats", () => {
+  test("history prints a decided proposal with its decision note and an open one without", async () => {
+    let targetId = "";
+    let acceptedId = "";
+    await seedProject(project, (db) => {
+      const memories = new MemoryRepository(db, { clock: () => CLI_NOW });
+      targetId = memories.create(autoMemory({ summary: "Staging health endpoint answers 200 when up" })).id;
+      const replacementId = memories.create(autoMemory({ summary: "Staging health endpoint answers 401 when up; treat 401 as up" })).id;
+      const proposals = new ProposalRepository(db);
+      acceptedId = proposals.create({ kind: "supersede", targetMemoryId: targetId, candidateMemoryId: replacementId, rationale: "actuator moved behind auth", confidence: 0.8, createdBy: "extractor", now: "2026-03-01T00:00:00.000Z" }).id;
+      proposals.decide(acceptedId, { status: "accepted", decidedBy: "auto_rule", note: "full_autonomy", now: CLI_NOW });
+      proposals.create({ kind: "stale", targetMemoryId: targetId, candidateMemoryId: null, rationale: "endpoint removed", confidence: 0.6, createdBy: "extractor", now: CLI_NOW });
+    });
+
+    const history = await runHm(project, ["memory:history", targetId]);
+    expect(history.code).toBe(0);
+    expect(history.stdout).toContain("proposals (2):");
+    expect(history.stdout).toContain("supersede accepted by auto_rule (full_autonomy)  support 0/0");
+    expect(history.stdout).toContain("stale open  support 0/0");
+    expect(history.stdout).not.toContain("open (");
+    const report = (await runHm(project, ["memory:history", targetId, "--json"])).json<MemoryHistoryReport>();
+    expect(report.proposals.map((proposal) => [proposal.kind, proposal.status, proposal.decidedBy, proposal.decisionNote])).toEqual([
+      ["stale", "open", null, null],
+      ["supersede", "accepted", "auto_rule", "full_autonomy"],
+    ]);
+  });
+
   test("history lists transitions and provenance; trace groups episodes with their runs", async () => {
     let id = "";
     let episodeId = "";

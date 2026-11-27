@@ -110,6 +110,8 @@ export interface ProcessedEpisode {
   outcomes: number;
   created: string[];
   activated: string[];
+  /** Targets the run's step-7 supersede resolutions superseded, chain hops included (0.6.0-rc.3 §2.4; empty outside `full`). */
+  superseded: string[];
   proposals: string[];
   /** Rows whose enforcement the autonomy ladder raised to soft_deny in this run (Phase F). */
   escalated: string[];
@@ -873,7 +875,24 @@ export interface ReconcileSessionOptions {
   probeToCache: ProbeCache | null;
 }
 
-export function reconcileSession(db: SqlJsDatabase, ctx: WriteContext, item: ExtractedWork, options: ReconcileSessionOptions): WriteOp & { status: RunStatus; outcomes: number; created: string[]; activated: string[]; proposals: string[]; escalated: string[]; remembered: string[] } {
+/** One reconciled run as the worker reports it upward: the write op plus the per-run lists the log line and the CLI line print. */
+export type ReconciledSession = WriteOp & {
+  status: RunStatus;
+  outcomes: number;
+  created: string[];
+  activated: string[];
+  superseded: string[];
+  proposals: string[];
+  escalated: string[];
+  remembered: string[];
+};
+
+export function reconcileSession(
+  db: SqlJsDatabase,
+  ctx: WriteContext,
+  item: ExtractedWork,
+  options: ReconcileSessionOptions
+): ReconciledSession {
   const now = ctx.now;
   if (options.probeToCache !== null) writeProbeCache(db, options.probeToCache);
 
@@ -890,7 +909,18 @@ export function reconcileSession(db: SqlJsDatabase, ctx: WriteContext, item: Ext
     });
     options.logger.line("failed", { episode: item.descriptor.id, run: item.runId, status: item.result.status, disposition: failure.disposition, next: failure.nextAttemptAt });
     const wroteSummary = ensureDerivedSummary(db, item.descriptor.id, item.derivedSummary);
-    return { ...failure.op, wrote: failure.op.wrote || wroteSummary, status: item.result.status, outcomes: 0, created: [], activated: [], proposals: [], escalated: [], remembered: [] };
+    return {
+      ...failure.op,
+      wrote: failure.op.wrote || wroteSummary,
+      status: item.result.status,
+      outcomes: 0,
+      created: [],
+      activated: [],
+      superseded: [],
+      proposals: [],
+      escalated: [],
+      remembered: [],
+    };
   }
 
   const repository = new MemoryRepository(db, { clock: () => now });
@@ -941,6 +971,7 @@ export function reconcileSession(db: SqlJsDatabase, ctx: WriteContext, item: Ext
     accepted: op.report.factsAccepted,
     created: op.report.created.length,
     activated: op.report.activated.length,
+    superseded: op.report.superseded.length,
     proposals: op.report.proposals.length,
     escalated: op.report.escalated.length,
     remembered: op.report.remembered.length,
@@ -948,7 +979,18 @@ export function reconcileSession(db: SqlJsDatabase, ctx: WriteContext, item: Ext
   });
   // An extraction without an `episode_summary` (or a row from before migration 022) keeps the derived summary.
   const wroteSummary = ensureDerivedSummary(db, item.descriptor.id, item.derivedSummary);
-  return { ...op, wrote: op.wrote || wroteSummary, status: op.report.status, outcomes: op.report.outcomes.length, created: op.report.created, activated: op.report.activated, proposals: op.report.proposals, escalated: op.report.escalated, remembered: op.report.remembered };
+  return {
+    ...op,
+    wrote: op.wrote || wroteSummary,
+    status: op.report.status,
+    outcomes: op.report.outcomes.length,
+    created: op.report.created,
+    activated: op.report.activated,
+    superseded: op.report.superseded,
+    proposals: op.report.proposals,
+    escalated: op.report.escalated,
+    remembered: op.report.remembered,
+  };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1035,7 +1077,20 @@ async function extractLoop(ctx: LoopContext): Promise<void> {
       await options.store.withWriteLock("extract:reconcile", dbLockWaitMs, (db, wctx) => {
         const op = reconcileSession(db, wctx, item, { paths: options.paths, config: options.config, logger, probeToCache });
         probeToCache = null;
-        processed = { episodeId: item.descriptor.id, runId: item.runId, status: op.status, fromCache: item.fromCache, op, outcomes: op.outcomes, created: op.created, activated: op.activated, proposals: op.proposals, escalated: op.escalated, remembered: op.remembered };
+        processed = {
+          episodeId: item.descriptor.id,
+          runId: item.runId,
+          status: op.status,
+          fromCache: item.fromCache,
+          op,
+          outcomes: op.outcomes,
+          created: op.created,
+          activated: op.activated,
+          superseded: op.superseded,
+          proposals: op.proposals,
+          escalated: op.escalated,
+          remembered: op.remembered,
+        };
         return op;
       });
       if (processed !== null) ctx.result.processed.push(processed);
@@ -1224,7 +1279,9 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
               expired: result.dream?.expiredProposals.length ?? 0,
               merges: result.dream?.mergeProposals.length ?? 0,
               swept: result.dream?.sweptActivated.length ?? 0,
+              swept_superseded: result.dream?.sweptSuperseded.length ?? 0,
               swept_proposals: result.dream?.sweptProposalsClosed.length ?? 0,
+              swept_errors: result.dream?.sweptErrors.length ?? 0,
               idle: result.dream?.idleClosed.length ?? 0,
               errors: result.dream?.errors.length ?? 0,
             });

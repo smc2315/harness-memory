@@ -311,6 +311,11 @@ export async function acquireDirLock(lockDir: string, options: AcquireDirLockOpt
         if (takeover.outcome === "gone") {
           continue;
         }
+        if (takeover.outcome === "held") {
+          // the record changed between the stale verdict and the takeover (a refreshed heartbeat, or a faster
+          // contender's fresh owner.json): report whoever holds the lock now, not the record the verdict read
+          holder = readLockOwner(lockDir) ?? holder;
+        }
       }
     }
 

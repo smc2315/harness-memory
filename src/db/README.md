@@ -8,7 +8,7 @@ every writer goes through one protocol. Spec: `docs/redesign/spec-v0.6.md` §4, 
 
 | File | Role |
 |---|---|
-| `migrations/NNN_*.sql` | Schema, tracked by `PRAGMA user_version` (001–016 are v0.5; 017–021 are the v0.6 redesign, final `user_version = 21`). |
+| `migrations/NNN_*.sql` | Schema, tracked by `PRAGMA user_version` (001–016 are v0.5; 017–024 are the v0.6 redesign, final `user_version = 24`). |
 | `migrator.ts` | `runMigrationsOnDb(db, {logger?, target?})` applies pending files on an open connection (no transaction); `runMigrations(dbPath, …)` is the lock-free CLI path with `.bak-v<from>` backup, post-migrate and atomic save. |
 | `post-migrate.ts` | `runPostMigrate(db, {now})`: one-time data fix-ups after 021 (reject DreamWorker template candidates, backfill `semantic_key`, open `merge` proposals for live collisions). Idempotent via `meta.semantic_key_backfill`. |
 | `locks.ts` | `acquireDirLock(lockDir, {purpose, waitMs, …})`: `mkdirSync` directory lock with `owner.json`, 5 s heartbeat, stale/dead-owner takeover (compare-and-swap on `owner.json`: rename the stale record aside, verify, exclusive `wx` publish; the directory is never removed), `stillHeld()` fencing, jittered wait, `LockBusyError`. |
@@ -29,7 +29,7 @@ every writer goes through one protocol. Spec: `docs/redesign/spec-v0.6.md` §4, 
             otherwise jittered 25–250 ms waits until waitMs → LockBusyError (CLI exit 75)
 2 load      readFileSync → header "SQLite format 3\0" + PRAGMA quick_check(1);
             damaged → keep as memory.sqlite.corrupt-<ts>, restore memory.sqlite.prev
-3 migrate   user_version < 21 → copy to memory.sqlite.bak-v<N> → runMigrationsOnDb → hooks.postMigrate (default runPostMigrate)
+3 migrate   user_version < 24 → copy to memory.sqlite.bak-v<N> → runMigrationsOnDb → hooks.postMigrate (default runPostMigrate)
 4 apply     BEGIN; op = fn(db, ctx)
             op.noop && !op.wrote → ROLLBACK, nothing saved
             op.noop && op.wrote  → quick_check, COMMIT (no derive / generation / write_ops)
@@ -55,9 +55,9 @@ from `.prev` in memory without touching the disk.
   `PRAGMA foreign_keys`, which is a no-op inside a transaction, and dropping `memories` with foreign keys
   ON would cascade-delete `evidence` and the dream links. Atomicity comes from in-memory application plus
   the tmp → rename save; the `.bak-v<from>` copy is the rollback point (`hm db:rollback`).
-- `user_version > 21` → `DatabaseNewerThanCodeError`; nothing is changed, read paths stay usable.
+- `user_version > 24` → `DatabaseNewerThanCodeError`; nothing is changed, read paths stay usable.
 - Legacy fixtures (`test/fixtures/legacy-db/`, real v0.5 installs at versions 9 and 10) are asserted to
-  reach 21 with zero row loss in `test/db-migrations-legacy.test.ts`.
+  reach 24 (`TARGET_USER_VERSION`) with zero row loss in `test/db-migrations-legacy.test.ts`.
 
 ## Post-migrate (`runPostMigrate`)
 

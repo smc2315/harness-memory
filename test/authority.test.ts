@@ -6,6 +6,7 @@ import { PRE_TOOL_HOOKED_FAMILIES } from "../src/core/vocabulary";
 import {
   ACTIVATION_MIN_EVIDENCE,
   FULL_ACTIVATION_MIN_EVIDENCE,
+  FULL_DECISION_MARKER_EVIDENCE,
   KNOWLEDGE_TTL_DAYS,
   SILENT_WRITE_MIN_EVIDENCE,
   TASK_TTL_DAYS,
@@ -231,10 +232,12 @@ describe("decideTier (§7.4)", () => {
     expect(decideTier(tierInput)).toEqual(expected);
   });
 
-  // The rc.2 inputs are optional; under standard they change nothing (the knowledge cap is a `full` concept).
-  test.each(standardCases)("%s — unchanged with the rc.2 inputs present", (_label, tierInput, expected) => {
+  // The rc.2 / rc.3 inputs are optional; under standard they change nothing (the knowledge cap and the origin decision
+  // marker are `full` concepts — "evidence below 2" stays `evidence` with the marker, the bar is the stored score alone).
+  test.each(standardCases)("%s — unchanged with the rc.2 / rc.3 inputs present", (_label, tierInput, expected) => {
     expect(decideTier({ ...tierInput, knowledgeCapsRemaining: { day: 10 }, horizon: null })).toEqual(expected);
     expect(decideTier({ ...tierInput, knowledgeCapsRemaining: { day: 0 }, horizon: "durable" })).toEqual(expected);
+    expect(decideTier({ ...tierInput, knowledgeCapsRemaining: { day: 10 }, horizon: "durable", originDecisionMarker: true })).toEqual(expected);
   });
 
   test("workflow rows activate through relevant_tools and a reachable trigger", () => {
@@ -306,6 +309,10 @@ describe("decideTier (§7.4)", () => {
         { type: "decision", hasSignature: false, signatureTool: null, relevantTools: null, lifecycleTriggers: ["session_start"], ...memory }
       );
     }
+    /** 0.6.0-rc.3 §1.1: a rule row born from a decision-only episode — evidence_score 0, the decision marker on its origin. */
+    function marked(overrides: Partial<DecideTierInput> = {}, memory: Partial<DecideTierInput["memory"]> = {}): DecideTierInput {
+      return full({ evidenceScore: 0, originDecisionMarker: true, ...overrides }, memory);
+    }
     const ACTIVE_30 = { status: "active", ttlExpiresAt: "2026-12-08T00:00:00.000Z", revalidateAfter: "2026-11-23T00:00:00.000Z" };
     const ACTIVE_7 = { status: "active", ttlExpiresAt: "2026-11-15T00:00:00.000Z", revalidateAfter: "2026-11-11T12:00:00.000Z" };
 
@@ -357,6 +364,29 @@ describe("decideTier (§7.4)", () => {
       expect(decideTier(full({ evidenceScore: 1, knowledgeKind: "convention" }, { type: "workflow", hasSignature: false, signatureTool: null, lifecycleTriggers: ["before_model"] }))).toEqual(ACTIVE_7);
     });
 
+    test("0.6.0-rc.3 §1.1: a decision marker on the origin episode counts FULL_DECISION_MARKER_EVIDENCE toward the full bar, and nowhere else", () => {
+      expect(FULL_DECISION_MARKER_EVIDENCE).toBe(1);
+      // evidence_score 0 + the marker reaches the bar for every rule type; the TTL is still the kind's (correction 30 d, convention 7 d).
+      expect(decideTier(marked())).toEqual(ACTIVE_30);
+      expect(decideTier(marked({ knowledgeKind: "convention" }))).toEqual(ACTIVE_7);
+      expect(decideTier(marked({ knowledgeKind: "convention" }, { type: "policy" }))).toEqual(ACTIVE_7);
+      expect(
+        decideTier(marked({ knowledgeKind: "convention" }, { type: "workflow", hasSignature: false, signatureTool: null, lifecycleTriggers: ["before_model"] }))
+      ).toEqual(ACTIVE_7);
+      // Omitted and explicit false are the rc.2 answers: a boolean marker, not a weight that could be passed as a number.
+      expect(decideTier(full({ evidenceScore: 0 }))).toEqual({ status: "candidate", reason: "evidence" });
+      expect(decideTier(full({ evidenceScore: 0, originDecisionMarker: false }))).toEqual({ status: "candidate", reason: "evidence" });
+      // Informational rows never had an evidence requirement: the marker does not bypass their knowledge cap.
+      expect(decideTier(decision({ originDecisionMarker: true }))).toEqual(ACTIVE_30);
+      expect(decideTier(decision({ originDecisionMarker: true, knowledgeCapsRemaining: { day: 0 } }))).toEqual({
+        status: "candidate",
+        reason: "knowledge_cap",
+      });
+      // Under standard the bar stays evidence_score ≥ 2 whatever the origin episode carried: 0 and 1 both stay candidate.
+      expect(decideTier(input({ evidenceScore: 0, originDecisionMarker: true }))).toEqual({ status: "candidate", reason: "evidence" });
+      expect(decideTier(input({ evidenceScore: 1, originDecisionMarker: true }))).toEqual({ status: "candidate", reason: "evidence" });
+    });
+
     test.each<[string, DecideTierInput, Record<string, unknown>]>([
       ["replacement row", full({ isReplacementRow: true }), { status: "candidate", reason: "replacement" }],
       ["replacement decision", decision({ isReplacementRow: true }), { status: "candidate", reason: "replacement" }],
@@ -374,6 +404,20 @@ describe("decideTier (§7.4)", () => {
       ["signature tool not hooked, before_tool only", full({}, { signatureTool: "read" }), { status: "candidate", reason: "trigger" }],
       ["workflow with before_tool only and no signature", full({}, { type: "workflow", hasSignature: false, signatureTool: null }), { status: "candidate", reason: "trigger" }],
       ["no triggers", full({}, { lifecycleTriggers: [] }), { status: "candidate", reason: "trigger" }],
+      // 0.6.0-rc.3 §1.1: with evidence 0 the origin decision marker clears the evidence step and nothing else.
+      ["replacement row with the origin marker", marked({ isReplacementRow: true }), { status: "candidate", reason: "replacement" }],
+      ["invalid scope with the origin marker", marked({}, { scopeGlob: "/abs/**" }), { status: "candidate", reason: "scope" }],
+      ["scanner unsafe with the origin marker", marked({ scanSafe: false }), { status: "candidate", reason: "security" }],
+      ["confidence below 0.7 with the origin marker", marked({}, { confidence: 0.69 }), { status: "candidate", reason: "confidence" }],
+      [
+        "neither signature nor relevant tools with the origin marker",
+        marked({}, { hasSignature: false, signatureTool: null, relevantTools: null }),
+        { status: "candidate", reason: "trigger" },
+      ],
+      ["signature tool not hooked with the origin marker", marked({}, { signatureTool: "read" }), { status: "candidate", reason: "trigger" }],
+      ["no triggers with the origin marker", marked({}, { lifecycleTriggers: [] }), { status: "candidate", reason: "trigger" }],
+      ["episode cap exhausted with the origin marker", marked({ capsRemaining: { episode: 0, day: 10 } }), { status: "candidate", reason: "cap" }],
+      ["daily cap exhausted with the origin marker", marked({ capsRemaining: { episode: 3, day: 0 } }), { status: "candidate", reason: "cap" }],
     ])("still candidate under full: %s", (_label, tierInput, expected) => {
       expect(decideTier(tierInput)).toEqual(expected);
     });
@@ -387,6 +431,17 @@ describe("decideTier (§7.4)", () => {
       expect(decideTier(full({ capsRemaining: { episode: 0, day: 0 } }))).toEqual({ status: "candidate", reason: "cap" });
       expect(decideTier(decision({ knowledgeCapsRemaining: { day: 0 }, scanSafe: false }, { confidence: 0.1 }))).toEqual({ status: "candidate", reason: "security" });
       expect(decideTier(decision({ knowledgeCapsRemaining: { day: 0 } }, { confidence: 0.1 }))).toEqual({ status: "candidate", reason: "confidence" });
+      // 0.6.0-rc.3 §1.1: the same order with evidence 0 and the origin marker — the marker moves only the evidence step,
+      // so the row that was `evidence` above is `cap` here and active once the caps allow.
+      expect(decideTier(marked({ scanSafe: false }, { scopeGlob: "/abs/**", confidence: 0.1 }))).toEqual({ status: "candidate", reason: "scope" });
+      expect(decideTier(marked({ scanSafe: false }, { confidence: 0.1 }))).toEqual({ status: "candidate", reason: "security" });
+      expect(decideTier(marked({ capsRemaining: { episode: 0, day: 0 } }, { confidence: 0.1, lifecycleTriggers: [] }))).toEqual({
+        status: "candidate",
+        reason: "confidence",
+      });
+      expect(decideTier(marked({ capsRemaining: { episode: 0, day: 0 } }, { lifecycleTriggers: [] }))).toEqual({ status: "candidate", reason: "trigger" });
+      expect(decideTier(marked({ capsRemaining: { episode: 0, day: 0 } }))).toEqual({ status: "candidate", reason: "cap" });
+      expect(decideTier(marked())).toEqual(ACTIVE_30);
     });
 
     test("the full path never opens a proposal, never reports type / autonomy and never reports shadow", () => {
@@ -398,6 +453,8 @@ describe("decideTier (§7.4)", () => {
         full({ evidenceScore: 0 }),
         full({ scanSafe: false }),
         full({}, { lifecycleTriggers: [] }),
+        marked(),
+        marked({ capsRemaining: { episode: 0, day: 0 } }),
       ];
       for (const tierInput of rows) {
         const result = decideTier(tierInput);
@@ -432,6 +489,10 @@ describe("decideTier (§7.4)", () => {
       expect(decideTier(input({ autonomyLevel: "shadow", knowledgeCapsRemaining: { day: 10 }, evidenceScore: 0, knowledgeKind: "decision" }, { type: "decision", lifecycleTriggers: ["session_start"] }))).toEqual({ status: "candidate", reason: "type" });
       expect(decideTier(input({ autonomyLevel: "off", knowledgeCapsRemaining: { day: 10 } }))).toEqual({ status: "candidate", reason: "autonomy" });
       expect(decideTier(input({ autonomyLevel: "off", knowledgeCapsRemaining: { day: 10 } }, { type: "policy" }))).toEqual({ status: "candidate", reason: "type", proposal: "activate_policy" });
+      // 0.6.0-rc.3 §1.1: the origin marker is a `full` input — shadow reports the real blocker (never `shadow: active`), off stays off.
+      expect(decideTier(input({ autonomyLevel: "shadow", evidenceScore: 0, originDecisionMarker: true }))).toEqual({ status: "candidate", reason: "evidence" });
+      expect(decideTier(input({ autonomyLevel: "shadow", evidenceScore: 1, originDecisionMarker: true }))).toEqual({ status: "candidate", reason: "evidence" });
+      expect(decideTier(input({ autonomyLevel: "off", evidenceScore: 0, originDecisionMarker: true }))).toEqual({ status: "candidate", reason: "autonomy" });
     });
   });
 });

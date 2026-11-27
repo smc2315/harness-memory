@@ -2,8 +2,10 @@
  * Pure authority rules: default enforcement per §7.3 and the automatic tier decision per §7.4, plus the
  * 0.6.0-rc.2 `full` autonomy level (docs/redesign/full-autonomy-0.6.0-rc.2.md §1, §3: everything activates on its
  * own at advise under caps and TTLs; soft_deny is born only where the mistake is exactly identifiable and succeeds
- * silently). No database; the worker's reconcile step feeds it the row it just created or reinforced. The only
- * dependency above core is the pure tool vocabulary (tool-glob resolution shared with the hooks and V11).
+ * silently) and the 0.6.0-rc.3 origin decision marker (docs/redesign/full-autonomy-0.6.0-rc.3.md §1.1: a rule row
+ * born from a decision-only episode reaches the `full` bar). No database; the worker's reconcile step feeds it the row
+ * it just created or reinforced. The only dependency above core is the pure tool vocabulary (tool-glob resolution
+ * shared with the hooks and V11).
  */
 
 import { toolGlobFamilies } from "../activation/tool-vocabulary";
@@ -27,6 +29,13 @@ export const ACTIVATION_MIN_CONFIDENCE = 0.7;
 export const ACTIVATION_MIN_EVIDENCE = 2;
 /** 0.6.0-rc.2 (`autonomy_level` full, design §1): a pitfall / workflow / policy activates at advise from its first evidence episode. */
 export const FULL_ACTIVATION_MIN_EVIDENCE = 1;
+/**
+ * 0.6.0-rc.3 (`full` only, design §1.1): what a decision marker on the row's origin episode adds toward
+ * FULL_ACTIVATION_MIN_EVIDENCE. The marker makes a decision-only episode eligible for extraction at weight 0, so a
+ * rule row born from one could never reach the bar from its own episode, and another decision-only episode adds 0 as
+ * well. Counted by decideTier alone — `evidence_score` stays what the episodes weigh.
+ */
+export const FULL_DECISION_MARKER_EVIDENCE = 1;
 /** 0.6.0-rc.2 (design §3 rule 1): evidence score a silent-write row needs to be born at `before_tool.auto_enforcement_silent_write`. */
 export const SILENT_WRITE_MIN_EVIDENCE = 2;
 /** TTL of an auto-activated decision / architecture_constraint row (0.6.0-rc.2 `full`): reviewed by expiry, not by a human. */
@@ -177,6 +186,14 @@ export interface DecideTierInput {
   knowledgeCapsRemaining?: { day: number };
   /** 0.6.0-rc.2: the row's horizon; null / omitted = unknown = durable. A `task` row gets the 7-day TTL (tierTtlDays). */
   horizon?: Horizon | null;
+  /**
+   * 0.6.0-rc.3 (`full` only): the row's origin episode carried the decision marker (what the callers read with
+   * ProvenanceRepository.hasDecisionOrigin — origin only, so a legacy or imported row reinforced by a decision-only
+   * episode stays a candidate). Adds FULL_DECISION_MARKER_EVIDENCE to the evidence score of a pitfall / workflow /
+   * policy row. Default false = the rc.2 answers; ignored under `standard`, `shadow` and `off`, whose bar stays the
+   * stored evidence_score ≥ 2.
+   */
+  originDecisionMarker?: boolean;
 }
 
 /** `knowledge_cap` (0.6.0-rc.2) is returned only under `full`; `type` (informational types wait for review) only under the other levels. */
@@ -234,8 +251,10 @@ function activeDecision(now: string, ttlDays: number): TierDecision {
  * Order: replacement row (checked by the caller) → scope valid → scanner → confidence → then by type:
  *   - decision / architecture_constraint: knowledge cap (`knowledge_cap`) → active. No evidence or trigger
  *     requirement — the decision marker that made the episode eligible is their evidence.
- *   - pitfall / workflow / policy: trigger (signature or relevant_tools, and reachable) → evidence ≥ 1 →
- *     activation caps → active. A policy takes the same path as a pitfall, and a repo-wide (global-scope) row
+ *   - pitfall / workflow / policy: trigger (signature or relevant_tools, and reachable) → evidence ≥ 1, where a
+ *     decision marker on the origin episode counts FULL_DECISION_MARKER_EVIDENCE (rc.3 §1.1: the marker that is a
+ *     decision row's whole evidence weighs 0 in evidence_score, so without it a decision-born rule could never pass)
+ *     → activation caps → active. A policy takes the same path as a pitfall, and a repo-wide (global-scope) row
  *     without a signature is not special here; soft_deny for a policy comes only from enforcementDefault's
  *     silent-write rule.
  */
@@ -252,7 +271,8 @@ function decideTierFull(input: DecideTierInput): TierDecision {
     const hasTools = memory.relevantTools !== null && memory.relevantTools.length > 0;
     if (!memory.hasSignature && !hasTools) return { status: "candidate", reason: "trigger" };
     if (!isReachableTrigger(memory)) return { status: "candidate", reason: "trigger" };
-    if (input.evidenceScore < FULL_ACTIVATION_MIN_EVIDENCE) return { status: "candidate", reason: "evidence" };
+    const evidence = input.evidenceScore + (input.originDecisionMarker === true ? FULL_DECISION_MARKER_EVIDENCE : 0);
+    if (evidence < FULL_ACTIVATION_MIN_EVIDENCE) return { status: "candidate", reason: "evidence" };
     if (input.capsRemaining.episode <= 0 || input.capsRemaining.day <= 0) return { status: "candidate", reason: "cap" };
   }
   return activeDecision(input.now, tierTtlDays(input.knowledgeKind, input.horizon, memory.type));
@@ -262,7 +282,8 @@ function decideTierFull(input: DecideTierInput): TierDecision {
  * §7.4 under `standard` (and its `shadow` dry run / `off`), evaluated in this order: replacement row → policy
  * (activate_policy proposal) → signature-less global scope (activate_global proposal) → decision /
  * architecture_constraint → autonomy off → scope, trigger, scanner, confidence, evidence ≥ 2, caps → active with
- * TTL (shadow autonomy reports `shadow`). Under `full` the replacement check is followed by decideTierFull.
+ * TTL (shadow autonomy reports `shadow`). Under `full` the replacement check is followed by decideTierFull, the only
+ * reader of `originDecisionMarker`: this chain's bar is the stored evidence_score alone (rc.3 §1.1).
  * The TTL of an active row is tierTtlDays(kind, horizon, type) under every level: with the horizon unknown that is
  * baseTtlDays(kind), exactly the pre-rc.2 number.
  */

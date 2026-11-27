@@ -116,7 +116,7 @@ describe("buildSnapshot", () => {
     expect(active.schema).toBe("active.v1");
     expect(active.built_at).toBe(T0);
     expect(active.db_generation).toBe(7);
-    expect(active.user_version).toBe(23);
+    expect(active.user_version).toBe(24);
     expect(active.last_dream_at).toBeNull();
     expect(active.last_probe).toBeNull();
     expect(typeof active.source.mtime_ms).toBe("number");
