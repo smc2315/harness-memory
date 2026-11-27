@@ -97,7 +97,8 @@ export function renderDreamReport(report: DreamReport): string[] {
     `dream: ttl extended ${String(report.ttlExtended.length)}, downgraded ${String(report.downgraded.length)}, revalidate proposals ${String(report.revalidateProposals.length)}, staled ${String(report.staled.length)}`,
     `  candidates rejected ${String(report.rejectedCandidates.length)}, proposals expired ${String(report.expiredProposals.length)} (staled by expiry ${String(report.staledByExpiry.length)}), merge proposals ${String(report.mergeProposals.length)}, fix_signature ${String(report.fixSignatureProposals.length)}`,
     `  embedded ${String(report.embedded)}, idle turns closed ${String(report.idleClosed.length)}, gc ledgers ${String(gc.ledgers)} states ${String(gc.states)} raw ${String(gc.raw)} tmp ${String(gc.tmp)} audit ${String(gc.audit)}`,
-    `  full sweep: activated ${String(report.sweptActivated.length)}, proposals closed ${String(report.sweptProposalsClosed.length)}`,
+    `  full sweep: activated ${String(report.sweptActivated.length)}, superseded ${String(report.sweptSuperseded.length)}, ` +
+      `proposals closed ${String(report.sweptProposalsClosed.length)}, errors ${String(report.sweptErrors.length)}`,
   ];
   for (const error of report.errors) lines.push(`  error: ${error}`);
   return lines;

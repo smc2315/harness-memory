@@ -1224,7 +1224,9 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
               expired: result.dream?.expiredProposals.length ?? 0,
               merges: result.dream?.mergeProposals.length ?? 0,
               swept: result.dream?.sweptActivated.length ?? 0,
+              swept_superseded: result.dream?.sweptSuperseded.length ?? 0,
               swept_proposals: result.dream?.sweptProposalsClosed.length ?? 0,
+              swept_errors: result.dream?.sweptErrors.length ?? 0,
               idle: result.dream?.idleClosed.length ?? 0,
               errors: result.dream?.errors.length ?? 0,
             });

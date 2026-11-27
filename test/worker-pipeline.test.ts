@@ -780,7 +780,9 @@ describe("worker reindex and dream", () => {
     expect(result.dream?.errors).toEqual([]);
     // rc.2: the full sweep ran (default level is full) and found no candidate left to drain after the extraction.
     expect(result.dream?.sweptActivated).toEqual([]);
+    expect(result.dream?.sweptSuperseded).toEqual([]);
     expect(result.dream?.sweptProposalsClosed).toEqual([]);
+    expect(result.dream?.sweptErrors).toEqual([]);
     expect(result.snapshotBuilt).toBe(true);
     const store = composeStore({ paths, config, logger: silentWorkerLogger, clock });
     await store.read((db) => {

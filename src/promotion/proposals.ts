@@ -505,6 +505,11 @@ export interface AutoDemotionInput {
   proposalId: string;
   now: string;
   runId?: string | null;
+  /**
+   * memory_transitions.reason of the decision's transitions (default decideProposal's `proposal:<kind>`); the dream
+   * sweep passes `full_sweep` so its activations stay out of the daily caps (0.6.0-rc.3 §2.5).
+   */
+  transitionReason?: string;
 }
 
 export interface AutoDemotionResult {
@@ -571,6 +576,7 @@ export function evaluateAutoDemotion(db: SqlJsDatabase, input: AutoDemotionInput
     accept: true,
     now: input.now,
     note: `auto demotion: ${String(proposal.supportSessions)} sessions`,
+    transitionReason: input.transitionReason,
     runId: input.runId ?? null,
   });
   return { applied: true, reason: "accepted", decision };

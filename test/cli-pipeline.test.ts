@@ -11,11 +11,13 @@ import type { MemoryListReport } from "../src/cli/commands/memory-list";
 import type { MemoryWhyReport } from "../src/cli/commands/memory-why";
 import type { QueueListReport, QueueMutationReport, QueueShowReport } from "../src/cli/commands/queue";
 import type { TraceReport } from "../src/cli/commands/trace";
+import { renderDreamReport } from "../src/cli/lib/worker-run";
 import { createSessionState, writeQueueFile, writeSessionState } from "../src/adapters/session-state";
 import type { EpisodeDescriptor } from "../src/core/episode-types";
 import type { LedgerLine } from "../src/core/ledger-types";
 import { ledgerFile, queueFile, sessionKey, stateFile } from "../src/core/paths";
 import { EpisodeRepository } from "../src/db/repositories/episodes";
+import type { DreamReport } from "../src/dream/consolidate";
 import { buildEpisodeDescriptor } from "../src/dream/episode";
 import { buildExtractionPrompt } from "../src/dream/extract/prompt";
 import { createReplayProvider } from "../src/dream/extract/providers";
@@ -200,6 +202,32 @@ describe("hm extract / hm dream", () => {
     expect(result.dream!.staled).toHaveLength(1);
     const text = await runHm(project, ["dream"], clockOptions(CLI_NOW, { seams: { provider: null } }));
     expect(text.stdout).toContain("dream:");
+  });
+
+  test("renderDreamReport counts the full sweep's activations, supersedes, closed proposals and per-row errors on one line", () => {
+    const report: DreamReport = {
+      ttlExtended: [],
+      downgraded: [],
+      revalidateProposals: [],
+      staled: ["m-stale"],
+      rejectedCandidates: [],
+      expiredProposals: [],
+      staledByExpiry: [],
+      mergeProposals: [],
+      fixSignatureProposals: [],
+      sweptActivated: ["m-replacement", "m-plain"],
+      sweptSuperseded: ["m-target"],
+      sweptProposalsClosed: ["p-activate"],
+      sweptErrors: ["resolution p-contest: simulated write failure"],
+      embedded: 0,
+      idleClosed: [],
+      gc: { ledgers: 0, states: 0, raw: 0, tmp: 0, audit: 0 },
+      errors: ["ttl: disk full"],
+    };
+    const lines = renderDreamReport(report);
+    expect(lines[0]).toContain("staled 1");
+    expect(lines[3]).toBe("  full sweep: activated 2, superseded 1, proposals closed 1, errors 1");
+    expect(lines.slice(4)).toEqual(["  error: ttl: disk full"]);
   });
 });
 
