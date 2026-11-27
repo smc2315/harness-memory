@@ -53,7 +53,7 @@ function insertMemory(
 }
 
 describe("migrations: fresh database", () => {
-  test("reaches user_version 21 with a clean integrity and foreign-key check", async () => {
+  test("reaches the target user_version with a clean integrity and foreign-key check", async () => {
     const db = await createTestDb({ postMigrate: false });
     try {
       expectHealthy(db);

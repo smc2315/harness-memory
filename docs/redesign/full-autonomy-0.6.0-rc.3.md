@@ -202,8 +202,8 @@ evidenceScore, confidence, ttlExpiresAt, proposalsClosed, proposalId, superseded
   `activatedToday`, or `knowledgeActivatedToday` by type), once per activated replacement. Report:
   `ReconcileReport.superseded` (the targets in walk order) and `activated` (the replacement, once); the worker's
   `reconciled` log line carries `superseded=<n>` after `activated=<n>`, `ProcessedEpisode.superseded` reaches
-  `hm extract --json` / `hm import --json`, and the per-episode CLI line reads `episode <id8> run <id8> <status>:
-  created N, activated N, superseded N, proposals N, outcomes N`.
+  `hm extract --json` / `hm dream --json` (`hm import --json` carries only the processed count), and the per-episode
+  CLI line reads `episode <id8> run <id8> <status>: created N, activated N, superseded N, proposals N, outcomes N`.
 
 ### 2.5 Budgets and transition reasons
 
@@ -247,6 +247,12 @@ Visible outside `full` for a knowledge replacement accepted by the two-session r
   pair this applies to ("no other prod system accesses tleft2 MariaDB tables", born from a correction + remember
   episode, versus "Foreign TBL_* tables are read by an external client", born from a failure → resolution episode
   without a human-signal supporter) is a deliberate outcome of rule 3, not a gap: a correction by the user resolves it.
+- A `supersede` cycle — `P(T, R)` and `P′(R, T)` both open, each row proposed as the other's replacement — is held
+  by rule 4b from both ends whenever either row passes the bar: neither contest resolves, the sweep skips both rows
+  as candidates of open proposals, and the pair waits for the proposals' 30-day expiry; afterwards each row follows
+  its own rules again (one whose `supersedes_memory_id` still names a live row stays parked until its candidate
+  expiry), as rc.2 left such a pair. Breaking a cycle in favour of the older proposal is deferred; the dogfood dump
+  has none.
 - Human targets: the proposal waits for `hm review` or expires; `full` suppresses the daily digest as in rc.2.
 - No new configuration key. The paths are bounded by the rc.2 knobs (`dream.full_sweep_per_run`, the activation caps,
   `before_tool.auto_enforcement`).

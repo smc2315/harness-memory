@@ -875,12 +875,24 @@ export interface ReconcileSessionOptions {
   probeToCache: ProbeCache | null;
 }
 
+/** One reconciled run as the worker reports it upward: the write op plus the per-run lists the log line and the CLI line print. */
+export type ReconciledSession = WriteOp & {
+  status: RunStatus;
+  outcomes: number;
+  created: string[];
+  activated: string[];
+  superseded: string[];
+  proposals: string[];
+  escalated: string[];
+  remembered: string[];
+};
+
 export function reconcileSession(
   db: SqlJsDatabase,
   ctx: WriteContext,
   item: ExtractedWork,
   options: ReconcileSessionOptions
-): WriteOp & { status: RunStatus; outcomes: number; created: string[]; activated: string[]; superseded: string[]; proposals: string[]; escalated: string[]; remembered: string[] } {
+): ReconciledSession {
   const now = ctx.now;
   if (options.probeToCache !== null) writeProbeCache(db, options.probeToCache);
 
@@ -897,7 +909,18 @@ export function reconcileSession(
     });
     options.logger.line("failed", { episode: item.descriptor.id, run: item.runId, status: item.result.status, disposition: failure.disposition, next: failure.nextAttemptAt });
     const wroteSummary = ensureDerivedSummary(db, item.descriptor.id, item.derivedSummary);
-    return { ...failure.op, wrote: failure.op.wrote || wroteSummary, status: item.result.status, outcomes: 0, created: [], activated: [], superseded: [], proposals: [], escalated: [], remembered: [] };
+    return {
+      ...failure.op,
+      wrote: failure.op.wrote || wroteSummary,
+      status: item.result.status,
+      outcomes: 0,
+      created: [],
+      activated: [],
+      superseded: [],
+      proposals: [],
+      escalated: [],
+      remembered: [],
+    };
   }
 
   const repository = new MemoryRepository(db, { clock: () => now });
