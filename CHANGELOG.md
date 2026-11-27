@@ -2,7 +2,31 @@
 
 All notable changes to `harness-memory`. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project uses [Semantic Versioning](https://semver.org/) (0.x: minor versions may break).
 
-## 0.6.0-rc.2 — unreleased
+## 0.6.0-rc.3 — unreleased
+
+Full autonomy, second pass. The rc.2 `dream` sweep was run against the author's dogfood database (356 auto candidates): it activated 154 and left two kinds of rows that no later run could ever lift — 14 rule rows born from decision-only episodes (`evidence_score 0`, parked at `candidate(evidence)` for good) and 7 extractor corrections parked behind one-session `supersede` proposals while the stale claims they correct were activated. Design and numbers: [docs/redesign/full-autonomy-0.6.0-rc.3.md](docs/redesign/full-autonomy-0.6.0-rc.3.md).
+
+### Changed
+
+- **Decision-born rules activate under `full`.** A `pitfall` / `workflow` / `policy` row whose *origin* episode carries the decision marker (`flags.decision`) counts it as `FULL_DECISION_MARKER_EVIDENCE` = 1 toward the `full` evidence bar (`evidence_score ≥ 1`), so every extracted rule with `confidence ≥ 0.7` and a reachable trigger now activates at `advise`. `evidence_score` itself stays 0; a legacy or imported row reinforced by a decision-only episode stays a candidate; `standard` / `shadow` / `off` ignore the marker.
+- **Replacement rows resolve under `full`.** An open `supersede` proposal whose target is an auto `candidate` (or `stale` by TTL) and whose replacement passes `decideTier` on its own resolves on one support: the target is superseded, the replacement is activated by `decideProposal` (`accepted by auto_rule (full_autonomy)`) with the usual TTL, sibling `supersede` / `stale` / `revalidate` proposals on the dead target and `activate_*` proposals on the replacement are closed `expired(full_autonomy)`, chained corrections (`T0 ← T ← R`) resolve in the same run, and one `full_supersede` audit row is written per superseded row. The `dream` sweep resolves these contests *before* its candidate loop (a contested candidate is never activated first), then re-checks open `supersede` / `stale` proposals on **active** targets against the two-session rule; reconcile step 7 does the same for the rows of the current extraction (outcome `tier=active; full_supersede=<ids>` on the replacement, `tier=candidate:superseded(<replacement>)` on a superseded target). A contest a human rejected (`supersede` / `stale` on the target, `activate_*` on the replacement), a human target, the human-signal rule and a replacement below the bar still leave both rows exactly as rc.2 left them.
+- **`support_sessions` counts (session, 4-hour block) pairs** — the key `distinct_session_count` and the enforcement ladder already use — so the two-session demotion rule fires in a session resumed for days. Visible under `standard` too.
+- **`knowledge_kind` follows the episode signals.** A fact the extractor labelled `correction` / `failure_resolution` whose episode carries no correction, remember or failure flag and no `correction_for` is stored as `convention` (outcome relabel `kind_without_signal`): 7-day TTL instead of 30, no `revalidate` grace, no ladder. Migration 024 (`user_version` 24, backup `memory.sqlite.bak-v23`) applies the same rule once to stored auto rows that have evidence provenance; human rows, imports, rows without provenance and rows with any signal episode are untouched, and no TTL already set is shortened. An imported bullet keeps `knowledge_kind = import`; because an import carries no episode signal, an imported `policy` the extractor labelled as a correction now stays a `policy` (rc.2 turned it into a `pitfall`), its enforcement default unchanged.
+- A `supersede` accepted by `auto_rule` gives the replacement `tierTtlDays`: a `decision` / `architecture_constraint` replacement gets 30 days (under `standard` too, where it got 7), a `task` row 7, a rule `baseTtlDays(kind)`.
+- The `full` sweep runs every resolution and activation in its own `SAVEPOINT`: a throw costs that row (reported under `sweptErrors`), never the run's other activations. Sweep resolutions carry the transition reason `full_sweep` and consume neither daily cap, as rc.2 promised for sweep activations; extraction-time resolutions are charged to the run's caps like any activation.
+
+### Added
+
+- Two `auto_rule` edges in the state machine, auto rows only: `candidate → superseded` and `stale → superseded` (the latter only with `status_reason = ttl_expired`).
+- `DreamReport.sweptSuperseded` / `sweptErrors` (the `hm dream` line and the worker log show them); `ReconcileReport.superseded` (the targets step 7 superseded, chain hops included); `hm memory:history` prints the decision note of a decided proposal (`accepted by auto_rule (full_autonomy)`).
+- `ProvenanceRepository.hasDecisionOrigin`; `src/promotion/replacement.ts` (`checkSupersedeResolution`, `applySupersedeResolution`); `humanRejectedContest`.
+
+### Fixed
+
+- On the dogfood dump the rc.2 sweep activated the stale target of a one-session `supersede` and left the correction parked for its whole TTL; rc.3 supersedes the target and activates the correction (4 of the 7 open contests resolve, the other 3 wait for a second block, a human signal, or a replacement that clears the bar).
+- Rule rows extracted from decision-only episodes (14 on the dump, among them "do not run build-migration against prod") could never reach the `full` evidence bar; they now activate at `advise` with a 7-day TTL under their true label.
+
+## 0.6.0-rc.2 — 2026-11-26
 
 Full autonomy after the first dogfood run (17 days, one work project): 153 proposals and 356 candidates waited for a review that never happened, 0 `ask` / `deny` decisions in 13,685 `PreToolUse` calls, one ladder escalation. The author's verdict — a tool that needs human intervention will not be used — becomes the default. Design and numbers: [docs/redesign/full-autonomy-0.6.0-rc.2.md](docs/redesign/full-autonomy-0.6.0-rc.2.md).
 

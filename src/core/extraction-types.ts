@@ -165,7 +165,7 @@ export interface FactOutcome {
   memory_id?: string;
   proposal_id?: string;
   rejection?: RejectionCode;
-  /** e.g. `tool_not_hooked`, `policy_to_pitfall`, `signature_dropped` */
+  /** e.g. `tool_not_hooked`, `policy_to_pitfall`, `signature_dropped`, `kind_without_signal` (0.6.0-rc.3 §1.2) */
   relabel?: string;
   detail?: string;
 }

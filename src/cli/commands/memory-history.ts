@@ -90,7 +90,7 @@ export function renderMemoryHistory(memory: MemoryRecord, report: MemoryHistoryR
   if (report.proposals.length > 0) {
     lines.push("", `proposals (${String(report.proposals.length)}):`);
     for (const proposal of report.proposals) {
-      lines.push(`  ${proposal.createdAt}  ${shortId(proposal.id)} ${proposal.kind} ${proposal.status}${proposal.decidedBy === null ? "" : ` by ${proposal.decidedBy}`}  support ${String(proposal.supportCount)}/${String(proposal.supportSessions)}`);
+      lines.push(`  ${proposal.createdAt}  ${shortId(proposal.id)} ${proposal.kind} ${proposal.status}${proposal.decidedBy === null ? "" : ` by ${proposal.decidedBy}`}${proposal.decisionNote === null ? "" : ` (${proposal.decisionNote})`}  support ${String(proposal.supportCount)}/${String(proposal.supportSessions)}`);
     }
   }
   if (report.legacy.available && (report.legacy.links.length > 0 || report.legacy.runs.length > 0)) {

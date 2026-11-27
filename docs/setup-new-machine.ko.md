@@ -48,7 +48,7 @@ hm status
 ```
 
 - **일반 터미널에서** 실행한다. Claude Code 안의 셸에서 돌리면 probe가 `nested_refusal`로 끝날 수 있다(README 문제 해결 표); 그러면 일반 터미널에서 `hm install --host claude`를 다시 실행하거나 `--skip-probe`로 넘기고 나중에 다시 probe한다. WSL에서 Claude Code를 쓰면 WSL 안에서 설치한다: 훅 명령은 리눅스 node 경로여야 하고, `/mnt/c` 아래 체크아웃은 `.claude/settings.local.json`이 하나뿐이라 한쪽만 고른다.
-- 출력에서 확인할 것: `hooks 9 events → .claude/settings.local.json (exec form)`, `node <절대경로>  (claude x.y.z)`(버전이 없으면 CLI를 못 찾은 것), `database … v23 (created)` — v0.5 DB가 있던 프로젝트면 `v23 (migrated from v9, backup …bak-v9)`, `provider claude — probe ok` 또는 `not_logged_in`, `self-test session-start ok`.
+- 출력에서 확인할 것: `hooks 9 events → .claude/settings.local.json (exec form)`, `node <절대경로>  (claude x.y.z)`(버전이 없으면 CLI를 못 찾은 것), `database … v24 (created)` — v0.5 DB가 있던 프로젝트면 `v24 (migrated from v9, backup …bak-v9)`, `provider claude — probe ok` 또는 `not_logged_in`, `self-test session-start ok`.
 - `hm doctor`: FAIL 0이어야 한다. 로그인 전의 정상 WARN은 `extraction.probe probe not_logged_in`(첫 Stop 뒤에는 `extraction.waiting`도)과 Git Bash 없는 Windows의 `env.git_bash`뿐이다. INFO 줄(`queue.depth`, `extraction.last_run`, `extraction.worker`, `embeddings off`, `hooks.p95`)은 정상이다.
 - v0.5 DB가 있던 프로젝트: 설치 전에 `memory.sqlite` 사본을 하나 더 두고(설치도 `memory.sqlite.bak-v<N>`을 만든다), 설치 뒤 `hm review`에서 `fix_scope`·`merge` 제안을 본다. 자세한 것은 [docs/redesign/upgrade-from-0.5.md](redesign/upgrade-from-0.5.md).
 - 설치 출력이 제안하면 `hm import --from CLAUDE.md`, `hm import --from auto-memory`(Claude Code의 자동 메모리 노트를 사람 규칙으로). 확인 표에서 골라 승인한다.
