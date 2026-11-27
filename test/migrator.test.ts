@@ -3,7 +3,10 @@ import type { Database as SqlJsDatabase } from "sql.js";
 
 import { TARGET_USER_VERSION } from "../src/core/paths";
 import { getCurrentVersion, getMigrationFiles, latestMigrationVersion, runMigrationsOnDb } from "../src/db/migrator";
+import { ProvenanceRepository } from "../src/db/repositories/provenance";
+import { MemoryRepository } from "../src/memory/repository";
 import { createTestDbAtVersion } from "./helpers/create-test-db";
+import { T0, autoMemory, humanMemory, insertEpisode, isoPlus } from "./helpers/memory-fixtures";
 
 function readFirstValue(db: SqlJsDatabase, sql: string): unknown {
   const result = db.exec(sql);
@@ -583,14 +586,14 @@ describe("migrator safety harness", () => {
     expect(hasColumn(db, "episodes", "summary_kind")).toBe(false);
 
     const report = runMigrationsOnDb(db);
-    expect(report).toEqual({ from: 21, to: 23, applied: ["022_episode_summaries.sql", "023_signature_precision.sql"] });
+    expect(report).toEqual({ from: 21, to: 24, applied: ["022_episode_summaries.sql", "023_signature_precision.sql", "024_knowledge_kind_signal.sql"] });
     expect(getCurrentVersion(db)).toBe(TARGET_USER_VERSION);
     expect(hasColumn(db, "episodes", "summary")).toBe(true);
     expect(hasColumn(db, "episodes", "summary_kind")).toBe(true);
     expect(readFirstValue(db, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_episodes_recall';")).toBe(1);
     expect(readFirstValue(db, "PRAGMA integrity_check;")).toBe("ok");
 
-    expect(runMigrationsOnDb(db)).toEqual({ from: 23, to: 23, applied: [] });
+    expect(runMigrationsOnDb(db)).toEqual({ from: 24, to: 24, applied: [] });
   });
 
   test("023 adds signature_precision, side_effect and horizon to memories as nullable checked columns", async () => {
@@ -599,12 +602,57 @@ describe("migrator safety harness", () => {
     for (const column of ["signature_precision", "side_effect", "horizon"]) expect(hasColumn(db, "memories", column)).toBe(false);
 
     const report = runMigrationsOnDb(db);
-    expect(report).toEqual({ from: 22, to: 23, applied: ["023_signature_precision.sql"] });
+    expect(report).toEqual({ from: 22, to: 24, applied: ["023_signature_precision.sql", "024_knowledge_kind_signal.sql"] });
     expect(getCurrentVersion(db)).toBe(TARGET_USER_VERSION);
     for (const column of ["signature_precision", "side_effect", "horizon"]) expect(hasColumn(db, "memories", column)).toBe(true);
     expect(String(readFirstValue(db, "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memories';"))).toContain("signature_precision IN ('mistake_exact', 'noun')");
     expect(readFirstValue(db, "PRAGMA integrity_check;")).toBe("ok");
-    expect(runMigrationsOnDb(db)).toEqual({ from: 23, to: 23, applied: [] });
+    expect(runMigrationsOnDb(db)).toEqual({ from: 24, to: 24, applied: [] });
+  });
+
+  test("024 relabels signal-less auto correction / failure_resolution rows to convention; human, unsourced and signal-episode rows stay", async () => {
+    db.close();
+    db = await createTestDbAtVersion(23);
+    const memories = new MemoryRepository(db, { clock: () => T0 });
+    const provenance = new ProvenanceRepository(db);
+    const decided = insertEpisode(db, { flags: { decision: 1 }, evidence_weight: 0 });
+    const corrected = insertEpisode(db, { flags: { correction: 1 } });
+    const correcting = insertEpisode(db, { correction_for: "ep-before" });
+    const cite = (memoryId: string, episodeId: string, relation: "origin" | "reinforce" = "origin") =>
+      provenance.insert({ memoryId, episodeId, eventSeq: 2, relation, confidence: 0.8, createdAt: T0 });
+
+    // (a) the dogfood shape: an active failure_resolution pitfall whose only episode "decided" something.
+    const ttl = isoPlus(T0, { days: 30 });
+    const mislabelled = memories.create(
+      autoMemory({ status: "active", knowledgeKind: "failure_resolution", ttlExpiresAt: ttl, revalidateAfter: isoPlus(T0, { days: 15 }) })
+    );
+    cite(mislabelled.id, decided.id);
+    // (b) a correction born from a correction episode.
+    const fromCorrection = memories.create(autoMemory({ knowledgeKind: "correction" }));
+    cite(fromCorrection.id, corrected.id);
+    // (c) a human row, whatever its episode.
+    const human = memories.create(humanMemory({ type: "pitfall", knowledgeKind: "correction" }));
+    cite(human.id, decided.id);
+    // (d) no provenance at all (the legacy / import shape).
+    const unsourced = memories.create(autoMemory({ knowledgeKind: "failure_resolution" }));
+    // (e) a decision-only origin reinforced by an episode that corrects another turn: one signal episode is enough.
+    const reinforcedBySignal = memories.create(autoMemory({ knowledgeKind: "correction" }));
+    cite(reinforcedBySignal.id, decided.id);
+    cite(reinforcedBySignal.id, correcting.id, "reinforce");
+
+    const report = runMigrationsOnDb(db);
+    expect(report).toEqual({ from: 23, to: 24, applied: ["024_knowledge_kind_signal.sql"] });
+    expect(getCurrentVersion(db)).toBe(TARGET_USER_VERSION);
+    const kindOf = (id: string) => readFirstValue(db, `SELECT knowledge_kind FROM memories WHERE id = '${id}';`);
+    expect(kindOf(mislabelled.id)).toBe("convention");
+    expect(kindOf(fromCorrection.id)).toBe("correction");
+    expect(kindOf(human.id)).toBe("correction");
+    expect(kindOf(unsourced.id)).toBe("failure_resolution");
+    expect(kindOf(reinforcedBySignal.id)).toBe("correction");
+    // The relabel changes what happens at expiry, not when: a TTL already set is not shortened.
+    expect(readFirstValue(db, `SELECT ttl_expires_at FROM memories WHERE id = '${mislabelled.id}';`)).toBe(ttl);
+    expect(readFirstValue(db, "PRAGMA integrity_check;")).toBe("ok");
+    expect(runMigrationsOnDb(db)).toEqual({ from: 24, to: 24, applied: [] });
   });
 
   test("migrations are idempotent in ordering", async () => {

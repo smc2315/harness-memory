@@ -389,9 +389,26 @@ export function normalizeFact(
   const compiled = fact.compiledSignature;
   const hasSignature = compiled !== null && fact.trigger_signature !== null;
   let type: MemoryType = fact.type;
+  let knowledgeKind: KnowledgeKind = fact.knowledge_kind;
+
+  // Labels follow signals (0.6.0-rc.3 §1.2): correction / failure_resolution claim that the episode corrected a turn or
+  // fixed a failure. Without one of the four signals the label is wrong by construction, and the label alone would buy
+  // the row the 30-day TTL, the revalidate grace and the auto_enforcement rule. Applied before the type rule so that
+  // rule reads the kind the episode supports: a signal-less "correction" policy with a signature stays a policy.
+  const { flags } = descriptor;
+  if (
+    (knowledgeKind === "correction" || knowledgeKind === "failure_resolution") &&
+    flags.correction !== 1 &&
+    flags.remember !== 1 &&
+    flags.failure !== 1 &&
+    descriptor.correction_for === null
+  ) {
+    knowledgeKind = "convention";
+    relabels.push("kind_without_signal");
+  }
 
   // Type boundary: a correction / failure-resolution with a signature is a pitfall, not a policy.
-  if (type === "policy" && hasSignature && (fact.knowledge_kind === "correction" || fact.knowledge_kind === "failure_resolution")) {
+  if (type === "policy" && hasSignature && (knowledgeKind === "correction" || knowledgeKind === "failure_resolution")) {
     type = "pitfall";
     relabels.push("policy_to_pitfall");
   }
@@ -436,7 +453,7 @@ export function normalizeFact(
     relevantTools,
     signatureKey,
     semanticKey,
-    knowledgeKind: fact.knowledge_kind,
+    knowledgeKind,
     failureClasses: [...failureClasses].sort(),
     relabels,
   };

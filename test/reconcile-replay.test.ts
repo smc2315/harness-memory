@@ -23,6 +23,7 @@ import { ProvenanceRepository } from "../src/db/repositories/provenance";
 import { ExtractionRunRepository } from "../src/db/repositories/runs";
 import { TransitionRepository } from "../src/db/repositories/transitions";
 import { runDream } from "../src/dream/consolidate";
+import type { ValidatedFact } from "../src/dream/extract/validate";
 import { jaccard, normalizeFact, recordExtractionFailure, scopesIntersect, summaryTokens } from "../src/dream/reconcile";
 import { MemoryRepository } from "../src/memory/repository";
 import { OVERRIDE_DOWNGRADE_EVENT } from "../src/promotion/escalation";
@@ -32,7 +33,7 @@ import { transitionMemory } from "../src/promotion/transitions";
 import { derivedRulesConsistent } from "../src/policy/derive";
 import { createTestDb } from "./helpers/create-test-db";
 import { assistantLine, loadLedgerFixture, promptLine, toolFailLine, toolOkLine } from "./helpers/ledger-fixture";
-import { autoMemory, humanMemory, isoPlus } from "./helpers/memory-fixtures";
+import { autoMemory, episodeDescriptor, humanMemory, isoPlus } from "./helpers/memory-fixtures";
 import { REPLAY_NOW, applyRun, descriptorFromLines, factFixture, outputFixture } from "./helpers/replay-run";
 
 const s01 = loadLedgerFixture("s01-correction-only.jsonl").lines.filter((line) => line.turn_key === "p1");
@@ -812,6 +813,62 @@ describe("normalization and guards", () => {
     expect(normalized.lifecycleTriggers).toEqual(["before_tool"]);
   });
 
+  /** The validator's shape of `fact` as reconcile step 2 receives it, with the fixture's `npm test` signature compiled. */
+  function validatedFixture(fact: ExtractionFact): ValidatedFact {
+    return {
+      ...fact,
+      ordinal: 0,
+      compiledSignature: {
+        tool: "bash",
+        target: "command",
+        pattern_kind: "cmd",
+        pattern: "npm test",
+        negate: false,
+        tokens: ["pm", "test"],
+        program: "npm",
+        regex_source: null,
+        signature_key: "bash|command|cmd|npm test",
+      },
+      semanticKey: "k",
+      normalizedScope: "**/*",
+      relabels: [],
+      signature_precision: "mistake_exact",
+      side_effect: "read",
+      horizon: "durable",
+    };
+  }
+
+  test("0.6.0-rc.3 §1.2: a correction / failure_resolution label without an episode signal becomes convention; signal episodes keep the kind", () => {
+    const decisionOnly = episodeDescriptor({ flags: { decision: 1 }, evidence_weight: 0 });
+    const pitfall = factFixture({ knowledge_kind: "failure_resolution", evidence_refs: ["e2"] });
+    const relabelled = normalizeFact(validatedFixture(pitfall), decisionOnly, new Map(), null);
+    expect(relabelled.type).toBe("pitfall");
+    expect(relabelled.knowledgeKind).toBe("convention");
+    expect(relabelled.relabels).toEqual(["kind_without_signal"]);
+
+    // The same fact on s02 (a failure resolved in the turn) keeps its label.
+    const failed = descriptorFromLines(s02);
+    expect(failed.flags).toEqual({ failure: 1, resolution: 1 });
+    expect(normalizeFact(validatedFixture(pitfall), failed, new Map(), null)).toMatchObject({ knowledgeKind: "failure_resolution", relabels: [] });
+
+    const correction = factFixture({ knowledge_kind: "correction", evidence_refs: ["e1"] });
+    const kept = { knowledgeKind: "correction", relabels: [] };
+    expect(normalizeFact(validatedFixture(correction), episodeDescriptor({ flags: { remember: 1 } }), new Map(), null)).toMatchObject(kept);
+    expect(normalizeFact(validatedFixture(correction), episodeDescriptor({ correction_for: "ep-corrected" }), new Map(), null)).toMatchObject(kept);
+    // A convention claims nothing about the episode: nothing to relabel.
+    const convention = normalizeFact(validatedFixture(factFixture({ knowledge_kind: "convention" })), decisionOnly, new Map(), null);
+    expect(convention).toMatchObject({ knowledgeKind: "convention", relabels: [] });
+  });
+
+  test("0.6.0-rc.3 §1.2: the type rule reads the relabelled kind, so a signal-less `correction` policy with a signature stays a policy", () => {
+    const policy = factFixture({ type: "policy", knowledge_kind: "correction", evidence_refs: ["e2"] });
+    const relabelled = normalizeFact(validatedFixture(policy), episodeDescriptor({ flags: { decision: 1 }, evidence_weight: 0 }), new Map(), null);
+    expect(relabelled).toMatchObject({ type: "policy", knowledgeKind: "convention", relabels: ["kind_without_signal"] });
+    // With the correction flag the same fact is the policy→pitfall case above.
+    const signalled = normalizeFact(validatedFixture(policy), episodeDescriptor({ flags: { correction: 1 } }), new Map(), null);
+    expect(signalled).toMatchObject({ type: "pitfall", knowledgeKind: "correction", relabels: ["policy_to_pitfall"] });
+  });
+
   test("decision facts get session_start + before_model triggers", () => {
     const descriptor = descriptorFromLines(s02);
     const fact = factFixture({ type: "decision", trigger_signature: null, lifecycle_triggers: ["before_tool"], knowledge_kind: "decision", scope_glob: "**/*", evidence_refs: ["e5"] });
@@ -1200,6 +1257,38 @@ describe("autonomy_level full (0.6.0-rc.2 §1): policies and informational rows 
     expect(standard.op.report.outcomes[0]).toMatchObject({ outcome: "created", memory_id: parked, detail: "tier=candidate:evidence" });
     expect(memories.getById(parked)).toMatchObject({ status: "candidate", evidenceScore: 0 });
     expect(new TransitionRepository(db).listForMemory(parked)).toEqual([]);
+  });
+
+  test("0.6.0-rc.3 §1.2: a failure_resolution pitfall born from a decision-only episode is stored as convention and activates with the 7-day TTL", () => {
+    // Nine of the fourteen dogfood rows: the extractor said failure_resolution although the episode holds no failure and
+    // no correction. The label, not the episode, would have given the row the 30-day TTL and the revalidate grace.
+    const lines = decisionLines("p104", 10_400);
+    const descriptor = descriptorFromLines(lines, { sessionId: "session-dec-label", turnKey: "p104" });
+    expect(descriptor.flags).toEqual({ decision: 1 });
+    const result = applyRun(db, {
+      descriptor,
+      lines,
+      output: outputFixture([
+        factFixture({
+          summary: "Use pnpm test for the suite in this workspace; npm test has no scripts here.",
+          details: "Recorded from the session's decision marker; the episode holds no failure and no correction.",
+          trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "npm test" },
+          confidence: 0.8,
+          knowledge_kind: "failure_resolution",
+          evidence_refs: ["e2"],
+          aliases: [],
+        }),
+      ]),
+    });
+    const id = result.op.report.created[0]!;
+    expect(result.op.report.activated).toEqual([id]);
+    expect(result.op.report.outcomes[0]).toMatchObject({ outcome: "activated", memory_id: id, detail: "tier=active" });
+    expect(result.op.report.outcomes[0]?.relabel).toContain("kind_without_signal");
+    // Stored under the label the episode supports: the convention's 7-day TTL (revalidate at the midpoint) at advise.
+    const row = memories.getById(id)!;
+    expect(row).toMatchObject({ type: "pitfall", status: "active", authority: "auto", enforcement: "advise", knowledgeKind: "convention", evidenceScore: 0 });
+    expect(row.ttlExpiresAt).toBe(isoPlus(REPLAY_NOW, { days: 7 }));
+    expect(row.revalidateAfter).toBe(isoPlus(REPLAY_NOW, { days: 3, hours: 12 }));
   });
 
   test("the knowledge budget is its own counter: a decision activation neither consumes nor is consumed by the rule caps, and both counters survive across runs of the day", () => {

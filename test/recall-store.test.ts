@@ -20,15 +20,15 @@ function columns(db: SqlJsDatabase, table: string): string[] {
 }
 
 describe("migration 022: episode summaries", () => {
-  test("a fresh database lands on user_version 23 with both columns and the partial index; re-running applies nothing", async () => {
+  test("a fresh database lands on user_version 24 with both columns and the partial index; re-running applies nothing", async () => {
     const db = await createTestDb();
     try {
-      expect(TARGET_USER_VERSION).toBe(23);
-      expect(userVersion(db)).toBe(23);
+      expect(TARGET_USER_VERSION).toBe(24);
+      expect(userVersion(db)).toBe(24);
       expect(columns(db, "episodes")).toEqual(expect.arrayContaining(["summary", "summary_kind"]));
       const index = db.exec("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_episodes_recall'");
       expect(index[0]?.values).toEqual([["idx_episodes_recall"]]);
-      expect(runMigrationsOnDb(db)).toEqual({ from: 23, to: 23, applied: [] });
+      expect(runMigrationsOnDb(db)).toEqual({ from: 24, to: 24, applied: [] });
     } finally {
       db.close();
     }
@@ -41,8 +41,8 @@ describe("migration 022: episode summaries", () => {
       const descriptor = episodeDescriptor({ id: "ep-v21" });
       expect(new EpisodeRepository(db).insertIfAbsent(descriptor, T0)).toBe(true);
       const report = runMigrationsOnDb(db);
-      expect(report).toEqual({ from: 21, to: 23, applied: ["022_episode_summaries.sql", "023_signature_precision.sql"] });
-      expect(getCurrentVersion(db)).toBe(23);
+      expect(report).toEqual({ from: 21, to: 24, applied: ["022_episode_summaries.sql", "023_signature_precision.sql", "024_knowledge_kind_signal.sql"] });
+      expect(getCurrentVersion(db)).toBe(24);
       const record = new EpisodeRepository(db).getById("ep-v21");
       expect(record).toMatchObject({ id: "ep-v21", status: "queued", summary: null, summaryKind: null });
       expect(() => db.run("UPDATE episodes SET summary = 'x', summary_kind = 'guessed' WHERE id = 'ep-v21'")).toThrow(/CHECK/);
