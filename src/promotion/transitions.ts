@@ -6,7 +6,7 @@
  *   candidate → active      human | auto_rule (auto only)
  *   candidate → rejected    human | expiry (auto only) | migration
  *   active    → stale       human | import | expiry (auto only) | auto_rule (auto only)
- *   candidate|active|stale → superseded   human | import ; auto_rule only from active (auto only)
+ *   candidate|active|stale → superseded   human | import | auto_rule (auto only; from stale only with status_reason = 'ttl_expired')
  *   stale     → active      human | auto_rule (auto only, status_reason = 'ttl_expired')
  *   superseded → active     human (restore)
  *
@@ -56,6 +56,10 @@ export const TRANSITION_EDGES: readonly TransitionEdge[] = [
   { from: "active", to: "superseded", actor: "import", autoOnly: false },
   { from: "stale", to: "superseded", actor: "import", autoOnly: false },
   { from: "active", to: "superseded", actor: "auto_rule", autoOnly: true },
+  // 0.6.0-rc.3 §2.6: a replacement row resolves a contest against a candidate (never shown) or a TTL-expired row (already
+  // out of the snapshot); a human's demotion keeps the human's verdict, as the stale → active edge below already does.
+  { from: "candidate", to: "superseded", actor: "auto_rule", autoOnly: true },
+  { from: "stale", to: "superseded", actor: "auto_rule", autoOnly: true, requireStatusReason: "ttl_expired" },
   { from: "stale", to: "active", actor: "human", autoOnly: false },
   { from: "stale", to: "active", actor: "auto_rule", autoOnly: true, requireStatusReason: "ttl_expired" },
   { from: "superseded", to: "active", actor: "human", autoOnly: false },
@@ -93,7 +97,12 @@ export function findTransitionEdge(
   return TRANSITION_EDGES.find((edge) => edge.from === from && edge.to === to && edge.actor === actor) ?? null;
 }
 
-/** Pure edge-table check (used by transitionMemory, the CLI and tests). */
+/**
+ * Pure edge-table check (used by transitionMemory, the CLI and tests). An edge's `requireStatusReason` is checked only
+ * when `context.statusReason` is supplied: `undefined` means the caller does not know the row's reason and the edge is
+ * allowed on its shape alone, while `null` is a known absence and fails the check. transitionMemory always passes the
+ * row's status_reason, so the stale → active / stale → superseded auto_rule edges are enforced wherever a row is written.
+ */
 export function isAllowedTransition(
   from: MemoryStatus,
   to: MemoryStatus,
