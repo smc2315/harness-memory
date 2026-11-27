@@ -865,6 +865,45 @@ describe("full sweep (0.6.0-rc.2 §1 backlog drain, 0.6.0-rc.3 §2 replacement r
     expect(again.report).toMatchObject({ sweptActivated: [], sweptSuperseded: [], sweptProposalsClosed: [], sweptErrors: [] });
   });
 
+  test("rule 4b holds the whole chain T0 ← T ← R ← S (T and R passing): one run resolves it from the correction end, all three superseded by S", async () => {
+    const now = isoPlus(T0, { days: 1 });
+    const oldest = sweepCandidate(bornAt(0));
+    // P1 and P2 are the oldest contests and both middle rows pass the bar: judged in order, P1 would activate T and P2 would then wait on it for good.
+    const middle = contest(oldest.id, bornAt(1), { now: T0 });
+    const upper = contest(middle.candidate.id, bornAt(2), { now: isoPlus(T0, { minutes: 1 }) });
+    const newest = contest(upper.candidate.id, bornAt(3), { now: isoPlus(T0, { minutes: 2 }) });
+
+    // Budget 1: the two held contests cost nothing; the one unit goes to P3, whose chain walk settles P2 and P1 in the same pass.
+    const result = await dream(now, { config: withBudget(1) });
+    expect(result.report.sweptErrors).toEqual([]);
+    expect(result.report.errors).toEqual([]);
+    expect(result.report.sweptSuperseded).toEqual([upper.candidate.id, middle.candidate.id, oldest.id]);
+    expect(result.report.sweptActivated).toEqual([newest.candidate.id]);
+    expect(result.report.sweptProposalsClosed).toEqual([]);
+    const transitions = new TransitionRepository(db);
+    for (const id of [oldest.id, middle.candidate.id, upper.candidate.id]) {
+      expect(memories.getById(id)).toMatchObject({ status: "superseded", supersededByMemoryId: newest.candidate.id, contested: 0, openProposalId: null });
+      // Never active: the row's one transition is the supersede by S.
+      expect(transitions.listForMemory(id).map((entry) => [entry.fromStatus, entry.toStatus, entry.reason])).toEqual([
+        ["candidate", "superseded", FULL_SWEEP_TRANSITION_REASON],
+      ]);
+    }
+    expect(memories.getById(newest.candidate.id)).toMatchObject({ status: "active", authority: "auto", ttlExpiresAt: isoPlus(now, { days: 30 }) });
+    const proposals = new ProposalRepository(db);
+    for (const id of [middle.proposalId, upper.proposalId, newest.proposalId]) {
+      expect(proposals.getById(id)).toMatchObject({ status: "accepted", decidedBy: "auto_rule", decisionNote: FULL_AUTONOMY_DECISION_NOTE, decidedAt: now });
+    }
+    expect(proposals.countOpen()).toBe(0);
+    expect(supersedeAudits()).toEqual([
+      { targetId: upper.candidate.id, replacementId: newest.candidate.id, proposalId: newest.proposalId, source: "sweep" },
+      { targetId: middle.candidate.id, replacementId: newest.candidate.id, proposalId: upper.proposalId, source: "sweep", via: upper.candidate.id },
+      { targetId: oldest.id, replacementId: newest.candidate.id, proposalId: middle.proposalId, source: "sweep", via: middle.candidate.id },
+    ]);
+    expect(selectAll(db, "SELECT event_type FROM audit_log WHERE event_type = 'full_sweep_activation'")).toHaveLength(1);
+    const again = await dream(isoPlus(now, { hours: 6 }), { config: FULL });
+    expect(again.report).toMatchObject({ sweptActivated: [], sweptSuperseded: [], sweptProposalsClosed: [], sweptErrors: [] });
+  });
+
   test("rule 4b holds nothing when the contest on the replacement cannot resolve: with R below the bar, P1(T0, T) resolves as before and P2 waits on the active T", async () => {
     const now = isoPlus(T0, { days: 1 });
     const oldest = sweepCandidate(bornAt(0));

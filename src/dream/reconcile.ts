@@ -78,7 +78,14 @@ import { decideTier, enforcementDefault, type DecideTierInput } from "../promoti
 import { escalateOnReinforce } from "../promotion/escalation";
 import { ACTIVATION_PROPOSAL_KINDS, evaluateAutoDemotion, humanRejectedActivation, openOrSupportProposal } from "../promotion/proposals";
 import { citesRememberPrompt, REMEMBER_MAX_PER_EPISODE, REMEMBER_STATUS_REASON, rememberEnforcement, rememberTransitionReason } from "../promotion/remember";
-import { FULL_SWEEP_TRANSITION_REASON, applySupersedeResolution, checkSupersedeResolution, type ApplySupersedeResult } from "../promotion/replacement";
+import {
+  CHAIN_MAX_DEPTH,
+  FULL_SWEEP_TRANSITION_REASON,
+  applySupersedeResolution,
+  checkSupersedeResolution,
+  type ApplySupersedeResult,
+  type SupersedeSkipReason,
+} from "../promotion/replacement";
 import { revalidateMemory } from "../promotion/revalidate";
 import { adoptActiveMemory, transitionMemory } from "../promotion/transitions";
 import { scanMemoryContent } from "../security/scanner";
@@ -1351,18 +1358,21 @@ interface ContestResolution {
   result: ApplySupersedeResult;
 }
 
+/** Why step 7 left a contest exactly as it is: the check's reason (§2.1 rules 1–4b), or `tier` when the replacement failed rule 5. */
+type ContestSkip = SupersedeSkipReason | "tier";
+
 /**
  * One `supersede` contest of step 7 (0.6.0-rc.3 §2.4, `full` only): §2.1 rules 1–4 and 4b through
  * checkSupersedeResolution, rule 5 through decideTier on the replacement as if it were not one, with the run's own
  * caps (rule 4b asks the same question about the replacement of a contest on the replacement), then
  * applySupersedeResolution (source `extraction`; the default transition reason, so unlike the sweep's this
- * activation is counted against the day caps, §2.5). Null when the contest is left exactly as it is.
+ * activation is counted against the day caps, §2.5). The skip reason when the contest is left exactly as it is.
  */
-function resolveContest(state: RunState, proposalId: string): ContestResolution | null {
+function resolveContest(state: RunState, proposalId: string): ContestResolution | ContestSkip {
   const passesTier = (candidate: MemoryRecord): boolean => decideTier(tierInputFor(state, candidate, false)).status === "active";
   const check = checkSupersedeResolution(state.db, proposalId, { passesTier });
-  if (!check.ok) return null;
-  if (check.needsTierDecision && !passesTier(check.candidate)) return null;
+  if (!check.ok) return check.reason;
+  if (check.needsTierDecision && !passesTier(check.candidate)) return "tier";
   const result = applySupersedeResolution(state.db, {
     proposalId,
     now: state.ctx.now,
@@ -1373,36 +1383,66 @@ function resolveContest(state: RunState, proposalId: string): ContestResolution 
   return { proposalId, replacement: check.candidate, result };
 }
 
+interface ContestResolutions {
+  /** Every resolution applied, the chain's included, in order. */
+  resolved: ContestResolution[];
+  /** A selected contest is `candidate_contested` (§2.1 rule 4b): its target belongs to the correction above it and never activates this run. */
+  held: boolean;
+}
+
 /**
  * Every open `supersede` contest the filter selects, resolved in turn; one that an earlier resolution closed (a sibling
  * on a dead target) or already activated (a replacement of two targets) is re-read by the check and settled without a
- * second activation. The in-memory bookkeeping is the caller's, once the candidate's writes are all in.
+ * second activation. A contest held by rule 4b (`candidate_contested`) is resolved from the correction end instead: the
+ * contests on its own replacement are resolved first (recursively, ≤ CHAIN_MAX_DEPTH hops), and the top one's chain
+ * walk settles the held contest — its target superseded by the correction, never by the contested middle row (§2.2,
+ * §2.4). The in-memory bookkeeping is the caller's, once the candidate's writes are all in.
  */
-function resolveContests(state: RunState, filter: { candidateId: string } | { targetId: string }): ContestResolution[] {
-  const resolved: ContestResolution[] = [];
+function resolveContests(state: RunState, filter: { candidateId: string } | { targetId: string }, depth = 0): ContestResolutions {
+  const resolutions: ContestResolutions = { resolved: [], held: false };
   for (const proposal of state.proposals.listOpen({ kind: "supersede", ...filter })) {
-    const resolution = resolveContest(state, proposal.id);
-    if (resolution !== null) resolved.push(resolution);
+    const contest = resolveContest(state, proposal.id);
+    if (typeof contest !== "string") {
+      resolutions.resolved.push(contest);
+    } else if (contest === "candidate_contested") {
+      resolutions.held = true;
+      if (proposal.candidateMemoryId !== null && depth < CHAIN_MAX_DEPTH) {
+        resolutions.resolved.push(...resolveContests(state, { targetId: proposal.candidateMemoryId }, depth + 1).resolved);
+      }
+    }
   }
-  return resolved;
+  return resolutions;
 }
 
-/** The report side of one candidate's resolutions: the replacement's activation charged once, every superseded target listed. */
+/**
+ * The report side of one candidate's resolutions: every superseded target listed; each activated replacement charged
+ * once and, when it is a row of this run, its outcome annotated (`tier=active; full_supersede=<targets>`) — whether its
+ * own step resolved the contest or the step of a row further down the chain reached it through rule 4b.
+ */
 function recordResolutions(state: RunState, resolutions: readonly ContestResolution[]): void {
-  for (const { replacement, result } of resolutions) {
-    if (result.replacementActivated) chargeActivation(state, replacement);
+  for (const { proposalId, replacement, result } of resolutions) {
     state.superseded.push(...result.superseded);
+    if (!result.replacementActivated) continue;
+    chargeActivation(state, replacement);
+    const outcome = tierOutcomeFor(state, replacement.id);
+    if (outcome === undefined) continue;
+    if (outcome.outcome === "created" || outcome.outcome === "reinforced") outcome.outcome = "activated";
+    outcome.proposal_id = proposalId;
+    const superseded = resolutions.filter((entry) => entry.result.replacementId === replacement.id).flatMap((entry) => entry.result.superseded);
+    appendDetail(outcome, `tier=active; full_supersede=${superseded.join(",")}`);
   }
 }
 
 /**
  * Step 7 for one candidate of this run. Under `full` (0.6.0-rc.3 §2.4) its open `supersede` contests come first, the
  * contests on the row itself before the contests it is the replacement of (§2.1 rule 4b, every candidate row alike):
- * a row that is the target of a resolvable contest is superseded instead of activated
- * (`tier=candidate:superseded(<replacement>)`) — a replacement row too, so a contradicted middle row never activates
- * through its own contest; otherwise a replacement row resolves the contests it is the replacement of and is activated
- * by that resolution (`tier=active; full_supersede=<targets>`). What no resolution settles follows the rc.2 path:
- * decideTier, the human-rejected guard, the activation or the review proposal.
+ * a row that is the target of a resolvable contest — or of one held by a resolvable contest further up the chain, which
+ * resolveContests resolves from the correction end — is superseded instead of activated
+ * (`tier=candidate:superseded(<replacement>)`), so a contradicted row never activates on its own or through its own
+ * contest; a contested row whose chain did not resolve here is left to the sweep (`tier=candidate:contested`);
+ * otherwise a replacement row resolves the contests it is the replacement of and is activated by that resolution
+ * (`tier=active; full_supersede=<targets>`, written by recordResolutions on the replacement's outcome). What no
+ * resolution settles follows the rc.2 path: decideTier, the human-rejected guard, the activation or the review proposal.
  */
 function decideTierOf(state: RunState, memoryId: string): void {
   const { config } = state.ctx;
@@ -1415,20 +1455,22 @@ function decideTierOf(state: RunState, memoryId: string): void {
 
   if (config.autonomy_level === "full") {
     const onRow = resolveContests(state, { targetId: memory.id });
-    const asReplacement = onRow.length === 0 && isReplacementRow ? resolveContests(state, { candidateId: memory.id }) : [];
-    const resolutions = onRow.length > 0 ? onRow : asReplacement;
-    const first = resolutions[0];
-    if (first !== undefined) {
+    // A row with a held contest is spoken for: it is never judged as a replacement, which would activate it (rule 4b).
+    const asReplacement = onRow.resolved.length === 0 && !onRow.held && isReplacementRow ? resolveContests(state, { candidateId: memory.id }) : null;
+    const resolutions = asReplacement === null ? onRow.resolved : asReplacement.resolved;
+    if (resolutions.length > 0) {
       recordResolutions(state, resolutions);
-      if (onRow.length === 0) {
-        if (outcome !== undefined) {
-          if (outcome.outcome === "created" || outcome.outcome === "reinforced") outcome.outcome = "activated";
-          outcome.proposal_id = first.proposalId;
-          appendDetail(outcome, `tier=active; full_supersede=${resolutions.flatMap((entry) => entry.result.superseded).join(",")}`);
-        }
-      } else {
+      // Superseded by the chain, through a contest on the row or on a row above it: the row's own annotation. Otherwise
+      // the row is the replacement recordResolutions just annotated as active.
+      if (state.repository.getById(memory.id)?.status === "superseded") {
         appendDetail(outcome, `tier=candidate:superseded(${resolutions.map((entry) => entry.result.replacementId).join(",")})`);
       }
+      return;
+    }
+    if (onRow.held || asReplacement?.held === true) {
+      // §2.4: a contested candidate whose contest is resolvable is superseded, never activated. The correction above it
+      // did not resolve here (a chain past CHAIN_MAX_DEPTH, a cycle): the sweep's phase 1 settles it.
+      appendDetail(outcome, "tier=candidate:contested");
       return;
     }
   }

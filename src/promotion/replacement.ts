@@ -8,9 +8,10 @@
  *   active, when another contest of the same run activated it — that no human declined to activate and that no open
  *   proposal of another kind parks. Rule 5, `decideTier` on `R`, is the caller's (it owns the budgets) and is passed in
  *   as `passesTier`, because rule 4b needs it: when `R` is itself the target of an open contest `P′(R, R′)` that is
- *   resolvable (rules 1–5 on `P′`, recursively, ≤ CHAIN_MAX_DEPTH), `P` is `candidate_contested` — the chain is resolved
- *   from the correction end, so `P′`'s resolution walks `P` and `T` is superseded by `R′`, never by the contested `R`
- *   (§2.2, §2.4). A contest on `R` that cannot resolve holds nothing (§3): `P` proceeds as if it were not there.
+ *   resolvable — rules 1–5 on `P′`, or rules 1–4 with `P′` held in turn by a resolvable contest on `R′`, recursively up
+ *   to CHAIN_MAX_DEPTH — `P` is `candidate_contested`: the chain is resolved from the correction end, so the resolution
+ *   at its top walks `P′` and then `P`, and `T` is superseded by the correction, never by the contested `R` (§2.2,
+ *   §2.4). A contest on `R` that cannot resolve holds nothing (§3): `P` proceeds as if it were not there.
  * - `applySupersedeResolution`: §2.2. `decideProposal(accept, auto_rule, full_autonomy)` is the one writer of
  *   `T → superseded` and `R → active` (TTL from tierTtlDays); nothing here activates `R` a second time. Then what the
  *   dead target and the activated row leave behind is closed: `T`'s other contests (`expired`), the `supersede`
@@ -129,12 +130,14 @@ export function checkSupersedeResolution(db: SqlJsDatabase, proposalId: string, 
   if (humanRejectedActivation(proposals, candidate.id)) return { ok: false, reason: "candidate_human_rejected" };
 
   // Rule 4b: a resolvable contest on R resolves first and settles this one through its chain walk (T is then superseded
-  // by R's replacement, never by the contested R). An unresolvable contest on R holds nothing (§3). An active R keeps the
-  // two-session rule for its own contests, so they never resolve here.
+  // by R's replacement, never by the contested R). A contest on R that is itself candidate_contested passed rules 1–4 and
+  // is walked by the resolution further up, which then walks this one too, so it holds P as well. An unresolvable
+  // contest on R holds nothing (§3). An active R keeps the two-session rule for its own contests, so they never resolve here.
   if (depth < CHAIN_MAX_DEPTH) {
     for (const contest of proposals.listOpen({ kind: "supersede", targetId: candidate.id })) {
       const inner = checkSupersedeResolution(db, contest.id, options, depth + 1);
-      if (inner.ok && (!inner.needsTierDecision || options.passesTier(inner.candidate))) return { ok: false, reason: "candidate_contested" };
+      const held = inner.ok ? !inner.needsTierDecision || options.passesTier(inner.candidate) : inner.reason === "candidate_contested";
+      if (held) return { ok: false, reason: "candidate_contested" };
     }
   }
 

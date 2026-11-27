@@ -465,6 +465,55 @@ describe("(f') full (0.6.0-rc.3 §2.4): a contest against a never-shown candidat
     });
   }
 
+  /** One hop further up the same chain (T0 ← T ← R ← S): a claim against the correction itself, with a third text and signature. */
+  function upperChainFact(targetId: string): ExtractionFact {
+    return factFixture({
+      action: "propose_supersede",
+      target_memory_id: targetId,
+      summary: "Start the suite through pnpm vitest run --project unit; bun test ignores the vitest config in this repository.",
+      details: "bun's runner does not read vitest.config.ts; CI runs the pnpm script with the unit project.",
+      trigger_signature: { tool: "bash", target: "command", pattern_kind: "cmd", pattern: "bun test" },
+      knowledge_kind: "failure_resolution",
+      evidence_refs: ["e2", "e4"],
+      confidence: 0.9,
+      aliases: [],
+    });
+  }
+
+  /** The `standard` run that parks a replacement against `target` with its own contest: the proposal it opened and the replacement row. */
+  function openChainHop(target: { id: string }, fact: (targetId: string) => ExtractionFact, sessionId: string, turnKey: string) {
+    const run = applyRun(db, {
+      descriptor: descriptorFromLines(s02, { sessionId, turnKey }),
+      lines: s02,
+      output: outputFixture([fact(target.id)]),
+      config: STANDARD,
+    });
+    expect(run.op.report.outcomes[0]).toMatchObject({ outcome: "superseded_proposed" });
+    expect(run.op.report.outcomes[0]?.detail).toContain("tier=candidate:replacement");
+    const proposal = new ProposalRepository(db).listOpen({ kind: "supersede", targetId: target.id })[0]!;
+    const replacement = memories.getById(proposal.candidateMemoryId!)!;
+    expect(replacement).toMatchObject({ status: "candidate", authority: "auto", supersedesMemoryId: target.id });
+    return { proposal, replacement };
+  }
+
+  /** The reinforce of a contest target by its own words (the s02 claim's shape), from `sessionId`. */
+  function reinforceRun(targetId: string, sessionId: string, turnKey: string, now: string) {
+    return applyRun(db, {
+      descriptor: descriptorFromLines(s02, { sessionId, turnKey }),
+      lines: s02,
+      output: outputFixture([
+        factFixture({
+          action: "reinforce",
+          target_memory_id: targetId,
+          summary: "Run the suite with npm test in this repository.",
+          knowledge_kind: "convention",
+          evidence_refs: ["e2", "e4"],
+        }),
+      ]),
+      now,
+    });
+  }
+
   test("0.6.0-rc.3 §2.1 rule 4b: a replacement row reinforced while it is itself the target of a resolvable contest is superseded by that replacement, not activated through its own contest", () => {
     // Two `standard` sessions left the chain open: P1(T0, T) with T passing on its own, P2(T, R) with R passing.
     const oldest = memories.create(contestTarget("candidate"));
@@ -518,8 +567,9 @@ describe("(f') full (0.6.0-rc.3 §2.4): a contest against a never-shown candidat
 
   test("the chain T0 ← T ← R completed in one `full` run (T0 reinforced, R created as T's replacement) ends with T0 and T superseded by R", () => {
     // V7 (`rejected_no_target`) refuses a claim against a row the same run creates, so T is the replacement an earlier
-    // `standard` session proposed; T0's reinforce and R's claim against T arrive together in this run.
-    const oldest = memories.create(contestTarget("candidate"));
+    // `standard` session proposed; T0's reinforce and R's claim against T arrive together in this run. T0 passes decideTier
+    // on its own (relevant tool, evidence from the reinforce) and is decided before R: its held contest must still win.
+    const oldest = memories.create(contestTarget("candidate", { relevantTools: ["bash"] }));
     const { proposal: first, replacement: middle } = openContest(oldest);
 
     const later = isoPlus(REPLAY_NOW, { hours: 1 });
@@ -534,7 +584,9 @@ describe("(f') full (0.6.0-rc.3 §2.4): a contest against a never-shown candidat
     });
     const [reinforce, claim] = run.op.report.outcomes;
     const newest = memories.getById(claim!.memory_id!)!;
+    // T0's own step resolved the chain from the correction end: its outcome says superseded, R's (the replacement of this run) says active.
     expect(reinforce).toMatchObject({ outcome: "reinforced", memory_id: oldest.id });
+    expect(reinforce?.detail).toContain(`tier=candidate:superseded(${newest.id})`);
     expect(claim).toMatchObject({ outcome: "superseded_proposed", memory_id: newest.id });
     expect(claim?.detail).toContain(`tier=active; full_supersede=${middle.id},${oldest.id}`);
     expect(run.op.report.activated).toEqual([newest.id]);
@@ -545,7 +597,126 @@ describe("(f') full (0.6.0-rc.3 §2.4): a contest against a never-shown candidat
     const proposals = new ProposalRepository(db);
     expect(proposals.getById(first.id)).toMatchObject({ status: "accepted", decidedBy: "auto_rule", decisionNote: FULL_AUTONOMY_DECISION_NOTE });
     expect(proposals.getById(claim!.proposal_id!)).toMatchObject({ status: "accepted", decidedBy: "auto_rule", decisionNote: FULL_AUTONOMY_DECISION_NOTE });
+    // T0 was never active: its one transition is the supersede by R through P1.
+    expect(new TransitionRepository(db).listForMemory(oldest.id)).toEqual([
+      expect.objectContaining({ fromStatus: "candidate", toStatus: "superseded", actor: "auto_rule", proposalId: first.id, extractionRunId: run.runId }),
+    ]);
     expect(memories.list({ status: ["candidate", "active"] }).map((row) => row.id)).toEqual([newest.id]);
+  });
+
+  test("a passing plain candidate reinforced while its only contest P1(T0, T) is held by a resolvable P2(T, R) is superseded by R, never activated", () => {
+    // Two `standard` sessions left the chain open; T0 would activate on its own (relevant tool, evidence from the reinforce).
+    const oldest = memories.create(contestTarget("candidate", { relevantTools: ["bash"] }));
+    const { proposal: first, replacement: middle } = openContest(oldest);
+    const { proposal: second, replacement: newest } = openChainHop(middle, chainFact, "session-b", "p2b");
+
+    const later = isoPlus(REPLAY_NOW, { hours: 1 });
+    const three = reinforceRun(oldest.id, "session-c", "p2c", later);
+    expect(three.op.report.reinforced).toEqual([oldest.id]);
+    expect(three.op.report.outcomes[0]).toMatchObject({ outcome: "reinforced", memory_id: oldest.id });
+    expect(three.op.report.outcomes[0]?.detail).toContain(`tier=candidate:superseded(${newest.id})`);
+    expect(three.op.report.activated).toEqual([newest.id]);
+    expect(three.op.report.superseded).toEqual([middle.id, oldest.id]);
+    expect(memories.getById(oldest.id)).toMatchObject({ status: "superseded", supersededByMemoryId: newest.id, evidenceScore: 2 });
+    expect(memories.getById(middle.id)).toMatchObject({ status: "superseded", supersededByMemoryId: newest.id });
+    expect(memories.getById(newest.id)).toMatchObject({ status: "active", authority: "auto" });
+    expect(memories.getById(newest.id)?.ttlExpiresAt).toBe(isoPlus(later, { days: 30 }));
+    const proposals = new ProposalRepository(db);
+    expect(proposals.getById(first.id)).toMatchObject({
+      status: "accepted",
+      decidedBy: "auto_rule",
+      decisionNote: FULL_AUTONOMY_DECISION_NOTE,
+      supportCount: 1,
+    });
+    expect(proposals.getById(second.id)).toMatchObject({ status: "accepted", decidedBy: "auto_rule", decisionNote: FULL_AUTONOMY_DECISION_NOTE });
+    // T0 was never active: its one transition is the supersede by R through P1, written in this run; T's is the supersede through P2.
+    const transitions = new TransitionRepository(db);
+    expect(transitions.listForMemory(oldest.id)).toEqual([
+      expect.objectContaining({ fromStatus: "candidate", toStatus: "superseded", actor: "auto_rule", proposalId: first.id, extractionRunId: three.runId }),
+    ]);
+    expect(transitions.listForMemory(middle.id)).toEqual([
+      expect.objectContaining({ fromStatus: "candidate", toStatus: "superseded", actor: "auto_rule", proposalId: second.id, extractionRunId: three.runId }),
+    ]);
+    expect(supersedeAudits()).toEqual([
+      { sessionId: "session-c", details: { targetId: middle.id, replacementId: newest.id, proposalId: second.id, source: "extraction" } },
+      { sessionId: "session-c", details: { targetId: oldest.id, replacementId: newest.id, proposalId: first.id, source: "extraction", via: middle.id } },
+    ]);
+    expect(memories.list({ status: ["candidate", "active"] }).map((row) => row.id)).toEqual([newest.id]);
+  });
+
+  test("rule 4b holds the whole chain at extraction: T reinforced while P2(T, R) and P3(R, S) are open ends with T0, T and R superseded by S, S active", () => {
+    // Three `standard` sessions left the chain T0 ← T ← R ← S open, every middle row passing on its own.
+    const oldest = memories.create(contestTarget("candidate", { relevantTools: ["bash"] }));
+    const { proposal: first, replacement: middle } = openContest(oldest);
+    const { proposal: second, replacement: upper } = openChainHop(middle, chainFact, "session-b", "p2b");
+    const { proposal: third, replacement: newest } = openChainHop(upper, upperChainFact, "session-c", "p2c");
+
+    const later = isoPlus(REPLAY_NOW, { hours: 1 });
+    const four = applyRun(db, {
+      descriptor: descriptorFromLines(s02, { sessionId: "session-d", turnKey: "p2d" }),
+      lines: s02,
+      output: outputFixture([{ ...supersedeFact(oldest.id), action: "reinforce", target_memory_id: middle.id }]),
+      now: later,
+    });
+    expect(four.op.report.reinforced).toEqual([middle.id]);
+    expect(four.op.report.outcomes[0]).toMatchObject({ outcome: "reinforced", memory_id: middle.id });
+    // T is not activated through its own contest P1 and not left a candidate: P3 resolves first and its chain walk reaches T and T0.
+    expect(four.op.report.outcomes[0]?.detail).toContain(`tier=candidate:superseded(${newest.id})`);
+    expect(four.op.report.activated).toEqual([newest.id]);
+    expect(four.op.report.superseded).toEqual([upper.id, middle.id, oldest.id]);
+    const transitions = new TransitionRepository(db);
+    for (const id of [oldest.id, middle.id, upper.id]) {
+      expect(memories.getById(id)).toMatchObject({ status: "superseded", supersededByMemoryId: newest.id, contested: 0, openProposalId: null });
+      expect(transitions.listForMemory(id).map((entry) => [entry.fromStatus, entry.toStatus, entry.actor])).toEqual([["candidate", "superseded", "auto_rule"]]);
+    }
+    expect(memories.getById(newest.id)).toMatchObject({ status: "active", authority: "auto", supersedesMemoryId: upper.id });
+    expect(memories.getById(newest.id)?.ttlExpiresAt).toBe(isoPlus(later, { days: 30 }));
+    const proposals = new ProposalRepository(db);
+    for (const id of [first.id, second.id, third.id]) {
+      expect(proposals.getById(id)).toMatchObject({ status: "accepted", decidedBy: "auto_rule", decisionNote: FULL_AUTONOMY_DECISION_NOTE });
+    }
+    expect(proposals.countOpen()).toBe(0);
+    expect(supersedeAudits()).toEqual([
+      { sessionId: "session-d", details: { targetId: upper.id, replacementId: newest.id, proposalId: third.id, source: "extraction" } },
+      { sessionId: "session-d", details: { targetId: middle.id, replacementId: newest.id, proposalId: second.id, source: "extraction", via: upper.id } },
+      { sessionId: "session-d", details: { targetId: oldest.id, replacementId: newest.id, proposalId: first.id, source: "extraction", via: middle.id } },
+    ]);
+    expect(memories.list({ status: ["candidate", "active"] }).map((row) => row.id)).toEqual([newest.id]);
+  });
+
+  test("a supersede cycle P(T, R), P′(R, T) with both rows passing resolves and activates nothing: the reinforced T stays a candidate (contested)", () => {
+    // Rule 4b holds each contest through the other and the bounded chain walk finds no correction end: the row is left to the sweep, never activated.
+    const target = memories.create(contestTarget("candidate", { relevantTools: ["bash"] }));
+    const rival = memories.create(
+      contestTarget("candidate", { relevantTools: ["bash"], summary: "Run the suite with yarn test in this repository.", supersedesMemoryId: target.id })
+    );
+    memories.updateDerived(rival.id, { evidenceScore: 2, evidenceCount: 2, distinctSessionCount: 1 });
+    const open = (targetId: string, candidateId: string): string =>
+      openOrSupportProposal(db, {
+        kind: "supersede",
+        targetMemoryId: targetId,
+        candidateMemoryId: candidateId,
+        rationale: "supersede: newer claim",
+        confidence: 0.8,
+        createdBy: "extractor",
+        now: REPLAY_NOW,
+        expiresInDays: 30,
+      }).proposalId!;
+    const forward = open(target.id, rival.id);
+    const backward = open(rival.id, target.id);
+
+    const run = reinforceRun(target.id, "session-b", "p2b", isoPlus(REPLAY_NOW, { hours: 1 }));
+    expect(run.op.report.outcomes[0]).toMatchObject({ outcome: "reinforced", memory_id: target.id });
+    expect(run.op.report.outcomes[0]?.detail).toContain("tier=candidate:contested");
+    expect(run.op.report.activated).toEqual([]);
+    expect(run.op.report.superseded).toEqual([]);
+    expect(memories.getById(target.id)).toMatchObject({ status: "candidate", evidenceScore: 2 });
+    expect(memories.getById(rival.id)?.status).toBe("candidate");
+    const proposals = new ProposalRepository(db);
+    expect(proposals.getById(forward)?.status).toBe("open");
+    expect(proposals.getById(backward)?.status).toBe("open");
+    expect(new TransitionRepository(db).listForMemory(target.id)).toEqual([]);
+    expect(supersedeAudits()).toEqual([]);
   });
 
   test("§2.1 rule 1 at extraction: a stale(ttl_expired) target resolves on the first support — stale → superseded, replacement active with its 30-day TTL", () => {

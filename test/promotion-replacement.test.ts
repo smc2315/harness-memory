@@ -286,6 +286,43 @@ describe("checkSupersedeResolution (design §2.1 rules 1–4)", () => {
     contest(active.id, { summary: "Row said to replace the active replacement", confidence: 0.85 });
     expect(check(onActive, confidenceBar)).toMatchObject({ ok: true, needsTierDecision: false, candidate: { id: active.id, status: "active" } });
   });
+
+  test("rule 4b holds the whole chain T0 ← T ← R ← S (T and R passing): P1 and P2 candidate_contested, P3 ok and its resolution walks both", () => {
+    const oldest = memories.create(autoMemory({ summary: "Oldest target" }));
+    const middle = contest(oldest.id, { summary: "Middle row, passes the bar", confidence: 0.85 });
+    const upper = contest(middle.candidate.id, { summary: "Upper row, passes the bar", confidence: 0.85 });
+    const newest = contest(upper.candidate.id, { summary: "Newest row, passes the bar", confidence: 0.85 });
+
+    // P2(T, R) is held by P3(R, S); a held P2 passed rules 1–4 itself, so it holds P1(T0, T) in turn: P3's chain walk reaches both.
+    expect(check(middle.proposalId, confidenceBar)).toEqual({ ok: false, reason: "candidate_contested" });
+    expect(check(upper.proposalId, confidenceBar)).toEqual({ ok: false, reason: "candidate_contested" });
+    expect(check(newest.proposalId, confidenceBar)).toMatchObject({
+      ok: true,
+      needsTierDecision: true,
+      target: { id: upper.candidate.id },
+      candidate: { id: newest.candidate.id },
+    });
+    // With S below the bar the top resolves nothing and holds nothing (§3): P2 proceeds as if P3 were not there and still holds P1.
+    const belowBar = (candidate: MemoryRecord): boolean => candidate.id !== newest.candidate.id;
+    expect(check(newest.proposalId, belowBar)).toMatchObject({ ok: true, needsTierDecision: true });
+    expect(check(upper.proposalId, belowBar)).toMatchObject({ ok: true, needsTierDecision: true, candidate: { id: upper.candidate.id } });
+    expect(check(middle.proposalId, belowBar)).toEqual({ ok: false, reason: "candidate_contested" });
+
+    const result = sweep(newest.proposalId);
+    expect(result).toMatchObject({
+      replacementId: newest.candidate.id,
+      replacementActivated: true,
+      superseded: [upper.candidate.id, middle.candidate.id, oldest.id],
+      proposalsAccepted: [newest.proposalId, upper.proposalId, middle.proposalId],
+      proposalsClosed: [],
+    });
+    for (const id of [oldest.id, middle.candidate.id, upper.candidate.id]) {
+      expect(memories.getById(id)).toMatchObject({ status: "superseded", supersededByMemoryId: newest.candidate.id, contested: 0, openProposalId: null });
+      expect(transitions.listForMemory(id).map((entry) => entry.toStatus)).toEqual(["superseded"]);
+    }
+    expect(memories.getById(newest.candidate.id)?.status).toBe("active");
+    expect(proposals.countOpen()).toBe(0);
+  });
 });
 
 describe("chainTargets (the rows a resolution's chain walk would reach)", () => {
