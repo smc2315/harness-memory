@@ -103,6 +103,18 @@ parked exactly as before.
    `originDecisionMarker` per §1.1, the caller's `scanSafe` and budgets): valid scope, scanner, `confidence ≥ 0.7`,
    reachable trigger, the evidence bar, the caps. A replacement below the bar resolves nothing and holds nothing.
 
+Rule **4b** — chains resolve from the correction end. After rules 1–4, when `R` is itself the target of an open
+`supersede` contest `P′(R, R′)` that is resolvable — ok under rules 1–4 and, unless `R′` is already active, passing
+rule 5 as the caller judges it (`SupersedeCheckOptions.passesTier`: the sweep and reconcile each pass their own
+`decideTier` call) — or that is itself held by this rule (recursively, up to `CHAIN_MAX_DEPTH` = 10), `P` is skipped as
+`candidate_contested`: the contest on `R` resolves first and its chain walk (§2.2) settles `P`, so `T` is superseded by
+`R′`, never by the contradicted `R`. In a chain `T0 ← T ← R ← S` with `T` and `R` passing, `P(T0, T)` and `P(T, R)` are
+`candidate_contested` and `P(R, S)` is ok: that one resolution supersedes `R`, `T` and `T0` by `S` (three
+`full_supersede` rows, `via` on the hops). When no contest on `R` is resolvable (`R′` below the bar, `R′`
+human-rejected, …) `P` proceeds as before, and an active `R` keeps the two-session rule for its own contests, so `P` on
+an active `R` is ok without a tier decision. A `candidate_contested` skip costs no budget unit and leaves no report
+entry: the later contest in the same pass resolves it.
+
 ### 2.2 Candidate and stale targets resolve on one support
 
 For a resolvable `P(T, R)` the resolution is `decideProposal({ accept: true, decidedBy: "auto_rule", note:
@@ -123,37 +135,75 @@ For a resolvable `P(T, R)` the resolution is `decideProposal({ accept: true, dec
 - `open_proposal_id` / `contested` are refreshed on every touched target; one `audit_log` row `full_supersede` per
   superseded row (`targetId`, `replacementId`, `proposalId`, `source: "sweep" | "extraction"`, `via` for chain hops).
 
+The walk is idempotent across diamonds: every proposal is re-read before it is decided and a hop that an earlier hop's
+recursion already closed is skipped, so two paths to the same proposal never throw `Proposal … is already expired`;
+`proposalsAccepted` / `proposalsClosed` list each id at most once and `superseded` lists `T` first, then the chain
+targets in walk order. `CONTESTING_KINDS` (`supersede`, `stale`, `revalidate`; exported from `promotion/proposals.ts`)
+is the one definition behind the sibling closure and `flagTarget`'s `contested` flag; `chainTargets(proposals,
+targetId)` (read-only, the same `CHAIN_MAX_DEPTH`) lists the targets behind a row through open `supersede` proposals,
+nearest first, each once — decided proposals do not count.
+
 ### 2.3 Active targets keep the two-session rule — and the rule becomes reachable
 
 A row that is **active** was injected; rc.2's protection against erasing it on one extractor claim stands under every
-level: `evaluateAutoDemotion` (target active, `support_sessions ≥ 2`, human-signal rule, no policy target). What rc.3
-fixes is the counter. `support_sessions` is now `COUNT(DISTINCT (session_id, 4-hour block of episodes.started_at))`
+level: `evaluateAutoDemotion` (target active, `support_sessions ≥ 2`, human-signal rule, no policy target). The rule
+has never been gated by `autonomy_level`: reconcile step 6 runs it under `off`, `shadow` and `standard` exactly as under
+`full`, so everything this section changes about it applies under every level. rc.3 adds the human veto to it: a
+`supersede` / `stale` on the target that a human rejected returns `target_human_rejected`, a human-rejected
+`activate_policy` / `activate_global` on the replacement of a `supersede` returns `candidate_human_rejected`
+(`humanRejectedContest` / `humanRejectedActivation`), both checked right after the target's status and before the
+session count, at extraction time (outcome detail `support=<count>/<sessions> (target_human_rejected)` /
+`(candidate_human_rejected)`) and in the sweep's phase 2. What rc.3 also fixes is the counter. `support_sessions` is
+now `COUNT(DISTINCT (session_id, 4-hour block of episodes.started_at))`
 over the proposal's supporters — the same key `distinct_session_count` has used since rc.2 §4 — instead of
 `COUNT(DISTINCT session_id)`, so a claim repeated in another block of the same resumed session is a second session.
 The sweep additionally re-evaluates every open `supersede` / `stale` proposal whose target is an active auto row:
 `recomputeDerived(P)` then `evaluateAutoDemotion(P)`, so a proposal that already has two blocks resolves at the next
 `dream` instead of waiting for a fresh support. A replacement that resolves this way is activated by `decideProposal`
-with the same TTL rule as §2.2.
+with the same TTL rule as §2.2 and gets the sweep's activation bookkeeping: its open `activate_policy` /
+`activate_global` proposals are closed `expired` by `auto_rule` with decision note `full_autonomy` (ids appended to
+`DreamReport.sweptProposalsClosed`) and one `audit_log` row `full_sweep_activation` is written — summary `full sweep:
+<type> <summary> activated via supersede of <targetId> (evidence N, confidence C)`, `details_json` `{ memoryId, type,
+evidenceScore, confidence, ttlExpiresAt, proposalsClosed, proposalId, superseded: [targetId] }`.
 
 ### 2.4 Where it runs
 
 - **`dream` full sweep** (`autonomy_level: full` only). Order inside the step: (1) open `supersede` proposals, oldest
   first, whose target is an auto `candidate` / `stale(ttl_expired)` and whose candidate is an auto candidate — each
-  checked (§2.1), evaluated (`decideTier` with the sweep's own budget) and resolved (§2.2); (2) open `supersede` /
-  `stale` proposals on active auto targets — recount and `evaluateAutoDemotion` (§2.3); (3) the rc.2 candidate loop,
-  which now re-reads each row before deciding (a target superseded in phase 1 is skipped) and passes
-  `originDecisionMarker`. Because phase 1 runs first, a contested candidate whose contest is resolvable is superseded
+  checked (§2.1; a contest rule 4b holds is skipped as `candidate_contested`, no unit, no report entry — the later
+  contest in the same pass resolves it through its chain walk), evaluated (`decideTier` with the sweep's own budget)
+  and resolved (§2.2); (2) open `supersede` / `stale` proposals on active auto targets — recount and
+  `evaluateAutoDemotion` (§2.3), no unit, with the activation bookkeeping of §2.3; an application makes the `dream`
+  op non-noop; (3) the rc.2 candidate loop, which now re-reads each row before deciding (a target superseded in
+  phase 1 is skipped) and passes `originDecisionMarker`. `dream.full_sweep_per_run = 0` switches phases 1 and 3 off;
+  phase 2 still runs. Because phase 1 runs first, a contested candidate whose contest is resolvable is superseded
   before the loop could activate it; a candidate whose contest is not resolvable (replacement below the bar, human-signal
   rule, human target) activates as under rc.2 — nothing is held. Each resolution and each activation runs in its own
-  `SAVEPOINT` (as reconcile runs every fact): a throw costs that row, is reported in `report.sweptErrors`, and never rolls
-  back the run's other activations. A resolution costs one unit of `dream.full_sweep_per_run`.
-- **Extraction (reconcile step 7, `full` only).** Per-candidate `SAVEPOINT`. For a tier candidate that is the candidate
-  of open `supersede` proposals, each proposal is checked and resolved the same way (source `extraction`); if none
-  resolves the row stays `candidate(replacement)`. For a plain tier candidate `M`, open `supersede` proposals whose
-  target is `M` are resolved first; if one resolves, `M` is superseded and not activated (`tier=candidate:superseded(<replacement>)`).
-  An activation through a resolution is charged to the run's caps like any `decideTier` activation
-  (`activatedThisRun` / `activatedToday`, or `knowledgeActivatedToday` by type); outcome detail
-  `tier=active; full_supersede=<target ids>`, report field `superseded`.
+  `SAVEPOINT` (as reconcile runs every fact): a throw costs that row, is reported in `report.sweptErrors`
+  (`resolution <proposalId>: <message>` / `activation <memoryId>: <message>`), and never rolls back the run's other
+  activations; a resolution that threw holds its target **and** every chain target behind it (`chainTargets`) back
+  from phase 3 in that run, so the retry at the next `dream` finds the chain intact. A resolution costs one unit of
+  `dream.full_sweep_per_run`. `DreamReport.sweptActivated` lists the auto rows the sweep activated — by `decideTier` in
+  phase 3, by `decideProposal` as the replacement of a resolved or demoted contest in phases 1–2.
+- **Extraction (reconcile step 7, `full` only).** Per-candidate `SAVEPOINT`. For every tier candidate `M` the open
+  `supersede` contests whose *target* is `M` are resolved first (source `extraction`); only when none resolved and `M`
+  is a replacement row are the contests it is the *candidate* of resolved, and if none resolves the row stays
+  `candidate(replacement)`. A contest rule 4b holds is resolved from the correction end here too: the step recurses on
+  the contests whose target is that contest's candidate (up to `CHAIN_MAX_DEPTH`), and `M` is then superseded through
+  the top resolution's chain walk, never activated; a contested candidate whose chain did not resolve in this run (a
+  `supersede` cycle, a chain deeper than `CHAIN_MAX_DEPTH`) is left to the sweep's phase 1 with outcome detail
+  `tier=candidate:contested`. The outcome annotations are written the moment a resolution is applied, for every row of
+  this run it touched: each superseded target gets `tier=candidate:superseded(<replacementId>)` — exactly one id, the
+  replacement that superseded it (`S` for `T0` in a 3-chain) — and the activated replacement gets `tier=active;
+  full_supersede=<targetIds>` (walk order, `T` then the chain hops) with `proposal_id` = the resolving contest (a
+  `created` / `reinforced` entry flips to `activated`, a `superseded_proposed` entry keeps its kind). A row annotated
+  this way is no longer `candidate`, so its own step-7 entry adds nothing: `tier=` appears once per detail. An
+  activation through a resolution is charged to the run's caps like any `decideTier` activation (`activatedThisRun` /
+  `activatedToday`, or `knowledgeActivatedToday` by type), once per activated replacement. Report:
+  `ReconcileReport.superseded` (the targets in walk order) and `activated` (the replacement, once); the worker's
+  `reconciled` log line carries `superseded=<n>` after `activated=<n>`, `ProcessedEpisode.superseded` reaches
+  `hm extract --json` / `hm import --json`, and the per-episode CLI line reads `episode <id8> run <id8> <status>:
+  created N, activated N, superseded N, proposals N, outcomes N`.
 
 ### 2.5 Budgets and transition reasons
 
@@ -174,18 +224,26 @@ human row still throws `AuthorityViolationError` before anything is written.
 The `auto_rule` accept of a `supersede` gives the replacement `tierTtlDays(kind, horizon, type)` instead of
 `horizon === task ? 7 : baseTtlDays(kind)`: a `task` row still gets 7 days, a rule keeps `baseTtlDays`, and a
 `decision` / `architecture_constraint` replacement gets `KNOWLEDGE_TTL_DAYS` (30) like every other knowledge activation.
-Visible under `standard` only for a knowledge replacement accepted by the two-session rule (7 → 30 days).
+Visible outside `full` for a knowledge replacement accepted by the two-session rule (7 → 30 days) — under `standard`,
+`shadow` and `off` alike, since that rule is level-blind (§2.3).
 
 ## 3. What does not change, and known limits
 
 - `standard` is the rc.1 gate except for two deliberate, documented changes: the block-aligned `support_sessions`
   (the two-session rule fires in a resumed session, as the rc.2 ladder already does) and the knowledge-replacement TTL
-  of §2.7. `shadow` and `off` are unchanged; `kind_without_signal` applies to extraction under every level.
+  of §2.7. Both apply under every level, because the two-session rule has never been gated by `autonomy_level`
+  (§2.3), and so does its human veto (`target_human_rejected` / `candidate_human_rejected`). `shadow` logs
+  `decideTier` decisions only (`audit_log(auto_activation_shadow)`): a contested active auto row can still be
+  superseded, and its replacement activated, by the two-session rule under every level, as under rc.1. `off` likewise:
+  `decideTier` never activates anything, the two-session rule still runs. `kind_without_signal` applies to extraction
+  under every level.
 - A `stale` proposal against a *candidate* target has no automatic resolution and does not hold the candidate: the
   two-session rule applies once the target is active, otherwise the proposal expires.
 - A contest that is not resolvable — human target, human-signal rule unmet, replacement below the bar, merge-parked
-  replacement, expired proposal — leaves both rows as rc.2 left them: the target follows its own rules and the
-  replacement stays parked until the candidate expiry or until a new extraction names the live row. The one dogfood
+  replacement, expired proposal — leaves the contest open and both rows as rc.2 left them: the target follows its own
+  rules (it is swept like any other candidate; nothing is held) and the replacement stays parked until the candidate
+  expiry or until a new extraction names the live row. A contest held by rule 4b is not unresolvable: the contest
+  above it settles it in the same pass. The one dogfood
   pair this applies to ("no other prod system accesses tleft2 MariaDB tables", born from a correction + remember
   episode, versus "Foreign TBL_* tables are read by an external client", born from a failure → resolution episode
   without a human-signal supporter) is a deliberate outcome of rule 3, not a gap: a correction by the user resolves it.
@@ -231,13 +289,13 @@ Verified by re-running the sandbox (`hm db:migrate`, then `hm dream` until the s
 - `src/db/repositories/common.ts` (`decisionEpisodeSql`, `sessionBlockKeySql`), `provenance.ts` (`hasDecisionOrigin`),
   `proposals.ts` (`recomputeDerived` block-aligned). Tests: `repositories-provenance`, `repositories-proposals`.
 - `src/promotion/transitions.ts` (edges, doc table); `src/promotion/proposals.ts` (`transitionReason`, `tierTtlDays`,
-  exported `flagTarget`, `targetOriginHasHumanSignal`, `humanRejectedContest`). Tests: `promotion-transitions`,
-  `proposals`.
+  exported `flagTarget`, `targetOriginHasHumanSignal`, `humanRejectedContest`, `CONTESTING_KINDS`; the human veto of
+  `evaluateAutoDemotion`). Tests: `promotion-transitions`, `proposals`.
 - `src/promotion/authority.ts` (`FULL_DECISION_MARKER_EVIDENCE`, `originDecisionMarker`). Tests: `authority`.
 - `src/dream/reconcile.ts` (`normalizeFact` relabel, `decideTiers`), `src/db/migrations/024_knowledge_kind_signal.sql`,
   `src/core/paths.ts` (`TARGET_USER_VERSION` 24). Tests: `reconcile-replay`, `migrator`, `db-migrations-legacy`.
-- `src/promotion/replacement.ts` (new: `checkSupersedeResolution`, `applySupersedeResolution`, the two constants).
-  Tests: `promotion-replacement` (new).
+- `src/promotion/replacement.ts` (new: `checkSupersedeResolution` with `SupersedeCheckOptions`, `applySupersedeResolution`,
+  `chainTargets`, `CHAIN_MAX_DEPTH`, the two constants). Tests: `promotion-replacement` (new).
 - `src/dream/consolidate.ts` (`fullSweep` phases, savepoints, `sweptSuperseded` / `sweptErrors`), `src/cli/lib/worker-run.ts`,
   `src/dream/worker.ts` (log fields), `src/cli/commands/memory-history.ts` (decision note). Tests: `consolidate`,
   `worker-pipeline`.
@@ -248,5 +306,6 @@ Verified by re-running the sandbox (`hm db:migrate`, then `hm dream` until the s
 
 Hooks never open SQLite; zero model tokens per tool call; the automatic path never touches human rows (upward or
 downward); `deny` and `confirm` are human-only; `transitionMemory` is the only status writer; a claim a human declined is
-never enacted by the automatic path (now including a rejected `supersede` / `stale` on the target); sweep activations
-consume neither daily cap; no account, no telemetry.
+never enacted by the automatic path (now including a rejected `supersede` / `stale` on the target and, in the
+two-session rule under every level, a rejected `activate_*` on the replacement — `target_human_rejected` /
+`candidate_human_rejected`); sweep activations consume neither daily cap; no account, no telemetry.

@@ -57,7 +57,7 @@ from `.prev` in memory without touching the disk.
   the tmp → rename save; the `.bak-v<from>` copy is the rollback point (`hm db:rollback`).
 - `user_version > 24` → `DatabaseNewerThanCodeError`; nothing is changed, read paths stay usable.
 - Legacy fixtures (`test/fixtures/legacy-db/`, real v0.5 installs at versions 9 and 10) are asserted to
-  reach 21 with zero row loss in `test/db-migrations-legacy.test.ts`.
+  reach 24 (`TARGET_USER_VERSION`) with zero row loss in `test/db-migrations-legacy.test.ts`.
 
 ## Post-migrate (`runPostMigrate`)
 

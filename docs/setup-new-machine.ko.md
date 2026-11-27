@@ -1,4 +1,4 @@
-# 새 컴퓨터에서 harness-memory 0.6.0-rc.2 설치하기
+# 새 컴퓨터에서 harness-memory 0.6.0-rc.3 설치하기
 
 두 번째 컴퓨터(Windows 11, macOS, Linux 또는 WSL)에서 dogfood를 시작할 때 위에서부터 따라 하는 체크리스트다. [README.ko.md](../README.ko.md)의 요약이 아니라, 새 기계에서만 생기는 문제를 모아 둔 것이다. 설치·훅·집행 경로(§2–§4, §6의 `memory:why`, §9의 uninstall)는 2026-11-09에 rc.1 tarball을 Windows 11(Node 24)과 WSL Ubuntu 22.04(Node 24, 20)의 새 npm prefix에 설치해 실제로 확인했다; §7의 sudo 없는 우회 경로와 macOS는 확인하지 않았다(`docs/redesign/phase-f-notes.md`의 "Fresh-machine verification" 절).
 
@@ -21,8 +21,8 @@ npm uninstall -g harness-memory
 ## 2. rc 설치
 
 ```bash
-npm install -g https://github.com/smc2315/harness-memory/releases/download/v0.6.0-rc.2/harness-memory-0.6.0-rc.2.tgz
-hm --version      # 0.6.0-rc.2
+npm install -g https://github.com/smc2315/harness-memory/releases/download/v0.6.0-rc.3/harness-memory-0.6.0-rc.3.tgz
+hm --version      # 0.6.0-rc.3
 ```
 
 - npm의 `latest`는 아직 0.5.1이다. `npm install -g harness-memory`, `npx harness-memory …`는 옛 플러그인을 가져오니 쓰지 않는다. git에서 설치(`github:smc2315/harness-memory#redesign/v0.6`)도 안 된다: `dist/`가 없고 빌드는 `prepack`에서만 돈다.
@@ -114,7 +114,7 @@ hm install --host claude --with-embeddings
 ```bash
 npm login
 npm publish --tag next          # prepack이 빌드한다; 깨끗한 트리에서
-npm dist-tag ls harness-memory  # latest 0.5.1, next 0.6.0-rc.2
+npm dist-tag ls harness-memory  # latest 0.5.1, next 0.6.0-rc.3
 ```
 
 `latest`는 dogfood 뒤 0.6.0 정식 때 옮긴다. 그때까지 README의 설치 명령은 프리릴리스 tarball이다.

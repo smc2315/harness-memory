@@ -31,8 +31,8 @@ For anyone with an existing `.harness-memory/memory.sqlite` written by 0.3–0.5
 ## Upgrade steps (Claude Code)
 
 ```bash
-# 0.6.0-rc.2 is a GitHub pre-release, not on npm yet: plain `npm install -g harness-memory` still installs 0.5.1
-npm install -g https://github.com/smc2315/harness-memory/releases/download/v0.6.0-rc.2/harness-memory-0.6.0-rc.2.tgz
+# 0.6.0-rc.3 is a GitHub pre-release, not on npm yet: plain `npm install -g harness-memory` still installs 0.5.1
+npm install -g https://github.com/smc2315/harness-memory/releases/download/v0.6.0-rc.3/harness-memory-0.6.0-rc.3.tgz
 #   (once published: npm install -g harness-memory@next; or update the project devDependency the same way)
 cd <project>
 hm install --host claude                   # migrates memory.sqlite → v24 (backup first), builds the snapshot, registers 9 hooks
